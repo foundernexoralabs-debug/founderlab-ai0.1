@@ -1,0 +1,6 @@
+{
+  "framework": "vite",
+  "functions": {
+    "api/ai.js": { "maxDuration": 30 }
+  }
+}
