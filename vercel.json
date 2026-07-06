@@ -1,6 +1,4 @@
 {
-  "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "framework": "vite",
-  "serverless_function_region": "us-east-1"
+  "framework": "vite"
 }
