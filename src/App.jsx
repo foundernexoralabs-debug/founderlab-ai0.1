@@ -5,6 +5,24 @@
 // ============================================================
 import React, { useState, useEffect, useRef } from 'react'
 
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null } }
+  static getDerivedStateFromError(err) { return { err } }
+  render() {
+    if (this.state.err) return (
+      <div style={{ minHeight:'100vh', background:'#09090f', display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
+        <div style={{ background:'#0f0f1a', border:'1px solid rgba(255,255,255,.07)', borderRadius:12, padding:32, maxWidth:480, width:'100%', textAlign:'center' }}>
+          <div style={{ fontSize:32, marginBottom:16 }}>⚠️</div>
+          <h2 style={{ color:'#eeeef8', margin:'0 0 8px', fontSize:18 }}>Something went wrong</h2>
+          <p style={{ color:'#8888b0', fontSize:13, margin:'0 0 20px' }}>{this.state.err?.message || 'Unexpected error'}</p>
+          <button onClick={()=>window.location.reload()} style={{ background:'#6366f1', color:'#fff', border:'none', borderRadius:8, padding:'10px 24px', fontSize:14, cursor:'pointer', fontFamily:'inherit' }}>Reload App</button>
+        </div>
+      </div>
+    )
+    return this.props.children
+  }
+}
+
 // ── ENV ──────────────────────────────────────────────────────
 const SB_URL  = import.meta.env.VITE_SUPABASE_URL  || ''
 const SB_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
@@ -75,7 +93,7 @@ const sb = {
   async _get(path) {
     try {
       const res = await fetch(`${SB_URL}/rest/v1/${path}`, { headers: this._h() })
-      return res.ok ? res.json() : null
+      return res.ok ? await res.json() : null
     } catch { return null }
   },
   async _patch(path, body) {
@@ -92,7 +110,7 @@ const sb = {
   },
 
   async getProfile()       { const d = await this._get(`profiles?id=eq.${this.session.user_id}&select=*`); return Array.isArray(d) ? d[0] || null : null },
-  async updateProfile(obj) { return this._patch(`profiles?id=eq.${this.session.user_id}`, obj) },
+  async updateProfile(obj) { return this._post('profiles', { id: this.session.user_id, ...obj }, 'resolution=merge-duplicates,return=minimal') },
   async getData(key)       { const d = await this._get(`user_data?user_id=eq.${this.session.user_id}&key=eq.${encodeURIComponent(key)}&select=value`); return Array.isArray(d) && d.length ? d[0].value : null },
   async setData(key, val)  { return this._post('user_data', { user_id: this.session.user_id, key, value: val }, 'resolution=merge-duplicates,return=minimal') },
   async exportAll()        { return this._get(`user_data?user_id=eq.${this.session.user_id}&select=key,value`) || [] },
@@ -1407,19 +1425,19 @@ const MNAV=[
   {id:'settings', label:'More', icon:'⚙'},
 ]
 
-function Sidebar({ page, setPage, user, profile, collapsed, setCollapsed, onFeedback }) {
-  function NavBtn({ id, label, icon }) {
-    const act=page===id
-    const [hov, setHov]=useState(false)
-    return (
-      <div onClick={()=>setPage(id)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} title={collapsed?label:undefined}
-        style={{ display:'flex', alignItems:'center', gap:10, padding:collapsed?'9px 0':'9px 12px', justifyContent:collapsed?'center':'flex-start', borderRadius:8, cursor:'pointer', marginBottom:2, background:act?C.accentM:'transparent', color:act?C.accent:hov?C.t1:C.t2, border:`1px solid ${act?C.borderFocus:hov?C.border:'transparent'}`, transition:'all .15s' }}>
-        <span style={{ fontSize:16, flexShrink:0 }}>{icon}</span>
-        {!collapsed && <span style={{ fontSize:13, fontWeight:act?500:400, whiteSpace:'nowrap' }}>{label}</span>}
-      </div>
-    )
-  }
+function NavBtn({ id, label, icon, page, setPage, collapsed }) {
+  const act=page===id
+  const [hov, setHov]=useState(false)
+  return (
+    <div onClick={()=>setPage(id)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} title={collapsed?label:undefined}
+      style={{ display:'flex', alignItems:'center', gap:10, padding:collapsed?'9px 0':'9px 12px', justifyContent:collapsed?'center':'flex-start', borderRadius:8, cursor:'pointer', marginBottom:2, background:act?C.accentM:'transparent', color:act?C.accent:hov?C.t1:C.t2, border:`1px solid ${act?C.borderFocus:hov?C.border:'transparent'}`, transition:'all .15s' }}>
+      <span style={{ fontSize:16, flexShrink:0 }}>{icon}</span>
+      {!collapsed && <span style={{ fontSize:13, fontWeight:act?500:400, whiteSpace:'nowrap' }}>{label}</span>}
+    </div>
+  )
+}
 
+function Sidebar({ page, setPage, user, profile, collapsed, setCollapsed, onFeedback }) {
   return (
     <div style={{ width:collapsed?C.sidebarSm:C.sidebar, height:'100vh', background:C.surf, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', transition:'width .2s ease', flexShrink:0, overflow:'hidden', position:'sticky', top:0 }}>
       <div style={{ display:'flex', alignItems:'center', justifyContent:collapsed?'center':'space-between', padding:collapsed?'16px 0':'16px 12px', borderBottom:`1px solid ${C.border}` }}>
@@ -1430,10 +1448,10 @@ function Sidebar({ page, setPage, user, profile, collapsed, setCollapsed, onFeed
         <button onClick={()=>setCollapsed(!collapsed)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:14, padding:4, lineHeight:1, flexShrink:0 }}>{collapsed?'›':'‹'}</button>
       </div>
       <div style={{ flex:1, padding:collapsed?'12px 6px':'12px 8px', overflowY:'auto' }}>
-        {NAV.map(n=><NavBtn key={n.id} {...n} />)}
+        {NAV.map(n=><NavBtn key={n.id} {...n} page={page} setPage={setPage} collapsed={collapsed} />)}
       </div>
       <div style={{ padding:collapsed?'12px 6px':'12px 8px', borderTop:`1px solid ${C.border}` }}>
-        <NavBtn id="settings" label="Settings" icon="⚙" />
+        <NavBtn id="settings" label="Settings" icon="⚙" page={page} setPage={setPage} collapsed={collapsed} />
         <div onClick={onFeedback} title={collapsed?'Feedback':undefined}
           style={{ display:'flex', alignItems:'center', gap:10, padding:collapsed?'9px 0':'9px 12px', justifyContent:collapsed?'center':'flex-start', borderRadius:8, cursor:'pointer', color:C.t2, marginBottom:4, transition:'all .15s' }}>
           <span style={{ fontSize:16 }}>💬</span>
@@ -1474,7 +1492,7 @@ function MobileBottomNav({ page, setPage }) {
 }
 
 // ── APP ROOT ──────────────────────────────────────────────────
-export default function App() {
+function AppInner() {
   const [state, setState]     = useState('booting') // booting|setup|auth|onboarding|app
   const [page, setPage]       = useState('dashboard')
   const [profile, setProfile] = useState(null)
@@ -1511,8 +1529,11 @@ export default function App() {
   }
 
   async function afterOnboarding() {
-    const p=await sb.getProfile()
-    setProfile(p); setState('app')
+    try {
+      const p=await sb.getProfile()
+      setProfile(p)
+    } catch {}
+    setState('app')
   }
 
   async function signOut() {
@@ -1564,4 +1585,8 @@ export default function App() {
       )}
     </>
   )
+}
+
+export default function App() {
+  return <ErrorBoundary><AppInner /></ErrorBoundary>
 }
