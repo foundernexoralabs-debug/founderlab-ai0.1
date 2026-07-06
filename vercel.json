@@ -1,6 +1,6 @@
 {
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "framework": "vite",
-  "functions": {
-    "api/ai.js": { "maxDuration": 30 }
-  }
+  "serverless_function_region": "us-east-1"
 }
