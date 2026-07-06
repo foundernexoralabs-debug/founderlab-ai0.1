@@ -1,6 +1,5 @@
 node_modules
 .next
-dist
 .git
 .env.local
 .env.example
