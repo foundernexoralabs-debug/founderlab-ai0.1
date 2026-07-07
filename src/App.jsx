@@ -1435,120 +1435,125 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       )}
 
       {tab==='ai' && (
-        <div style={{ maxWidth:580 }}>
-          {/* Provider toggle */}
-          <Card style={{ padding:24, marginBottom:16 }}>
-            <h3 style={{ margin:'0 0 16px', fontSize:15, fontWeight:700, color:C.t1 }}>AI Provider</h3>
-            <div style={{ display:'flex', gap:10, marginBottom:8 }}>
-              {[{id:'anthropic',label:'Anthropic Claude',icon:'✦',sub:'Cloud · GPT-quality'},{id:'ollama',label:'Local Ollama',icon:'🦙',sub:'Free · Private · Offline'}].map(p=>(
-                <button key={p.id} onClick={()=>setAIProv(p.id)} style={{ flex:1, padding:'14px 10px', borderRadius:10, border:`2px solid ${aiProv===p.id?C.accent:C.border}`, background:aiProv===p.id?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', fontWeight:600, fontSize:13, display:'flex', flexDirection:'column', alignItems:'center', gap:4, transition:'all .15s' }}>
-                  <span style={{ fontSize:24 }}>{p.icon}</span>
-                  <span style={{ color:aiProv===p.id?C.accent:C.t1 }}>{p.label}</span>
-                  <span style={{ fontSize:10, color:aiProv===p.id?C.accent:C.t3, fontWeight:400 }}>{p.sub}</span>
-                  {aiProv===p.id && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', marginTop:2 }}>Active</span>}
-                </button>
-              ))}
+        <div style={{ maxWidth:520 }}>
+          <p style={{ margin:'0 0 20px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
+            Choose how FounderLab AI generates responses. Your choice applies to every feature — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder.
+          </p>
+
+          {/* ── CARD 1: Anthropic Cloud ── */}
+          <div onClick={()=>setAIProv('anthropic')} style={{ cursor:'pointer', marginBottom:12, padding:20, borderRadius:14, border:`2px solid ${aiProv==='anthropic'?C.accent:C.border}`, background:aiProv==='anthropic'?C.accentM:C.surf, transition:'all .2s', position:'relative' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:aiProv==='anthropic'?16:0 }}>
+              <div style={{ fontSize:28, lineHeight:1 }}>✦</div>
+              <div style={{ flex:1 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <span style={{ fontSize:15, fontWeight:700, color:C.t1 }}>Anthropic Claude</span>
+                  {aiProv==='anthropic' && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
+                </div>
+                <span style={{ fontSize:12, color:C.t3 }}>Cloud AI · Best quality · Needs API key</span>
+              </div>
+              <div style={{ width:20, height:20, borderRadius:'50%', border:`2px solid ${aiProv==='anthropic'?C.accent:C.t3}`, background:aiProv==='anthropic'?C.accent:'transparent', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                {aiProv==='anthropic' && <div style={{ width:8, height:8, borderRadius:'50%', background:'#fff' }} />}
+              </div>
             </div>
-          </Card>
-
-          {aiProv==='anthropic' && (
-            <Card style={{ padding:20 }}>
-              <p style={{ margin:'0 0 6px', fontSize:13, color:C.t1, fontWeight:600 }}>Claude Sonnet 4 via Anthropic API</p>
-              <p style={{ margin:0, fontSize:13, color:C.t2, lineHeight:1.6 }}>Calls go: <strong style={{color:C.t1}}>browser → Vercel server → Anthropic</strong>. Requires <code style={{color:C.accent,background:C.bg,padding:'1px 5px',borderRadius:4}}>ANTHROPIC_API_KEY</code> in your Vercel environment variables. No local setup needed.</p>
-            </Card>
-          )}
-
-          {aiProv==='ollama' && (
-            <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-
-              {/* How it works */}
-              <Card style={{ padding:16, background:'rgba(99,102,241,.06)', border:`1px solid ${C.borderFocus}` }}>
-                <p style={{ margin:'0 0 6px', fontSize:13, fontWeight:700, color:C.accent }}>How Ollama works with this app</p>
-                <p style={{ margin:0, fontSize:12, color:C.t2, lineHeight:1.7 }}>
-                  Your browser calls Ollama <strong style={{color:C.t1}}>directly</strong> — the Vercel server is bypassed entirely because it cannot reach your machine's localhost. This means Ollama runs 100% locally, free, and private.
-                </p>
-              </Card>
-
-              {/* Step 1 — CORS */}
-              <Card style={{ padding:16 }}>
-                <p style={{ margin:'0 0 10px', fontSize:13, fontWeight:700, color:C.t1 }}>Step 1 — Enable CORS in Ollama</p>
-                <p style={{ margin:'0 0 10px', fontSize:12, color:C.t2, lineHeight:1.6 }}>Your browser blocks requests to localhost unless Ollama explicitly allows this origin. You must restart Ollama with <code style={{color:C.accent}}>OLLAMA_ORIGINS=*</code>.</p>
-
-                {[
-                  { os:'macOS / Linux', cmd:'OLLAMA_ORIGINS=* ollama serve' },
-                  { os:'Windows (cmd)', cmd:'set OLLAMA_ORIGINS=* && ollama serve' },
-                  { os:'Windows (PowerShell)', cmd:'$env:OLLAMA_ORIGINS="*"; ollama serve' },
-                ].map(({os,cmd})=>(
-                  <div key={os} style={{ marginBottom:10 }}>
-                    <p style={{ margin:'0 0 4px', fontSize:11, color:C.t3, fontWeight:600, textTransform:'uppercase', letterSpacing:'.05em' }}>{os}</p>
-                    <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-                      <code style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:'7px 10px', fontSize:12, color:C.green, fontFamily:'monospace', overflow:'auto', whiteSpace:'nowrap' }}>{cmd}</code>
-                      <button onClick={()=>copyText(cmd)} title="Copy" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t3, cursor:'pointer', padding:'6px 10px', fontSize:11, fontFamily:'inherit', whiteSpace:'nowrap' }}>Copy</button>
-                    </div>
-                  </div>
-                ))}
-
-                <div style={{ marginTop:6, padding:10, background:C.bg, borderRadius:6, border:`1px solid ${C.border}` }}>
-                  <p style={{ margin:0, fontSize:11, color:C.t3, lineHeight:1.6 }}>
-                    <strong style={{color:C.t2}}>macOS app (menu bar)?</strong> Open Terminal and run: <code style={{color:C.accent}}>launchctl setenv OLLAMA_ORIGINS "*"</code> — then quit and reopen Ollama from menu bar.<br/>
-                    <strong style={{color:C.t2}}>Already running?</strong> Stop it first (Ctrl+C or quit the app), then restart with the command above.
-                  </p>
+            {aiProv==='anthropic' && (
+              <div style={{ paddingTop:14, borderTop:`1px solid ${C.border}` }}>
+                <p style={{ margin:'0 0 10px', fontSize:12, color:C.t2 }}>Paste your Anthropic API key — one time, done forever.</p>
+                <div style={{ display:'flex', gap:8 }}>
+                  <input
+                    type="password"
+                    placeholder="sk-ant-api03-…"
+                    onClick={e=>e.stopPropagation()}
+                    onChange={e=>e.stopPropagation()}
+                    style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }}
+                    readOnly
+                    value="Configured server-side (ANTHROPIC_API_KEY)"
+                  />
                 </div>
-              </Card>
-
-              {/* Step 2 — URL + models */}
-              <Card style={{ padding:16 }}>
-                <p style={{ margin:'0 0 12px', fontSize:13, fontWeight:700, color:C.t1 }}>Step 2 — Connect &amp; select model</p>
-                <div style={{ marginBottom:12 }}>
-                  {lbl('Ollama Host URL')}
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input value={ollamaUrl} onChange={e=>{setOllamaUrl(e.target.value);setOllamaModels([]);setOllamaTest('');setOllamaDetectErr('')}} placeholder="http://localhost:11434"
-                      style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
-                    <Button onClick={detectOllamaModels} disabled={ollamaDetecting} variant="secondary" size="sm">{ollamaDetecting?'Scanning…':'Auto-detect models'}</Button>
-                  </div>
-                </div>
-                <div style={{ marginBottom:12 }}>
-                  {lbl('Model')}
-                  {ollamaModels.length > 0 ? (
-                    <select value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
-                      style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
-                      {ollamaModels.map(m=><option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <input value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)} placeholder="e.g. llama3.2  — or click Auto-detect"
-                      style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
-                  )}
-                  {ollamaModels.length > 0 && <p style={{ margin:'5px 0 0', fontSize:11, color:C.green }}>✓ {ollamaModels.length} model{ollamaModels.length!==1?'s':''} found</p>}
-                  {ollamaDetectErr && <p style={{ margin:'5px 0 0', fontSize:12, color: ollamaDetectErr.startsWith('✅')?C.green:ollamaDetectErr.startsWith('⚠')?C.yellow:C.red }}>{ollamaDetectErr}</p>}
-                </div>
-                <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-                  <Button onClick={testOllama} disabled={ollamaTesting} variant="secondary" size="sm">{ollamaTesting?'Testing…':'Test Connection'}</Button>
-                  {ollamaTest && <span style={{ fontSize:12, color: ollamaTest.startsWith('✅')?C.green:ollamaTest.startsWith('⚠')?C.yellow:C.red, lineHeight:1.4, flex:1 }}>{ollamaTest}</span>}
-                </div>
-              </Card>
-
-              {/* Step 3 — pull model */}
-              <Card style={{ padding:16 }}>
-                <p style={{ margin:'0 0 8px', fontSize:13, fontWeight:700, color:C.t1 }}>Step 3 — Pull a model (if needed)</p>
-                <p style={{ margin:'0 0 10px', fontSize:12, color:C.t2, lineHeight:1.6 }}>If Auto-detect finds no models, pull one first. Recommended for most machines:</p>
-                {[
-                  { label:'Llama 3.2 3B (fast, 2GB)', cmd:'ollama pull llama3.2' },
-                  { label:'Llama 3.2 1B (tiny, 1GB)', cmd:'ollama pull llama3.2:1b' },
-                  { label:'Mistral 7B (quality, 4GB)', cmd:'ollama pull mistral' },
-                ].map(({label,cmd})=>(
-                  <div key={cmd} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
-                    <code style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 10px', fontSize:12, color:C.green, fontFamily:'monospace' }}>{cmd}</code>
-                    <button onClick={()=>copyText(cmd)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t3, cursor:'pointer', padding:'5px 10px', fontSize:11, fontFamily:'inherit' }}>Copy</button>
-                    <span style={{ fontSize:11, color:C.t3, whiteSpace:'nowrap' }}>{label}</span>
-                  </div>
-                ))}
-              </Card>
-            </div>
-          )}
-
-          <div style={{ marginTop:16 }}>
-            <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
+                <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3 }}>Key is set in your Vercel environment. No client-side exposure. ✓</p>
+              </div>
+            )}
           </div>
+
+          {/* ── CARD 2: Local Ollama ── */}
+          <div onClick={()=>{ setAIProv('ollama'); if(!ollamaModels.length && !ollamaDetecting) detectOllamaModels() }} style={{ cursor:'pointer', marginBottom:16, padding:20, borderRadius:14, border:`2px solid ${aiProv==='ollama'?C.accent:C.border}`, background:aiProv==='ollama'?C.accentM:C.surf, transition:'all .2s' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:aiProv==='ollama'?16:0 }}>
+              <div style={{ fontSize:28, lineHeight:1 }}>🦙</div>
+              <div style={{ flex:1 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <span style={{ fontSize:15, fontWeight:700, color:C.t1 }}>Local Ollama</span>
+                  {aiProv==='ollama' && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
+                </div>
+                <span style={{ fontSize:12, color:C.t3 }}>100% private · Free forever · Runs on your machine</span>
+              </div>
+              <div style={{ width:20, height:20, borderRadius:'50%', border:`2px solid ${aiProv==='ollama'?C.accent:C.t3}`, background:aiProv==='ollama'?C.accent:'transparent', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                {aiProv==='ollama' && <div style={{ width:8, height:8, borderRadius:'50%', background:'#fff' }} />}
+              </div>
+            </div>
+
+            {aiProv==='ollama' && (
+              <div onClick={e=>e.stopPropagation()} style={{ paddingTop:14, borderTop:`1px solid ${C.border}`, display:'flex', flexDirection:'column', gap:12 }}>
+
+                {/* Status banner */}
+                {ollamaDetecting && (
+                  <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 14px', background:C.bg, borderRadius:8, border:`1px solid ${C.border}` }}>
+                    <Spinner size={14} color={C.accent} /> <span style={{ fontSize:13, color:C.t2 }}>Scanning for models…</span>
+                  </div>
+                )}
+                {!ollamaDetecting && ollamaTest.startsWith('✅') && (
+                  <div style={{ padding:'10px 14px', background:'rgba(16,185,129,.08)', borderRadius:8, border:'1px solid rgba(16,185,129,.25)' }}>
+                    <span style={{ fontSize:13, color:C.green }}>{ollamaTest}</span>
+                  </div>
+                )}
+                {!ollamaDetecting && ollamaDetectErr && (
+                  <div style={{ padding:'10px 14px', background: ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.08)':'rgba(239,68,68,.08)', borderRadius:8, border:`1px solid ${ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}` }}>
+                    <p style={{ margin:'0 0 4px', fontSize:13, color: ollamaDetectErr.startsWith('⚠')?C.yellow:C.red }}>{ollamaDetectErr}</p>
+                    {!ollamaDetectErr.startsWith('✅') && (
+                      <details style={{ marginTop:8 }}>
+                        <summary style={{ fontSize:11, color:C.t3, cursor:'pointer' }}>▸ Fix: start Ollama with CORS enabled</summary>
+                        <div style={{ marginTop:8, display:'flex', gap:6, alignItems:'center' }}>
+                          <code style={{ flex:1, background:C.bg, borderRadius:6, padding:'6px 10px', fontSize:11, color:C.green, fontFamily:'monospace', border:`1px solid ${C.border}` }}>OLLAMA_ORIGINS=* ollama serve</code>
+                          <button onClick={()=>copyText('OLLAMA_ORIGINS=* ollama serve')} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t3, cursor:'pointer', padding:'5px 8px', fontSize:11, fontFamily:'inherit' }}>Copy</button>
+                        </div>
+                        <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3 }}>macOS menu bar: run <code style={{color:C.accent}}>launchctl setenv OLLAMA_ORIGINS "*"</code> then restart Ollama.</p>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* Model selector — dropdown if found, text fallback */}
+                <div>
+                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                    {ollamaModels.length > 0 ? (
+                      <select value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
+                        style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
+                        {ollamaModels.map(m=><option key={m} value={m}>{m}</option>)}
+                      </select>
+                    ) : (
+                      <input value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
+                        placeholder="No models yet — click Connect"
+                        style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
+                    )}
+                    <Button onClick={detectOllamaModels} disabled={ollamaDetecting} variant="secondary" size="sm">
+                      {ollamaDetecting ? <Spinner size={12} color={C.accent}/> : ollamaModels.length ? '↻ Refresh' : 'Connect'}
+                    </Button>
+                  </div>
+                  {ollamaModels.length > 0 && (
+                    <p style={{ margin:'5px 0 0', fontSize:11, color:C.green }}>✓ {ollamaModels.length} model{ollamaModels.length!==1?'s':''} found — all features will use {ollamaModel||ollamaModels[0]}</p>
+                  )}
+                </div>
+
+                {/* Custom URL */}
+                <details>
+                  <summary style={{ fontSize:11, color:C.t3, cursor:'pointer' }}>▸ Custom Ollama URL (default: localhost:11434)</summary>
+                  <input value={ollamaUrl} onChange={e=>{setOllamaUrl(e.target.value);setOllamaModels([]);setOllamaTest('');setOllamaDetectErr('')}}
+                    placeholder="http://localhost:11434"
+                    style={{ marginTop:8, width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
+                </details>
+              </div>
+            )}
+          </div>
+
+          <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
         </div>
       )}
 
