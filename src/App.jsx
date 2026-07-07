@@ -147,14 +147,40 @@ async function migrateLocalToCloud() {
 }
 
 // ── AI HELPER ────────────────────────────────────────────────
+// ── AI PROVIDER ──────────────────────────────────────────────
+const AI_PROV_KEY = 'fl_ai_provider'
+const AI_OLLAMA_URL_KEY = 'fl_ollama_url'
+const AI_OLLAMA_MODEL_KEY = 'fl_ollama_model'
+
+function getAIProvider()   { try { return localStorage.getItem(AI_PROV_KEY) || 'anthropic' } catch { return 'anthropic' } }
+function getOllamaURL()    { try { return localStorage.getItem(AI_OLLAMA_URL_KEY) || 'http://localhost:11434' } catch { return 'http://localhost:11434' } }
+function getOllamaModel()  { try { return localStorage.getItem(AI_OLLAMA_MODEL_KEY) || 'llama3.2' } catch { return 'llama3.2' } }
+
 async function ai(messages, system = '', max = 1200) {
+  const provider = getAIProvider()
   try {
-    const r = await fetch('/api/ai', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: max, ...(system && { system }), messages }),
-    })
-    const d = await r.json()
-    return d.content?.map(c => c.text || '').join('') || 'No response.'
+    if (provider === 'ollama') {
+      const base = getOllamaURL().replace(/\/$/, '')
+      const model = getOllamaModel()
+      const ollamaMsgs = system
+        ? [{ role: 'system', content: system }, ...messages]
+        : messages
+      const r = await fetch('/api/ai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'ollama', ollamaUrl: base, model, messages: ollamaMsgs, max_tokens: max }),
+      })
+      const d = await r.json()
+      if (d.error) return '⚠ Ollama error: ' + d.error
+      return d.content?.map(c => c.text || '').join('') || d.message?.content || 'No response.'
+    } else {
+      const r = await fetch('/api/ai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: max, ...(system && { system }), messages }),
+      })
+      const d = await r.json()
+      if (d.error) return '⚠ AI error: ' + d.error
+      return d.content?.map(c => c.text || '').join('') || 'No response.'
+    }
   } catch (e) { return '⚠ AI error: ' + e.message }
 }
 
@@ -529,7 +555,7 @@ function Dashboard({ user, profile, setPage }) {
                 return (
                   <div key={s.k} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6, flex:1, minWidth:0 }}>
                     <span style={{ fontSize:11, color:C.t2, fontWeight:600, height:16 }}>{n||''}</span>
-                    <div style={{ width:'100%', height, background:s.color, borderRadius:'4px 4px 0 0', opacity:n>0?1:0.15, transition:'height .4s ease' }} />
+                    <div style={{ width:'100%', height:h, background:s.color, borderRadius:'4px 4px 0 0', opacity:n>0?1:0.15, transition:'height .4s ease' }} />
                     <span style={{ fontSize:10, color:C.t3, textAlign:'center', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', width:'100%' }}>{s.label}</span>
                   </div>
                 )
@@ -1226,6 +1252,11 @@ function BuilderPage({ user }) {
 function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [tab, setTab]       = useState('profile')
   const [name, setName]     = useState(profile?.full_name||'')
+  const [aiProv, setAIProv] = useState(getAIProvider)
+  const [ollamaUrl, setOllamaUrl] = useState(getOllamaURL)
+  const [ollamaModel, setOllamaModel] = useState(getOllamaModel)
+  const [ollamaTest, setOllamaTest] = useState('')
+  const [ollamaTesting, setOllamaTesting] = useState(false)
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
   const [saving, setSaving] = useState(false)
@@ -1284,7 +1315,30 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   }
 
   const fbF=feedbacks.filter(f=>fbFilter==='all'||f.type===fbFilter)
-  const tabs=[{id:'profile',l:'Profile'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
+  const tabs=[{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
+
+  function saveAISettings() {
+    try {
+      localStorage.setItem(AI_PROV_KEY, aiProv)
+      localStorage.setItem(AI_OLLAMA_URL_KEY, ollamaUrl)
+      localStorage.setItem(AI_OLLAMA_MODEL_KEY, ollamaModel)
+      toast('AI settings saved', 'success')
+    } catch { toast('Failed to save', 'error') }
+  }
+
+  async function testOllama() {
+    setOllamaTesting(true); setOllamaTest('')
+    try {
+      const r = await fetch('/api/ai', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ provider:'ollama', ollamaUrl, model:ollamaModel, messages:[{role:'user',content:'Reply with exactly: OK'}], max_tokens:20 }),
+      })
+      const d = await r.json()
+      const txt = d.content?.[0]?.text || d.error || 'No response'
+      setOllamaTest(txt.includes('⚠') || d.error ? '❌ ' + (d.error||txt) : '✅ Connected — ' + txt.trim())
+    } catch(e) { setOllamaTest('❌ ' + e.message) }
+    setOllamaTesting(false)
+  }
 
   return (
     <div style={{ height:'100%', overflowY:'auto', padding:'32px 32px 48px', maxWidth:680 }}>
@@ -1312,6 +1366,49 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             <p style={{ margin:'0 0 16px', color:C.t2, fontSize:14 }}>You'll need to sign in again after signing out.</p>
             <Button onClick={onSignOut} variant="danger">Sign Out</Button>
           </Card>
+        </div>
+      )}
+
+      {tab==='ai' && (
+        <div style={{ maxWidth:520 }}>
+          <Card style={{ padding:24, marginBottom:16 }}>
+            <h3 style={{ margin:'0 0 18px', fontSize:15, fontWeight:700, color:C.t1 }}>AI Provider</h3>
+            <div style={{ display:'flex', gap:10, marginBottom:24 }}>
+              {[{id:'anthropic',label:'Anthropic Claude',icon:'✦'},{id:'ollama',label:'Local Ollama',icon:'🦙'}].map(p=>(
+                <button key={p.id} onClick={()=>setAIProv(p.id)} style={{ flex:1, padding:'14px 10px', borderRadius:10, border:`2px solid ${aiProv===p.id?C.accent:C.border}`, background:aiProv===p.id?C.accentM:C.surf, color:aiProv===p.id?C.accent:C.t2, cursor:'pointer', fontFamily:'inherit', fontWeight:600, fontSize:13, display:'flex', flexDirection:'column', alignItems:'center', gap:6, transition:'all .15s' }}>
+                  <span style={{ fontSize:22 }}>{p.icon}</span>
+                  <span>{p.label}</span>
+                  {aiProv===p.id && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px' }}>Active</span>}
+                </button>
+              ))}
+            </div>
+            {aiProv==='anthropic' && (
+              <div style={{ padding:14, background:C.bg, borderRadius:8, border:`1px solid ${C.border}` }}>
+                <p style={{ margin:0, fontSize:13, color:C.t2, lineHeight:1.6 }}>Using <strong style={{color:C.t1}}>Claude Sonnet 4</strong> via Anthropic API. Requires <code style={{color:C.accent}}>ANTHROPIC_API_KEY</code> to be set on the server.</p>
+              </div>
+            )}
+            {aiProv==='ollama' && (
+              <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                <div style={{ padding:14, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, color:C.t2, lineHeight:1.6 }}>
+                  Run Ollama locally at <code style={{color:C.accent}}>localhost:11434</code>. Works with any model — Llama 3.2, Mistral, Gemma 2 and more. <strong style={{color:C.t1}}>Completely free &amp; private.</strong>
+                </div>
+                <div>
+                  {lbl('Ollama Base URL')}
+                  <input value={ollamaUrl} onChange={e=>setOllamaUrl(e.target.value)} placeholder="http://localhost:11434" style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', boxSizing:'border-box', outline:'none' }} />
+                </div>
+                <div>
+                  {lbl('Model Name')}
+                  <input value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)} placeholder="llama3.2" style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', boxSizing:'border-box', outline:'none' }} />
+                  <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3 }}>Examples: llama3.2, llama3.2:1b, mistral, gemma2:2b, phi3</p>
+                </div>
+                <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                  <Button onClick={testOllama} disabled={ollamaTesting} variant="secondary" size="sm">{ollamaTesting?'Testing…':'Test Connection'}</Button>
+                  {ollamaTest && <span style={{ fontSize:13, color: ollamaTest.startsWith('✅')?C.green:C.red }}>{ollamaTest}</span>}
+                </div>
+              </div>
+            )}
+          </Card>
+          <Button onClick={saveAISettings} full>Save AI Settings</Button>
         </div>
       )}
 
