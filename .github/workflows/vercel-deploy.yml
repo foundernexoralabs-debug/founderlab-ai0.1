@@ -11,8 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -23,7 +22,7 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
-      - name: Build locally with env vars
+      - name: Build locally with env vars baked in
         run: vercel build --prod --yes --token "$VERCEL_TOKEN"
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -33,8 +32,18 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Deploy prebuilt output to Vercel
-        run: vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"
+      - name: Deploy to Vercel and capture URL
+        id: deploy
+        run: |
+          OUTPUT=$(vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN" 2>&1)
+          echo "$OUTPUT"
+          URL=$(echo "$OUTPUT" | grep -Eo 'https://[a-zA-Z0-9._-]+\.vercel\.app' | tail -1)
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "## ✅ Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Live URL:** $URL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Copy this URL into the \`NEXT_PUBLIC_FOUNDERLAB_URL\` env var on the brand site Vercel project." >> $GITHUB_STEP_SUMMARY
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
