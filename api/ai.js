@@ -69,7 +69,7 @@ async function handleGroq(req, res, { model, messages, system, max_tokens }) {
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: model || 'llama-3.3-70b-versatile',
+      model: model || 'llama-3.2-70b-versatile',
       messages: fullMessages,
       max_tokens: max_tokens || 1200,
     }),
@@ -85,7 +85,7 @@ async function handleGemini(req, res, { model, messages, system, max_tokens }) {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return err(res, 500, 'GEMINI_API_KEY is not configured on the server.')
 
-  const geminiModel = model || 'gemini-2.0-flash-exp'
+  const geminiModel = model || 'gemini-1.5-flash'
 
   // Convert OpenAI-style messages to Gemini contents format
   // Gemini uses "user"/"model" (not "assistant"), and each message is { role, parts:[{text}] }
