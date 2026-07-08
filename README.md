@@ -264,3 +264,4 @@ ai(messages, system, max)   ← all features call this
     ↓ cloud provider?
     → POST /api/ai  →  Vercel serverless  →  reads process.env  →  provider API
 ```
+✅ Added free Groq + Gemini AI support
