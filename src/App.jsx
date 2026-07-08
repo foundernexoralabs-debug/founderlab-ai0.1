@@ -147,78 +147,144 @@ async function migrateLocalToCloud() {
 }
 
 // ── AI HELPER ────────────────────────────────────────────────
-// ── AI PROVIDER ──────────────────────────────────────────────
-const AI_PROV_KEY         = 'fl_ai_provider'
-const AI_OLLAMA_URL_KEY   = 'fl_ollama_url'
-const AI_OLLAMA_MODEL_KEY = 'fl_ollama_model'
+// ── AI PROVIDER MANAGER ──────────────────────────────────────
+// All keys live server-side (process.env). Frontend stores only
+// provider selection and non-secret config in localStorage.
 
-function getAIProvider()  { try { return localStorage.getItem(AI_PROV_KEY)         || 'anthropic'             } catch { return 'anthropic' } }
-function getOllamaURL()   { try { return localStorage.getItem(AI_OLLAMA_URL_KEY)   || 'http://localhost:11434' } catch { return 'http://localhost:11434' } }
-function getOllamaModel() { try { return localStorage.getItem(AI_OLLAMA_MODEL_KEY) || ''                      } catch { return '' } }
+const LS_PROVIDER  = 'fl_ai_provider'
+const LS_MODELS    = 'fl_ai_models'    // { anthropic, groq, gemini } model per provider
+const LS_OLLAMA_URL   = 'fl_ollama_url'
+const LS_OLLAMA_MODEL = 'fl_ollama_model'
 
-// Probe Ollama: returns { models, corsOk, running }
-// Uses no-cors fallback to distinguish "running but CORS blocked" vs "not running at all"
+// Catalogue — defines every supported provider and its available models
+const PROVIDERS = {
+  anthropic: {
+    id: 'anthropic', name: 'Anthropic Claude', icon: '✦',
+    sub: 'Best quality · Cloud API',
+    models: [
+      { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4 (recommended)' },
+      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (fastest)' },
+      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6 (most capable)' },
+    ],
+    default: 'claude-sonnet-4-20250514',
+    keyEnv: 'ANTHROPIC_API_KEY',
+    docsUrl: 'https://console.anthropic.com',
+  },
+  groq: {
+    id: 'groq', name: 'Groq', icon: '⚡',
+    sub: 'Ultra-fast inference · Free tier',
+    models: [
+      { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B (recommended)' },
+      { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B (fastest)' },
+      { id: 'mixtral-8x7b-32768', label: 'Mixtral 8x7B' },
+      { id: 'gemma2-9b-it', label: 'Gemma 2 9B' },
+    ],
+    default: 'llama-3.3-70b-versatile',
+    keyEnv: 'GROQ_API_KEY',
+    docsUrl: 'https://console.groq.com',
+  },
+  gemini: {
+    id: 'gemini', name: 'Google Gemini', icon: '✶',
+    sub: 'Google AI · Generous free tier',
+    models: [
+      { id: 'gemini-2.0-flash-exp', label: 'Gemini 2.0 Flash (recommended)' },
+      { id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+      { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (fastest)' },
+    ],
+    default: 'gemini-2.0-flash-exp',
+    keyEnv: 'GEMINI_API_KEY',
+    docsUrl: 'https://aistudio.google.com/app/apikey',
+  },
+  ollama: {
+    id: 'ollama', name: 'Local Ollama', icon: '🦙',
+    sub: '100% private · Free forever · Your machine',
+    models: [],   // populated at runtime by probing localhost
+    default: '',
+    keyEnv: null,
+    docsUrl: 'https://ollama.com',
+  },
+}
+
+// Storage helpers
+function getAIProvider()        { try { return localStorage.getItem(LS_PROVIDER) || 'anthropic' } catch { return 'anthropic' } }
+function setAIProviderLS(id)    { try { localStorage.setItem(LS_PROVIDER, id) } catch {} }
+function getProviderModel(id)   { try { const m = JSON.parse(localStorage.getItem(LS_MODELS)||'{}'); return m[id] || PROVIDERS[id]?.default || '' } catch { return PROVIDERS[id]?.default || '' } }
+function setProviderModel(id,m) { try { const all = JSON.parse(localStorage.getItem(LS_MODELS)||'{}'); all[id]=m; localStorage.setItem(LS_MODELS, JSON.stringify(all)) } catch {} }
+function getOllamaURL()         { try { return localStorage.getItem(LS_OLLAMA_URL)   || 'http://localhost:11434' } catch { return 'http://localhost:11434' } }
+function getOllamaModel()       { try { return localStorage.getItem(LS_OLLAMA_MODEL) || '' } catch { return '' } }
+
+// Electron desktop bridge detection
+const IS_ELECTRON = typeof window !== 'undefined' && !!window.electronBridge?.isElectron
+
+// ── Ollama helpers (browser-direct or Electron IPC — no API key) ──
+
 async function ollamaProbe(base) {
   const url = (base || getOllamaURL()).replace(/\/$/, '')
+  if (IS_ELECTRON) {
+    try { return await window.electronBridge.ollama.probe(url) } catch { return { running: false, corsOk: true, models: [] } }
+  }
   try {
     const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(5000) })
     if (r.ok) {
-      const d = await r.json()
+      const d  = await r.json()
       const models = (d.models || []).map(m => m.name).filter(Boolean)
       return { models, corsOk: true, running: true }
     }
     return { models: [], corsOk: true, running: false }
   } catch {
-    try {
-      await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(3000) })
-      return { models: [], corsOk: false, running: true }   // opaque → running, CORS blocked
-    } catch {
-      return { models: [], corsOk: false, running: false }  // network error → not running
-    }
+    try { await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(3000) }); return { models: [], corsOk: false, running: true } }
+    catch { return { models: [], corsOk: false, running: false } }
   }
 }
 
-// Browser-direct Ollama chat — server-side proxy CANNOT reach localhost on your machine
 async function ollamaChat(messages, system, max) {
   const base  = getOllamaURL().replace(/\/$/, '')
-  const model = getOllamaModel() || 'llama3.2'
+  const model = getOllamaModel() || getProviderModel('ollama') || 'llama3.2'
   const msgs  = system ? [{ role: 'system', content: system }, ...messages] : messages
+  if (IS_ELECTRON) {
+    const r = await window.electronBridge.ollama.chat({ url: base, model, messages: msgs, max })
+    if (!r.ok) throw new Error(`Ollama: ${r.data?.error || 'unknown error'}`)
+    return r.data?.message?.content || ''
+  }
   const r = await fetch(`${base}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages: msgs, stream: false, options: { num_predict: max } }),
     signal: AbortSignal.timeout(120000),
   })
-  if (!r.ok) { const err = await r.text().catch(() => r.statusText); throw new Error(`Ollama ${r.status}: ${err}`) }
+  if (!r.ok) { const e = await r.text().catch(() => r.statusText); throw new Error(`Ollama ${r.status}: ${e}`) }
   const d = await r.json()
   return d.message?.content || ''
 }
 
-// All features call ai() — routes to Ollama (browser-direct) or Anthropic (via server)
+// ── ai() — THE single function all features call ──────────────
+// Routes to Ollama (browser-direct) or cloud providers (via /api/ai server).
+// Switching provider requires no changes in any feature component.
 async function ai(messages, system = '', max = 1200) {
   const provider = getAIProvider()
   try {
     if (provider === 'ollama') {
       return (await ollamaChat(messages, system, max)) || 'No response.'
-    } else {
-      const r = await fetch('/api/ai', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: max, ...(system && { system }), messages }),
-      })
-      const d = await r.json()
-      if (d.error) return '⚠ AI error: ' + d.error
-      return d.content?.map(c => c.text || '').join('') || 'No response.'
     }
+    // Cloud providers: key stays on server, never in browser bundle
+    const model = getProviderModel(provider)
+    const r = await fetch('/api/ai', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, model, max_tokens: max, ...(system && { system }), messages }),
+    })
+    const d = await r.json()
+    if (d.error) return `⚠ ${PROVIDERS[provider]?.name || 'AI'} error: ${d.error}`
+    return d.content?.[0]?.text || d.content?.map(c => c.text || '').join('') || 'No response.'
   } catch (e) {
     if (provider === 'ollama') {
-      if (e.name === 'TimeoutError')   return '⚠ Ollama timed out — is it still running?'
+      if (e.name === 'TimeoutError') return '⚠ Ollama timed out — is it still running?'
       if (e.message?.match(/fetch|Failed|NetworkError|cors/i))
         return '⚠ Cannot reach Ollama. Open Settings → AI Provider and complete the CORS setup.'
       return '⚠ Ollama: ' + e.message
     }
-    return '⚠ AI error: ' + e.message
+    return `⚠ ${PROVIDERS[provider]?.name || 'AI'} error: ${e.message}`
   }
 }
+
 
 // ── UTILITIES ────────────────────────────────────────────────
 function uid()  { try { return crypto.randomUUID() } catch { return Date.now().toString(36) + Math.random().toString(36).slice(2) } }
@@ -1288,14 +1354,24 @@ function BuilderPage({ user }) {
 function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [tab, setTab]       = useState('profile')
   const [name, setName]     = useState(profile?.full_name||'')
+
+  // ── AI provider state ──────────────────────────────────────
   const [aiProv, setAIProv] = useState(getAIProvider)
-  const [ollamaUrl, setOllamaUrl] = useState(getOllamaURL)
-  const [ollamaModel, setOllamaModel] = useState(getOllamaModel)
-  const [ollamaTest, setOllamaTest]         = useState('')
-  const [ollamaTesting, setOllamaTesting]   = useState(false)
+  // Per-provider model selections (initialised from localStorage)
+  const [modelMap, setModelMap] = useState(() => {
+    const stored = {}
+    Object.keys(PROVIDERS).forEach(id => { stored[id] = getProviderModel(id) })
+    return stored
+  })
+  // Ollama-specific
+  const [ollamaUrl, setOllamaUrl]           = useState(getOllamaURL)
+  const [ollamaModel, setOllamaModel]       = useState(getOllamaModel)
   const [ollamaModels, setOllamaModels]     = useState([])
   const [ollamaDetecting, setOllamaDetecting] = useState(false)
   const [ollamaDetectErr, setOllamaDetectErr] = useState('')
+  // Shared test state
+  const [testStatus, setTestStatus]   = useState('') // '' | 'testing' | '✅ …' | '❌ …'
+
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
   const [saving, setSaving] = useState(false)
@@ -1353,28 +1429,27 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     } catch (e) { toast('Export error: '+e.message,'error') } finally { setExp(false) }
   }
 
-  const fbF=feedbacks.filter(f=>fbFilter==='all'||f.type===fbFilter)
-  const tabs=[{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
+  const fbF = feedbacks.filter(f=>fbFilter==='all'||f.type===fbFilter)
+  const tabs = [{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
 
+  // ── AI Settings handlers ────────────────────────────────────
   function saveAISettings() {
     try {
-      localStorage.setItem(AI_PROV_KEY, aiProv)
-      localStorage.setItem(AI_OLLAMA_URL_KEY, ollamaUrl)
-      localStorage.setItem(AI_OLLAMA_MODEL_KEY, ollamaModel)
+      setAIProviderLS(aiProv)
+      Object.entries(modelMap).forEach(([id, m]) => setProviderModel(id, m))
+      try { localStorage.setItem(LS_OLLAMA_URL, ollamaUrl) } catch {}
+      try { localStorage.setItem(LS_OLLAMA_MODEL, ollamaModel) } catch {}
       toast('AI settings saved', 'success')
-    } catch { toast('Failed to save', 'error') }
+    } catch { toast('Failed to save settings', 'error') }
   }
 
   async function detectOllamaModels() {
     setOllamaDetecting(true); setOllamaDetectErr(''); setOllamaModels([])
     const { models, corsOk, running } = await ollamaProbe(ollamaUrl)
-    if (!running) {
-      setOllamaDetectErr('❌ Ollama not reachable. Make sure it is running on this machine.')
-    } else if (!corsOk) {
-      setOllamaDetectErr('⚠ Ollama is running but CORS is blocked. Follow Step 1 below, then try again.')
-    } else if (models.length === 0) {
-      setOllamaDetectErr('✅ Connected — but no models found. Run: ollama pull llama3.2')
-    } else {
+    if (!running)           setOllamaDetectErr('❌ Ollama not reachable. Is it running on this machine?')
+    else if (!corsOk)       setOllamaDetectErr('⚠ Ollama is running but CORS is blocked. Start it with OLLAMA_ORIGINS=* ollama serve')
+    else if (!models.length) setOllamaDetectErr('✅ Connected — no models found. Run: ollama pull llama3.2')
+    else {
       setOllamaModels(models)
       if (!ollamaModel || !models.includes(ollamaModel)) setOllamaModel(models[0])
       setOllamaDetectErr('')
@@ -1382,27 +1457,21 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     setOllamaDetecting(false)
   }
 
-  async function testOllama() {
-    setOllamaTesting(true); setOllamaTest('')
-    const { corsOk, running } = await ollamaProbe(ollamaUrl)
-    if (!running) { setOllamaTest('❌ Ollama not running — start it with the command in Step 1 below.'); setOllamaTesting(false); return }
-    if (!corsOk)  { setOllamaTest('⚠ Ollama is running but CORS is blocked. Follow Step 1 below exactly.'); setOllamaTesting(false); return }
+  async function testConnection() {
+    setTestStatus('testing')
     try {
-      const base  = ollamaUrl.replace(/\/$/, '')
-      const model = ollamaModel || 'llama3.2'
-      const r = await fetch(`${base}/api/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages:[{role:'user',content:'Say only: CONNECTED'}], stream:false, options:{num_predict:10} }),
-        signal: AbortSignal.timeout(20000),
-      })
-      if (!r.ok) { const t=await r.text().catch(()=>r.statusText); setOllamaTest(`❌ ${r.status}: ${t}`); setOllamaTesting(false); return }
-      const d = await r.json()
-      const reply = d.message?.content?.trim() || '(empty)'
-      setOllamaTest(`✅ Connected · ${model} replied: "${reply.slice(0,80)}"`)
-    } catch(e) {
-      setOllamaTest('❌ ' + e.message)
-    }
-    setOllamaTesting(false)
+      if (aiProv === 'ollama') {
+        const { corsOk, running } = await ollamaProbe(ollamaUrl)
+        if (!running) { setTestStatus('❌ Ollama not running'); return }
+        if (!corsOk)  { setTestStatus('⚠ CORS blocked — start with OLLAMA_ORIGINS=* ollama serve'); return }
+        const reply = await ollamaChat([{role:'user',content:'Say only: CONNECTED'}], '', 10)
+        setTestStatus(`✅ Connected — ${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"`)
+      } else {
+        const reply = await ai([{role:'user',content:'Say only: CONNECTED'}], '', 20)
+        if (reply.startsWith('⚠')) setTestStatus('❌ ' + reply.replace('⚠ ',''))
+        else setTestStatus(`✅ Connected — ${PROVIDERS[aiProv]?.name} replied: "${reply.trim().slice(0,60)}"`)
+      }
+    } catch (e) { setTestStatus('❌ ' + e.message) }
   }
 
   return (
@@ -1435,123 +1504,122 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       )}
 
       {tab==='ai' && (
-        <div style={{ maxWidth:520 }}>
+        <div style={{ maxWidth:540 }}>
           <p style={{ margin:'0 0 20px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
-            Choose how FounderLab AI generates responses. Your choice applies to every feature — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder.
+            Choose your AI provider. Your selection applies to <strong style={{color:C.t1}}>every feature</strong> — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder. API keys are stored securely on the server, never in your browser.
           </p>
 
-          {/* ── CARD 1: Anthropic Cloud ── */}
-          <div onClick={()=>setAIProv('anthropic')} style={{ cursor:'pointer', marginBottom:12, padding:20, borderRadius:14, border:`2px solid ${aiProv==='anthropic'?C.accent:C.border}`, background:aiProv==='anthropic'?C.accentM:C.surf, transition:'all .2s', position:'relative' }}>
-            <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:aiProv==='anthropic'?16:0 }}>
-              <div style={{ fontSize:28, lineHeight:1 }}>✦</div>
-              <div style={{ flex:1 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <span style={{ fontSize:15, fontWeight:700, color:C.t1 }}>Anthropic Claude</span>
-                  {aiProv==='anthropic' && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
-                </div>
-                <span style={{ fontSize:12, color:C.t3 }}>Cloud AI · Best quality · Needs API key</span>
-              </div>
-              <div style={{ width:20, height:20, borderRadius:'50%', border:`2px solid ${aiProv==='anthropic'?C.accent:C.t3}`, background:aiProv==='anthropic'?C.accent:'transparent', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
-                {aiProv==='anthropic' && <div style={{ width:8, height:8, borderRadius:'50%', background:'#fff' }} />}
-              </div>
-            </div>
-            {aiProv==='anthropic' && (
-              <div style={{ paddingTop:14, borderTop:`1px solid ${C.border}` }}>
-                <p style={{ margin:'0 0 10px', fontSize:12, color:C.t2 }}>Paste your Anthropic API key — one time, done forever.</p>
-                <div style={{ display:'flex', gap:8 }}>
-                  <input
-                    type="password"
-                    placeholder="sk-ant-api03-…"
-                    onClick={e=>e.stopPropagation()}
-                    onChange={e=>e.stopPropagation()}
-                    style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }}
-                    readOnly
-                    value="Configured server-side (ANTHROPIC_API_KEY)"
-                  />
-                </div>
-                <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3 }}>Key is set in your Vercel environment. No client-side exposure. ✓</p>
-              </div>
-            )}
+          {/* ── Provider cards ── */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:20 }}>
+            {Object.values(PROVIDERS).map(p => {
+              const active = aiProv === p.id
+              return (
+                <button key={p.id} onClick={() => { setAIProv(p.id); setTestStatus('') }}
+                  style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}>
+                    <span style={{ fontSize:20 }}>{p.icon}</span>
+                    {active && <span style={{ marginLeft:'auto', fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
+                  </div>
+                  <span style={{ fontSize:13, fontWeight:700, color:active?C.accent:C.t1 }}>{p.name}</span>
+                  <span style={{ fontSize:11, color:C.t3 }}>{p.sub}</span>
+                </button>
+              )
+            })}
           </div>
 
-          {/* ── CARD 2: Local Ollama ── */}
-          <div onClick={()=>{ setAIProv('ollama'); if(!ollamaModels.length && !ollamaDetecting) detectOllamaModels() }} style={{ cursor:'pointer', marginBottom:16, padding:20, borderRadius:14, border:`2px solid ${aiProv==='ollama'?C.accent:C.border}`, background:aiProv==='ollama'?C.accentM:C.surf, transition:'all .2s' }}>
-            <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:aiProv==='ollama'?16:0 }}>
-              <div style={{ fontSize:28, lineHeight:1 }}>🦙</div>
-              <div style={{ flex:1 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <span style={{ fontSize:15, fontWeight:700, color:C.t1 }}>Local Ollama</span>
-                  {aiProv==='ollama' && <span style={{ fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
+          {/* ── Per-provider config panel ── */}
+          <Card style={{ padding:18, marginBottom:16 }}>
+            {aiProv !== 'ollama' && (() => {
+              const p = PROVIDERS[aiProv]
+              return (
+                <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                  <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
+                    Calls go <strong style={{color:C.t1}}>browser → Vercel server → {p.name}</strong>. Your API key is read from the server environment — never sent to the browser.
+                    {' '}<a href={p.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color:C.accent }}>Get API key →</a>
+                  </div>
+                  <div>
+                    <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Model</label>
+                    <select
+                      value={modelMap[aiProv] || p.default}
+                      onChange={e => setModelMap(m => ({...m, [aiProv]: e.target.value}))}
+                      style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
+                      {p.models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ padding:10, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t3 }}>
+                    Server key variable: <code style={{color:C.accent}}>{p.keyEnv}</code> — add this to your <code style={{color:C.t2}}>.env.local</code> and to Vercel environment variables.
+                  </div>
                 </div>
-                <span style={{ fontSize:12, color:C.t3 }}>100% private · Free forever · Runs on your machine</span>
-              </div>
-              <div style={{ width:20, height:20, borderRadius:'50%', border:`2px solid ${aiProv==='ollama'?C.accent:C.t3}`, background:aiProv==='ollama'?C.accent:'transparent', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
-                {aiProv==='ollama' && <div style={{ width:8, height:8, borderRadius:'50%', background:'#fff' }} />}
-              </div>
-            </div>
+              )
+            })()}
 
-            {aiProv==='ollama' && (
-              <div onClick={e=>e.stopPropagation()} style={{ paddingTop:14, borderTop:`1px solid ${C.border}`, display:'flex', flexDirection:'column', gap:12 }}>
+            {aiProv === 'ollama' && (
+              <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
+                  Calls go <strong style={{color:C.t1}}>directly from your browser to localhost:11434</strong>. No API key needed. In the desktop app, calls go through Node.js with zero CORS issues.
+                </div>
 
-                {/* Status banner */}
-                {ollamaDetecting && (
-                  <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 14px', background:C.bg, borderRadius:8, border:`1px solid ${C.border}` }}>
-                    <Spinner size={14} color={C.accent} /> <span style={{ fontSize:13, color:C.t2 }}>Scanning for models…</span>
-                  </div>
-                )}
-                {!ollamaDetecting && ollamaTest.startsWith('✅') && (
-                  <div style={{ padding:'10px 14px', background:'rgba(16,185,129,.08)', borderRadius:8, border:'1px solid rgba(16,185,129,.25)' }}>
-                    <span style={{ fontSize:13, color:C.green }}>{ollamaTest}</span>
-                  </div>
-                )}
-                {!ollamaDetecting && ollamaDetectErr && (
-                  <div style={{ padding:'10px 14px', background: ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.08)':'rgba(239,68,68,.08)', borderRadius:8, border:`1px solid ${ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}` }}>
-                    <p style={{ margin:'0 0 4px', fontSize:13, color: ollamaDetectErr.startsWith('⚠')?C.yellow:C.red }}>{ollamaDetectErr}</p>
-                    {!ollamaDetectErr.startsWith('✅') && (
-                      <details style={{ marginTop:8 }}>
-                        <summary style={{ fontSize:11, color:C.t3, cursor:'pointer' }}>▸ Fix: start Ollama with CORS enabled</summary>
-                        <div style={{ marginTop:8, display:'flex', gap:6, alignItems:'center' }}>
-                          <code style={{ flex:1, background:C.bg, borderRadius:6, padding:'6px 10px', fontSize:11, color:C.green, fontFamily:'monospace', border:`1px solid ${C.border}` }}>OLLAMA_ORIGINS=* ollama serve</code>
-                          <button onClick={()=>copyText('OLLAMA_ORIGINS=* ollama serve')} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t3, cursor:'pointer', padding:'5px 8px', fontSize:11, fontFamily:'inherit' }}>Copy</button>
+                {/* Status feedback */}
+                {ollamaDetectErr && (
+                  <div style={{ padding:'10px 14px', background:ollamaDetectErr.startsWith('✅')?'rgba(16,185,129,.08)':ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.08)':'rgba(239,68,68,.08)', borderRadius:8, border:`1px solid ${ollamaDetectErr.startsWith('✅')?'rgba(16,185,129,.3)':ollamaDetectErr.startsWith('⚠')?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}` }}>
+                    <p style={{ margin:0, fontSize:12, color:ollamaDetectErr.startsWith('✅')?C.green:ollamaDetectErr.startsWith('⚠')?C.yellow:C.red }}>{ollamaDetectErr}</p>
+                    {!ollamaDetectErr.startsWith('✅') && !IS_ELECTRON && (
+                      <details style={{ marginTop:6 }}>
+                        <summary style={{ fontSize:11, color:C.t3, cursor:'pointer' }}>▸ Fix: enable CORS on Ollama</summary>
+                        <div style={{ marginTop:6, display:'flex', gap:6 }}>
+                          <code style={{ flex:1, background:C.bg, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.green, fontFamily:'monospace', border:`1px solid ${C.border}` }}>OLLAMA_ORIGINS=* ollama serve</code>
+                          <button onClick={()=>copyText('OLLAMA_ORIGINS=* ollama serve')} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t3, cursor:'pointer', padding:'4px 8px', fontSize:11, fontFamily:'inherit' }}>Copy</button>
                         </div>
-                        <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3 }}>macOS menu bar: run <code style={{color:C.accent}}>launchctl setenv OLLAMA_ORIGINS "*"</code> then restart Ollama.</p>
                       </details>
                     )}
                   </div>
                 )}
 
-                {/* Model selector — dropdown if found, text fallback */}
+                {/* URL */}
                 <div>
-                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-                    {ollamaModels.length > 0 ? (
-                      <select value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
-                        style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
-                        {ollamaModels.map(m=><option key={m} value={m}>{m}</option>)}
-                      </select>
-                    ) : (
-                      <input value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
-                        placeholder="No models yet — click Connect"
-                        style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
-                    )}
+                  <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Ollama URL</label>
+                  <div style={{ display:'flex', gap:8 }}>
+                    <input value={ollamaUrl} onChange={e=>{setOllamaUrl(e.target.value); setOllamaModels([]); setOllamaDetectErr('')}}
+                      placeholder="http://localhost:11434"
+                      style={{ flex:1, background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }} />
                     <Button onClick={detectOllamaModels} disabled={ollamaDetecting} variant="secondary" size="sm">
-                      {ollamaDetecting ? <Spinner size={12} color={C.accent}/> : ollamaModels.length ? '↻ Refresh' : 'Connect'}
+                      {ollamaDetecting ? <Spinner size={12} color={C.accent}/> : ollamaModels.length ? '↻ Refresh' : 'Detect models'}
                     </Button>
                   </div>
-                  {ollamaModels.length > 0 && (
-                    <p style={{ margin:'5px 0 0', fontSize:11, color:C.green }}>✓ {ollamaModels.length} model{ollamaModels.length!==1?'s':''} found — all features will use {ollamaModel||ollamaModels[0]}</p>
-                  )}
                 </div>
 
-                {/* Custom URL */}
-                <details>
-                  <summary style={{ fontSize:11, color:C.t3, cursor:'pointer' }}>▸ Custom Ollama URL (default: localhost:11434)</summary>
-                  <input value={ollamaUrl} onChange={e=>{setOllamaUrl(e.target.value);setOllamaModels([]);setOllamaTest('');setOllamaDetectErr('')}}
-                    placeholder="http://localhost:11434"
-                    style={{ marginTop:8, width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
-                </details>
+                {/* Model */}
+                <div>
+                  <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Model</label>
+                  {ollamaModels.length > 0 ? (
+                    <>
+                      <select value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
+                        style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
+                        {ollamaModels.map(m=><option key={m} value={m}>{m}</option>)}
+                      </select>
+                      <p style={{ margin:'5px 0 0', fontSize:11, color:C.green }}>✓ {ollamaModels.length} model{ollamaModels.length!==1?'s':''} detected</p>
+                    </>
+                  ) : (
+                    <input value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}
+                      placeholder="e.g. llama3.2 — or click Detect models"
+                      style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', boxSizing:'border-box' }} />
+                  )}
+                </div>
               </div>
             )}
-          </div>
+          </Card>
+
+          {/* ── Test Connection ── */}
+          <Card style={{ padding:16, marginBottom:16 }}>
+            <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+              <Button onClick={testConnection} disabled={testStatus==='testing'} variant="secondary" size="sm">
+                {testStatus==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
+              </Button>
+              {testStatus && testStatus !== 'testing' && (
+                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.startsWith('✅')?C.green:testStatus.startsWith('⚠')?C.yellow:C.red }}>{testStatus}</span>
+              )}
+            </div>
+          </Card>
 
           <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
         </div>
