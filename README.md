@@ -147,7 +147,7 @@ Google Gemini has a generous free tier (60 requests/minute on Gemini 1.5 Flash).
 5. In the app: **Settings → AI Provider → Google Gemini** → select a model → **Test Connection** → **Save**
 
 **Available models:**
-- `gemini-2.0-flash-exp` — latest, fastest (default)
+- `gemini-1.5-flash` — fastest, free tier (default)
 - `gemini-1.5-pro` — most capable
 - `gemini-1.5-flash` — fast, free tier
 

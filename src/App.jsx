@@ -1514,7 +1514,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             {Object.values(PROVIDERS).map(p => {
               const active = aiProv === p.id
               return (
-                <button key={p.id} onClick={() => { setAIProv(p.id); setTestStatus('') }}
+                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus('') }}
                   style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}>
                     <span style={{ fontSize:20 }}>{p.icon}</span>
