@@ -1,0 +1,13 @@
+/* Modern glassmorphism buttons */
+.btn-premium {
+  @apply px-6 py-3 rounded-2xl font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 shadow-lg shadow-indigo-200 hover:shadow-xl hover:scale-[1.02] active:scale-95 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-glass {
+  @apply px-4 py-2 rounded-xl bg-white/70 backdrop-blur-md border border-white/30 shadow-sm hover:bg-white/90 transition;
+}
+
+/* Voice selector card */
+.glass-card {
+  @apply bg-white/80 backdrop-blur-lg border border-white/30 rounded-2xl;
+}
