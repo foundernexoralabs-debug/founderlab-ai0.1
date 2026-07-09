@@ -32,6 +32,22 @@ async function handleAnthropic(req, res, { model, messages, system, max_tokens }
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return err(res, 500, 'ANTHROPIC_API_KEY is not configured on the server.')
 
+  // Normalise messages: convert { role, content, image? } to Anthropic content blocks
+  const normMessages = messages.map(m => {
+    if (m.image && m.image.startsWith('data:')) {
+      const [meta, data] = m.image.split(',')
+      const mediaType = meta.match(/data:([^;]+)/)?.[1] || 'image/jpeg'
+      return {
+        role: m.role,
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data } },
+          { type: 'text', text: m.content || 'What do you see in this image?' },
+        ],
+      }
+    }
+    return { role: m.role, content: m.content }
+  })
+
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -43,7 +59,7 @@ async function handleAnthropic(req, res, { model, messages, system, max_tokens }
       model: model || 'claude-sonnet-4-20250514',
       max_tokens: max_tokens || 1200,
       ...(system && { system }),
-      messages,
+      messages: normMessages,
     }),
   })
   const d = await r.json()

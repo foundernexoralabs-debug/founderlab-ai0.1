@@ -3,7 +3,86 @@
 // Single file · Inline styles only · No external libraries
 // Colors, data patterns, and auth match master specification
 // ============================================================
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+
+// ── VOICE RECOGNITION HOOK ───────────────────────────────────
+function useSpeechRecognition() {
+  const [listening, setListening] = useState(false)
+  const [transcript, setTranscript] = useState('')
+  const recoRef = useRef(null)
+
+  const start = useCallback((onFinal) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) { toast('Speech recognition not supported in this browser. Try Chrome or Edge.', 'error'); return }
+    const reco = new SR()
+    recoRef.current = reco
+    reco.lang = 'en-GB'
+    reco.interimResults = true
+    reco.continuous = false
+    reco.onresult = (e) => {
+      const t = Array.from(e.results).map(r => r[0].transcript).join('')
+      setTranscript(t)
+      if (e.results[e.results.length - 1].isFinal) onFinal?.(t)
+    }
+    reco.onend = () => setListening(false)
+    reco.onerror = (e) => { setListening(false); if (e.error !== 'no-speech') toast('Mic error: ' + e.error, 'error') }
+    reco.start()
+    setListening(true)
+  }, [])
+
+  const stop = useCallback(() => { recoRef.current?.stop(); setListening(false) }, [])
+
+  return { listening, transcript, setTranscript, start, stop }
+}
+
+// ── TEXT-TO-SPEECH HOOK ───────────────────────────────────────
+function useTTS() {
+  const [speaking, setSpeaking] = useState(false)
+  const [rate, setRate] = useState(1.0)
+  const uttRef = useRef(null)
+
+  function speak(text) {
+    if (!window.speechSynthesis) return
+    if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return }
+    const clean = text.replace(/#{1,3}\s/g,'').replace(/\*{1,2}(.+?)\*{1,2}/g,'$1').replace(/`(.+?)`/g,'$1').replace(/\[(.+?)\]\(.+?\)/g,'$1')
+    const u = new SpeechSynthesisUtterance(clean)
+    uttRef.current = u
+    u.lang = 'en-GB'
+    u.rate = rate
+    // Prefer a premium voice if available
+    const voices = window.speechSynthesis.getVoices()
+    const preferred = voices.find(v => v.lang === 'en-GB' && v.name.toLowerCase().includes('daniel'))
+      || voices.find(v => v.lang === 'en-GB')
+      || voices.find(v => v.lang.startsWith('en'))
+    if (preferred) u.voice = preferred
+    u.onstart = () => setSpeaking(true)
+    u.onend   = () => setSpeaking(false)
+    u.onerror = () => setSpeaking(false)
+    window.speechSynthesis.speak(u)
+  }
+
+  function pause() {
+    if (window.speechSynthesis.speaking) { window.speechSynthesis.pause(); setSpeaking(false) }
+  }
+  function resume() {
+    if (window.speechSynthesis.paused) { window.speechSynthesis.resume(); setSpeaking(true) }
+  }
+
+  return { speaking, speak, pause, resume, rate, setRate }
+}
+
+// ── IMAGE FILE UTILS ──────────────────────────────────────────
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload  = e => resolve(e.target.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+const ACCEPTED_TYPES = 'image/*,image/png,image/jpeg,image/webp,image/gif'
+
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { err: null } }
@@ -760,22 +839,33 @@ function ChatPage({ user }) {
   const [loadingData, setLD]      = useState(true)
   const [renaming, setRenaming]   = useState(null)
   const [renameVal, setRenameVal] = useState('')
-  const msgEnd = useRef(null)
+  const [pendingImage, setPendingImage] = useState(null) // { base64, name }
+  const msgEnd    = useRef(null)
   const saveTimer = useRef(null)
-  const active = convos.find(c=>c.id===activeId)
-  const messages = active?.messages||[]
+  const fileRef   = useRef(null)
+
+  const { listening, transcript, setTranscript, start: startReco, stop: stopReco } = useSpeechRecognition()
+  const { speaking, speak, rate, setRate } = useTTS()
+  const [showSpeed, setShowSpeed] = useState(false)
+  const [activeTTS, setActiveTTS] = useState(null) // message id being read aloud
+
+  const active   = convos.find(c => c.id === activeId)
+  const messages = active?.messages || []
 
   useEffect(() => {
     async function init() {
-      setLD(true); sb.logEvent('chat','chat')
+      setLD(true); sb.logEvent('chat', 'chat')
       const d = await load('fl_convos', [])
-      setConvos(Array.isArray(d)?d:[])
+      setConvos(Array.isArray(d) ? d : [])
       setLD(false)
     }
     init()
   }, [])
 
-  useEffect(() => { msgEnd.current?.scrollIntoView({ behavior:'smooth' }) }, [messages.length, sending])
+  useEffect(() => { msgEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, sending])
+
+  // Fill input from voice transcript
+  useEffect(() => { if (transcript) setInput(transcript) }, [transcript])
 
   function persist(updated) {
     setConvos(updated)
@@ -784,68 +874,120 @@ function ChatPage({ user }) {
   }
 
   function newConvo() {
-    const c = { id:uid(), title:'New Chat', messages:[], created_at:ts(), updated_at:ts() }
+    const c = { id: uid(), title: 'New Chat', messages: [], created_at: ts(), updated_at: ts() }
     persist([c, ...convos]); setActiveId(c.id)
   }
 
-  async function send(text) {
-    const t = (text||input).trim()
-    if (!t||sending) return
-    setInput('')
+  async function handleImagePick(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) { toast('Image must be under 5MB', 'error'); return }
+    const base64 = await fileToBase64(file)
+    setPendingImage({ base64, name: file.name })
+    e.target.value = ''
+  }
+
+  async function send(textOverride) {
+    const t = (textOverride || input).trim()
+    if ((!t && !pendingImage) || sending) return
+    setInput(''); setTranscript(''); stopReco()
+
     let cid = activeId
     let cvs = convos
     if (!cid) {
-      const c = { id:uid(), title:t.slice(0,40), messages:[], created_at:ts(), updated_at:ts() }
+      const c = { id: uid(), title: t?.slice(0, 40) || 'Image', messages: [], created_at: ts(), updated_at: ts() }
       cvs = [c, ...convos]; cid = c.id; setActiveId(cid)
     }
-    const userMsg = { id:uid(), role:'user', content:t, ts:ts() }
-    cvs = cvs.map(c => c.id===cid ? { ...c, messages:[...c.messages, userMsg], updated_at:ts(), title:c.messages.length===0?t.slice(0,40):c.title } : c)
-    cvs = [cvs.find(c=>c.id===cid), ...cvs.filter(c=>c.id!==cid)]
+
+    const userMsg = {
+      id: uid(), role: 'user',
+      content: t || (pendingImage ? `[Image: ${pendingImage.name}]` : ''),
+      image: pendingImage?.base64 || null,
+      ts: ts(),
+    }
+    setPendingImage(null)
+
+    cvs = cvs.map(c => c.id === cid
+      ? { ...c, messages: [...c.messages, userMsg], updated_at: ts(), title: c.messages.length === 0 && t ? t.slice(0, 40) : c.title }
+      : c)
+    cvs = [cvs.find(c => c.id === cid), ...cvs.filter(c => c.id !== cid)]
     persist(cvs); setSending(true)
-    const history = (cvs.find(c=>c.id===cid)?.messages||[]).map(m=>({ role:m.role, content:m.content }))
+
+    // Build history for AI — strip images for non-Anthropic providers (include text note)
+    const provider = getAIProvider()
+    const history = (cvs.find(c => c.id === cid)?.messages || []).map(m => ({
+      role: m.role,
+      content: m.content,
+      ...(m.image && provider === 'anthropic' ? { image: m.image } : {}),
+      ...(m.image && provider !== 'anthropic' ? { content: (m.content || '') + '\n[User attached an image — describe what you would expect in response]' } : {}),
+    }))
+
     const reply = await ai(history, CHAT_SYS, 2000)
-    const aiMsg = { id:uid(), role:'assistant', content:reply, ts:ts() }
-    const final = cvs.map(c => c.id===cid ? { ...c, messages:[...c.messages, aiMsg], updated_at:ts() } : c)
+    const aiMsg = { id: uid(), role: 'assistant', content: reply, ts: ts() }
+    const final = cvs.map(c => c.id === cid ? { ...c, messages: [...c.messages, aiMsg], updated_at: ts() } : c)
     persist(final); setSending(false)
+  }
+
+  function handleMic() {
+    if (listening) { stopReco(); return }
+    startReco((finalText) => { setInput(finalText) })
+  }
+
+  function handleTTS(msg) {
+    if (activeTTS === msg.id) { window.speechSynthesis?.cancel(); setActiveTTS(null); return }
+    setActiveTTS(msg.id)
+    speak(msg.content)
+    // Clear active when done
+    const u = window.speechSynthesis
+    const check = setInterval(() => { if (!u?.speaking) { setActiveTTS(null); clearInterval(check) } }, 500)
   }
 
   function del(id, e) {
     e.stopPropagation()
     if (!confirm('Delete this chat?')) return
-    persist(convos.filter(c=>c.id!==id))
-    if (activeId===id) { setActiveId(null) }
+    persist(convos.filter(c => c.id !== id))
+    if (activeId === id) setActiveId(null)
     toast('Chat deleted', 'success')
   }
 
   function startRename(c, e) { e.stopPropagation(); setRenaming(c.id); setRenameVal(c.title) }
   function commitRename(id) {
     if (!renameVal.trim()) { setRenaming(null); return }
-    persist(convos.map(c=>c.id===id?{...c,title:renameVal}:c)); setRenaming(null)
+    persist(convos.map(c => c.id === id ? { ...c, title: renameVal } : c)); setRenaming(null)
   }
 
   return (
     <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
+      {/* ── Sidebar ── */}
       <div style={{ width:240, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', flexShrink:0 }}>
         <div style={{ padding:12, borderBottom:`1px solid ${C.border}` }}>
           <Button onClick={newConvo} full size="sm" icon="+">New Chat</Button>
         </div>
         <div style={{ flex:1, overflowY:'auto', padding:8 }}>
-          {loadingData ? <div style={{ display:'flex', justifyContent:'center', padding:20 }}><Spinner /></div> :
-           convos.length===0 ? <div style={{ textAlign:'center', padding:'24px 12px', color:C.t3, fontSize:13 }}>No chats yet</div> :
-           convos.map(c => (
-            <div key={c.id} onClick={()=>setActiveId(c.id)}
-              style={{ padding:'8px 10px', borderRadius:8, cursor:'pointer', marginBottom:2, background:activeId===c.id?C.accentM:'transparent', border:`1px solid ${activeId===c.id?C.borderFocus:'transparent'}`, display:'flex', alignItems:'center', gap:4, transition:'all .15s' }}>
-              {renaming===c.id
-                ? <input autoFocus value={renameVal} onChange={e=>setRenameVal(e.target.value)} onBlur={()=>commitRename(c.id)} onKeyDown={e=>{ if(e.key==='Enter')commitRename(c.id); if(e.key==='Escape')setRenaming(null) }} onClick={e=>e.stopPropagation()} style={{ flex:1, background:C.bg, border:`1px solid ${C.accent}`, borderRadius:5, padding:'2px 6px', color:C.t1, fontSize:13, outline:'none', fontFamily:'inherit' }} />
-                : <span style={{ flex:1, fontSize:13, color:activeId===c.id?C.t1:C.t2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.title||'Untitled'}</span>
-              }
-              <button onClick={e=>startRename(c,e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:2, fontFamily:'inherit' }} title="Rename">✎</button>
-              <button onClick={e=>del(c.id,e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16, padding:'0 2px', lineHeight:1 }} title="Delete">×</button>
-            </div>
-          ))}
+          {loadingData
+            ? <div style={{ display:'flex', justifyContent:'center', padding:20 }}><Spinner /></div>
+            : convos.length === 0
+              ? <div style={{ textAlign:'center', padding:'24px 12px', color:C.t3, fontSize:13 }}>No chats yet</div>
+              : convos.map(c => (
+                <div key={c.id} onClick={() => setActiveId(c.id)}
+                  style={{ padding:'8px 10px', borderRadius:8, cursor:'pointer', marginBottom:2, background:activeId===c.id?C.accentM:'transparent', border:`1px solid ${activeId===c.id?C.borderFocus:'transparent'}`, display:'flex', alignItems:'center', gap:4, transition:'all .15s' }}>
+                  {renaming === c.id
+                    ? <input autoFocus value={renameVal} onChange={e => setRenameVal(e.target.value)}
+                        onBlur={() => commitRename(c.id)}
+                        onKeyDown={e => { if (e.key==='Enter') commitRename(c.id); if (e.key==='Escape') setRenaming(null) }}
+                        onClick={e => e.stopPropagation()}
+                        style={{ flex:1, background:C.bg, border:`1px solid ${C.accent}`, borderRadius:5, padding:'2px 6px', color:C.t1, fontSize:13, outline:'none', fontFamily:'inherit' }} />
+                    : <span style={{ flex:1, fontSize:13, color:activeId===c.id?C.t1:C.t2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.title||'Untitled'}</span>
+                  }
+                  <button onClick={e => startRename(c, e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:2, fontFamily:'inherit' }} title="Rename">✎</button>
+                  <button onClick={e => del(c.id, e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16, padding:'0 2px', lineHeight:1 }} title="Delete">×</button>
+                </div>
+              ))
+          }
         </div>
       </div>
 
+      {/* ── Main ── */}
       <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
         {!activeId ? (
           <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:32 }}>
@@ -856,10 +998,10 @@ function ChatPage({ user }) {
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:10, maxWidth:560, width:'100%' }}>
               {STARTERS.map(s => (
-                <button key={s} onClick={()=>{ newConvo(); setTimeout(()=>send(s),80) }}
+                <button key={s} onClick={() => { newConvo(); setTimeout(() => send(s), 80) }}
                   style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:10, padding:'12px 14px', color:C.t2, fontSize:13, cursor:'pointer', textAlign:'left', lineHeight:1.5, fontFamily:'inherit', transition:'all .15s' }}
-                  onMouseEnter={e=>{ e.currentTarget.style.borderColor=C.borderHov; e.currentTarget.style.color=C.t1 }}
-                  onMouseLeave={e=>{ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.color=C.t2 }}>
+                  onMouseEnter={e => { e.currentTarget.style.borderColor=C.borderHov; e.currentTarget.style.color=C.t1 }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor=C.border; e.currentTarget.style.color=C.t2 }}>
                   {s}
                 </button>
               ))}
@@ -867,17 +1009,31 @@ function ChatPage({ user }) {
           </div>
         ) : (
           <>
+            {/* Messages */}
             <div style={{ flex:1, overflowY:'auto', padding:'24px 28px' }}>
-              {messages.length===0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
-              {messages.map((m,i) => (
+              {messages.length === 0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
+              {messages.map((m, i) => (
                 <div key={m.id||i} style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18, animation:'flSlide .2s ease' }}>
-                  {m.role==='assistant' && <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff', flexShrink:0, marginRight:10, marginTop:2 }}>✦</div>}
+                  {m.role === 'assistant' && <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff', flexShrink:0, marginRight:10, marginTop:2 }}>✦</div>}
                   <div style={{ maxWidth:'78%' }}>
+                    {/* Image preview if attached */}
+                    {m.image && <img src={m.image} alt="attachment" style={{ maxWidth:220, maxHeight:160, borderRadius:10, marginBottom:6, display:'block', objectFit:'cover', border:`1px solid ${C.border}` }} />}
                     <div style={{ background:m.role==='user'?C.accent:C.surf, color:'#fff', borderRadius:m.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px', padding:'11px 15px', border:m.role==='assistant'?`1px solid ${C.border}`:'none', fontSize:14, lineHeight:1.55 }}>
-                      {m.role==='assistant' ? renderMsg(m.content) : <span style={{ whiteSpace:'pre-wrap', color:'#fff' }}>{m.content}</span>}
+                      {m.role === 'assistant' ? renderMsg(m.content) : <span style={{ whiteSpace:'pre-wrap', color:'#fff' }}>{m.content}</span>}
                     </div>
-                    <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:3 }}>
-                      {m.role==='assistant' && <button onClick={()=>copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>📋 Copy</button>}
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:4, flexWrap:'wrap' }}>
+                      {m.role === 'assistant' && <>
+                        <button onClick={() => copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>📋 Copy</button>
+                        <button onClick={() => handleTTS(m)} style={{ background:'none', border:'none', color:activeTTS===m.id?C.accent:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>{activeTTS===m.id?'⏹ Stop':'🔊 Read'}</button>
+                        {activeTTS === m.id && (
+                          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                            {[0.75,1,1.25,1.5,2].map(r => (
+                              <button key={r} onClick={() => { setRate(r); window.speechSynthesis?.cancel(); setActiveTTS(null) }}
+                                style={{ background:rate===r?C.accentM:'none', border:`1px solid ${rate===r?C.accent:C.border}`, borderRadius:4, color:rate===r?C.accent:C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit' }}>{r}×</button>
+                            ))}
+                          </div>
+                        )}
+                      </>}
                       {m.ts && <span style={{ fontSize:10, color:C.t3 }}>{new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
                     </div>
                   </div>
@@ -887,18 +1043,49 @@ function ChatPage({ user }) {
                 <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:18 }}>
                   <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff' }}>✦</div>
                   <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:'16px 16px 16px 4px', padding:'12px 16px', display:'flex', gap:5, alignItems:'center' }}>
-                    {[0,1,2].map(i=><div key={i} style={{ width:6, height:6, borderRadius:'50%', background:C.t2, animation:`flPulse 1.4s ease-in-out ${i*.2}s infinite` }} />)}
+                    {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:'50%', background:C.t2, animation:`flPulse 1.4s ease-in-out ${i*.2}s infinite` }} />)}
                   </div>
                 </div>
               )}
               <div ref={msgEnd} />
             </div>
+
+            {/* Input area */}
             <div style={{ padding:'12px 28px 20px', borderTop:`1px solid ${C.border}` }}>
-              <div style={{ display:'flex', gap:8 }}>
-                <Input value={input} onChange={e=>setInput(e.target.value)} placeholder="Message FounderLab AI…" onKeyDown={e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()} }} style={{ flex:1 }} />
-                <Button onClick={()=>send()} disabled={sending||!input.trim()} style={{ flexShrink:0, fontSize:18, padding:'7px 14px' }}>↑</Button>
+              {/* Pending image preview */}
+              {pendingImage && (
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10, padding:'8px 12px', background:C.surf, borderRadius:10, border:`1px solid ${C.border}` }}>
+                  <img src={pendingImage.base64} alt="" style={{ width:40, height:40, borderRadius:6, objectFit:'cover' }} />
+                  <span style={{ fontSize:12, color:C.t2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{pendingImage.name}</span>
+                  <button onClick={() => setPendingImage(null)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16 }}>×</button>
+                </div>
+              )}
+              <div style={{ display:'flex', gap:8, alignItems:'flex-end' }}>
+                {/* Image upload */}
+                <input ref={fileRef} type="file" accept={ACCEPTED_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
+                <button onClick={() => fileRef.current?.click()}
+                  title="Attach image"
+                  style={{ background:pendingImage?C.accentM:C.surf, border:`1px solid ${pendingImage?C.accent:C.border}`, borderRadius:10, color:pendingImage?C.accent:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s' }}>
+                  🖼
+                </button>
+                {/* Mic */}
+                <button onClick={handleMic}
+                  title={listening ? 'Stop recording' : 'Voice input (en-GB)'}
+                  style={{ background:listening?'rgba(239,68,68,.15)':C.surf, border:`1px solid ${listening?C.red:C.border}`, borderRadius:10, color:listening?C.red:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s', animation:listening?'flPulse 1s infinite':'' }}>
+                  {listening ? '⏹' : '🎤'}
+                </button>
+                <textarea
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  placeholder={listening ? '🎤 Listening…' : 'Message FounderLab AI…'}
+                  rows={1}
+                  onKeyDown={e => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+                  style={{ flex:1, background:C.surf, border:`1px solid ${C.border}`, borderRadius:10, color:C.t1, fontSize:14, padding:'10px 14px', fontFamily:'inherit', outline:'none', resize:'none', lineHeight:1.5, minHeight:42, maxHeight:160, overflowY:'auto' }}
+                />
+                <button onClick={() => send()} disabled={sending || (!input.trim() && !pendingImage)}
+                  style={{ background:C.accent, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:18, padding:'9px 14px', flexShrink:0, opacity:(sending||(!input.trim()&&!pendingImage))?0.5:1, transition:'all .15s' }}>↑</button>
               </div>
-              <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>Enter to send · Shift+Enter for new line</p>
+              <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>Enter to send · Shift+Enter new line · 🎤 voice · 🖼 image</p>
             </div>
           </>
         )}
@@ -919,6 +1106,7 @@ function NotesPage({ user }) {
   const [saving, setSaving]     = useState(false)
   const [loading, setLoading]   = useState(true)
   const [enhancing, setEnh]     = useState(false)
+
   const saveTimer = useRef(null)
   const filtered = notes
     .filter(n => !search || (n.title+' '+n.content).toLowerCase().includes(search.toLowerCase()))
@@ -1307,48 +1495,127 @@ For each day include:
 - **Community post** to complement the video
 
 End with 3 channel growth tips specific to this niche.` },
+  { id:'viral', label:'Viral Short', icon:'🔥', fn:(t,tr)=>`You are an expert viral content strategist. Analyze this content and deliver a complete Viral Short production package.
+
+${t?`Topic/URL: ${t}\n`:''}${tr?`Transcript:\n${tr.slice(0,4000)}`:''}
+
+## 🎯 Viral Score: [X]/100
+**Verdict**: [one sentence on virality potential]
+**Key factors**: [3 bullet points why it will/won't perform]
+
+## 🔥 Top 3 Clip Opportunities
+${tr?'Use exact timestamps if available in transcript.':'Suggest ideal moments based on content structure.'}
+
+**Clip 1 — The Hook**
+- Segment: [describe the moment / timestamp if available]
+- Duration: [X] seconds
+- Why it works: [specific reason]
+- Opening line (exact words): "[quote or suggestion]"
+
+**Clip 2 — The Value Drop**
+- Segment: [describe / timestamp]
+- Duration: [X] seconds  
+- Why it works: [specific reason]
+
+**Clip 3 — The CTA/Surprise**
+- Segment: [describe / timestamp]
+- Duration: [X] seconds
+- Why it works: [specific reason]
+
+## 📱 60-Second Short Script
+[Write the complete word-for-word script optimized for vertical video. Include stage directions in (parentheses).]
+
+**HOOK (0-3s)**: [exact opening]
+**SETUP (3-10s)**: [context]
+**VALUE (10-50s)**: [core content]
+**CTA (50-60s)**: [call to action]
+
+## 🏷️ 5 Title Options
+1. 
+2. 
+3. 
+4. 
+5. ✅ [mark your top pick]
+
+## #️⃣ 20 Hashtags
+[Mix of trending, niche, and broad hashtags]
+
+## 🖼️ Thumbnail Brief
+**Text overlay**: [exact words, max 4]
+**Visual**: [describe background, colors, face expression if person]
+**Color scheme**: [specific hex or color names]
+**Hook element**: [what makes it impossible to scroll past]
+
+## 📈 3 Ways to Boost Viral Potential
+1. 
+2. 
+3. ` },
 ]
 
 function YouTubeAIPage({ user }) {
   const [title, setTitle]   = useState('')
+  const [url, setUrl]       = useState('')
   const [trans, setTrans]   = useState('')
   const [active, setActive] = useState('summary')
   const [outputs, setOut]   = useState({})
   const [loading, setL]     = useState(false)
 
+  const videoId = url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)?.[1]
+
   async function generate() {
-    if (!title.trim()&&!trans.trim()) return toast('Add a topic or paste a transcript first','error')
+    const isViral = active === 'viral'
+    const topicStr = isViral ? `${url ? 'YouTube URL: ' + url + '\n' : ''}${title ? 'Topic: ' + title : ''}`.trim() : title
+    if (!topicStr && !trans.trim()) return toast('Add a topic, URL, or transcript first', 'error')
     sb.logEvent('youtube','youtube'); setL(true)
-    const type=YT.find(t=>t.id===active)
-    const r=await ai([{role:'user',content:type.fn(title,trans)}],'You are an expert YouTube strategist and content creator with 10+ years growing channels to millions of subscribers. Always give specific, complete, actionable output. Never give generic advice.',2500)
-    setOut(p=>({...p,[active]:r})); setL(false)
+    const type = YT.find(t => t.id === active)
+    const r = await ai([{role:'user', content: type.fn(topicStr, trans)}], 'You are an expert YouTube strategist and viral content creator with 10+ years growing channels to millions of subscribers. Always give specific, complete, actionable output. Never give generic advice.', 3000)
+    setOut(p => ({...p, [active]: r})); setL(false)
   }
 
-  const wc=trans.trim().split(/\s+/).filter(Boolean).length
+  const wc = trans.trim().split(/\s+/).filter(Boolean).length
 
   return (
     <div style={{ height:'100%', overflowY:'auto', padding:'32px 32px 48px', maxWidth:900 }}>
       <h2 style={{ margin:'0 0 24px', fontSize:22, fontWeight:700, color:C.t1 }}>YouTube AI</h2>
       <Card style={{ padding:24, marginBottom:20 }}>
         <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+          {/* URL field — shown for all tabs, required for Viral */}
+          <div>
+            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>
+              YouTube URL <span style={{ color:C.t3, fontWeight:400, textTransform:'none' }}>{active==='viral'?'(required for Viral Short)':'(optional)'}</span>
+            </label>
+            <Input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.youtube.com/watch?v=..." />
+          </div>
+          {/* Video embed if valid URL */}
+          {videoId && (
+            <div style={{ borderRadius:10, overflow:'hidden', border:`1px solid ${C.border}`, aspectRatio:'16/9', background:'#000' }}>
+              <iframe
+                src={`https://www.youtube-nocookie.com/embed/${videoId}`}
+                style={{ width:'100%', height:'100%', border:'none' }}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                title="YouTube preview"
+              />
+            </div>
+          )}
           <div>
             <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Video Title or Topic <span style={{ color:C.t3, fontWeight:400, textTransform:'none' }}>(optional)</span></label>
             <Input value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. How I built a $10k/mo SaaS in 60 days" onKeyDown={e=>e.key==='Enter'&&generate()} />
           </div>
           <div>
-            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Paste YouTube Transcript <span style={{ color:C.t3, fontWeight:400 }}>({wc} words)</span></label>
-            <Input value={trans} onChange={e=>setTrans(e.target.value)} placeholder="Paste your video transcript here for better AI results…" rows={7} />
+            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Paste Transcript <span style={{ color:C.t3, fontWeight:400 }}>({wc} words) — greatly improves output</span></label>
+            <Input value={trans} onChange={e=>setTrans(e.target.value)} placeholder="Paste your video transcript here…" rows={5} />
           </div>
-          <Tip>Get any YouTube transcript free: open a video → click "…" below the video → Show transcript. Copy and paste it here for best results.</Tip>
+          <Tip>Get any YouTube transcript free: open a video → click "…" below the video → Show transcript → Copy all text.</Tip>
         </div>
       </Card>
       <div style={{ display:'flex', gap:8, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
         {YT.map(t=>(
-          <button key={t.id} onClick={()=>setActive(t.id)} style={{ padding:'8px 16px', borderRadius:8, border:`1px solid ${active===t.id?C.accent:C.border}`, background:active===t.id?C.accentM:'transparent', color:active===t.id?C.accent:C.t2, cursor:'pointer', fontSize:13, fontWeight:500, fontFamily:'inherit', display:'flex', alignItems:'center', gap:6, transition:'all .15s' }}>
+          <button key={t.id} onClick={()=>setActive(t.id)} style={{ padding:'8px 16px', borderRadius:8, border:`1px solid ${active===t.id?(t.id==='viral'?C.red:C.accent):C.border}`, background:active===t.id?(t.id==='viral'?'rgba(239,68,68,.12)':C.accentM):'transparent', color:active===t.id?(t.id==='viral'?C.red:C.accent):C.t2, cursor:'pointer', fontSize:13, fontWeight:500, fontFamily:'inherit', display:'flex', alignItems:'center', gap:6, transition:'all .15s' }}>
             {t.icon} {t.label}
           </button>
         ))}
-        <Button onClick={generate} disabled={loading||(!title.trim()&&!trans.trim())} style={{ marginLeft:'auto' }}>
+        <Button onClick={generate} disabled={loading||(active==='viral'?(!url.trim()&&!title.trim()&&!trans.trim()):(!title.trim()&&!trans.trim()))} style={{ marginLeft:'auto' }}>
           {loading?<Spinner size={14} color="#fff"/>:'✨'} Generate
         </Button>
       </div>
