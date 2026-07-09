@@ -671,7 +671,15 @@ function Dashboard({ user, profile, setPage }) {
 }
 
 // ── AI CHAT ──────────────────────────────────────────────────
-const CHAT_SYS = 'You are FounderLab AI — a smart, concise assistant for founders, creators, and builders. Be practical and direct. Use code blocks for code. Format responses clearly.'
+const CHAT_SYS = `You are FounderLab AI — a sharp, practical assistant built for founders, developers, and creators.
+
+Rules:
+- Always give complete, actionable answers. Never cut off mid-response.
+- Use **bold** for key terms, \`code\` for technical terms, and fenced code blocks for all code.
+- Use bullet lists or numbered lists for multi-step answers.
+- Include specific details, examples, and real numbers when relevant.
+- If asked about a business, product, or location, include concrete details (pricing, contacts, hours) when implied.
+- Never say "I can't help with that" unless it involves genuinely harmful content.`
 const STARTERS = [
   'Help me brainstorm a content strategy for my startup',
   'Review my business idea and give me brutally honest feedback',
@@ -680,19 +688,68 @@ const STARTERS = [
 ]
 
 function renderMsg(content) {
+  if (!content) return null
+  // Split on fenced code blocks first
   const parts = content.split(/(```[\w]*\n[\s\S]*?```)/g)
-  return parts.map((p, i) => {
-    if (p.startsWith('```')) {
-      const m = p.match(/```(\w*)\n?([\s\S]*?)```/)
+  return parts.map((part, i) => {
+    if (part.startsWith('```')) {
+      const m = part.match(/```(\w*)\n?([\s\S]*?)```/)
       if (m) return (
-        <div key={i} style={{ background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 14px', fontFamily:'monospace', fontSize:12, whiteSpace:'pre-wrap', margin:'6px 0', overflowX:'auto' }}>
-          {m[1] && <div style={{ color:C.accent, fontSize:10, marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>{m[1]}</div>}
-          {m[2]}
+        <div key={i} style={{ background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, margin:'8px 0', overflow:'hidden' }}>
+          {m[1] && <div style={{ background:C.surfHigh, padding:'4px 12px', fontSize:10, color:C.accent, fontWeight:600, letterSpacing:'.06em', textTransform:'uppercase', borderBottom:`1px solid ${C.border}` }}>{m[1]}</div>}
+          <div style={{ padding:'10px 14px', fontFamily:'monospace', fontSize:12.5, whiteSpace:'pre-wrap', overflowX:'auto', lineHeight:1.6, color:'#e2e8f0' }}>{m[2].replace(/^\n/,'')}</div>
         </div>
       )
     }
-    return <span key={i} style={{ whiteSpace:'pre-wrap', lineHeight:1.6 }}>{p}</span>
+    // Inline rendering: process line by line
+    const lines = part.split('\n')
+    const nodes = []
+    let listItems = []
+    const flushList = () => {
+      if (!listItems.length) return
+      nodes.push(<ul key={`ul-${nodes.length}`} style={{ margin:'6px 0', paddingLeft:20, lineHeight:1.7 }}>{listItems.map((li,j)=><li key={j} style={{ color:C.t1, fontSize:14 }}>{inlineRender(li)}</li>)}</ul>)
+      listItems = []
+    }
+    lines.forEach((line, li) => {
+      // Blank line
+      if (!line.trim()) { flushList(); nodes.push(<br key={`br-${nodes.length}`} />); return }
+      // Headings
+      const h3 = line.match(/^###\s+(.+)/)
+      const h2 = line.match(/^##\s+(.+)/)
+      const h1 = line.match(/^#\s+(.+)/)
+      if (h1) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'10px 0 4px', fontWeight:700, fontSize:17, color:C.t1 }}>{inlineRender(h1[1])}</p>); return }
+      if (h2) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'10px 0 4px', fontWeight:700, fontSize:15, color:C.t1 }}>{inlineRender(h2[1])}</p>); return }
+      if (h3) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'8px 0 2px', fontWeight:600, fontSize:14, color:C.t1 }}>{inlineRender(h3[1])}</p>); return }
+      // Bullet list
+      const bullet = line.match(/^[-*•]\s+(.+)/)
+      if (bullet) { listItems.push(bullet[1]); return }
+      // Numbered list
+      const num = line.match(/^\d+\.\s+(.+)/)
+      if (num) { listItems.push(num[1]); return }
+      // Normal line
+      flushList()
+      nodes.push(<p key={nodes.length} style={{ margin:'2px 0', lineHeight:1.65, whiteSpace:'pre-wrap', fontSize:14, color:C.t1 }}>{inlineRender(line)}</p>)
+    })
+    flushList()
+    return <div key={i}>{nodes}</div>
   })
+}
+
+// Render inline markdown: **bold**, *italic*, `code`, links
+function inlineRender(text) {
+  const tokens = []
+  const rx = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[(.+?)\]\((https?:\/\/[^\)]+)\))/g
+  let last = 0, m
+  while ((m = rx.exec(text)) !== null) {
+    if (m.index > last) tokens.push(text.slice(last, m.index))
+    if (m[2]) tokens.push(<strong key={m.index}>{m[2]}</strong>)
+    else if (m[3]) tokens.push(<em key={m.index}>{m[3]}</em>)
+    else if (m[4]) tokens.push(<code key={m.index} style={{ background:C.surfHigh, color:C.accent, borderRadius:4, padding:'1px 5px', fontSize:'0.9em', fontFamily:'monospace' }}>{m[4]}</code>)
+    else if (m[5]) tokens.push(<a key={m.index} href={m[6]} target="_blank" rel="noopener noreferrer" style={{ color:C.accent, textDecoration:'underline' }}>{m[5]}</a>)
+    last = m.index + m[0].length
+  }
+  if (last < text.length) tokens.push(text.slice(last))
+  return tokens.length ? tokens : text
 }
 
 function ChatPage({ user }) {
@@ -813,13 +870,16 @@ function ChatPage({ user }) {
             <div style={{ flex:1, overflowY:'auto', padding:'24px 28px' }}>
               {messages.length===0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
               {messages.map((m,i) => (
-                <div key={m.id||i} style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18 }}>
+                <div key={m.id||i} style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18, animation:'flSlide .2s ease' }}>
                   {m.role==='assistant' && <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff', flexShrink:0, marginRight:10, marginTop:2 }}>✦</div>}
-                  <div style={{ maxWidth:'76%' }}>
-                    <div style={{ background:m.role==='user'?C.accent:C.surf, color:C.t1, borderRadius:m.role==='user'?'16px 16px 4px 16px':'16px 16px 16px 4px', padding:'10px 14px', border:m.role==='assistant'?`1px solid ${C.border}`:'none', fontSize:14 }}>
-                      {renderMsg(m.content)}
+                  <div style={{ maxWidth:'78%' }}>
+                    <div style={{ background:m.role==='user'?C.accent:C.surf, color:'#fff', borderRadius:m.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px', padding:'11px 15px', border:m.role==='assistant'?`1px solid ${C.border}`:'none', fontSize:14, lineHeight:1.55 }}>
+                      {m.role==='assistant' ? renderMsg(m.content) : <span style={{ whiteSpace:'pre-wrap', color:'#fff' }}>{m.content}</span>}
                     </div>
-                    {m.role==='assistant' && <button onClick={()=>copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:'4px 0', marginTop:2, fontFamily:'inherit' }}>📋 Copy</button>}
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:3 }}>
+                      {m.role==='assistant' && <button onClick={()=>copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>📋 Copy</button>}
+                      {m.ts && <span style={{ fontSize:10, color:C.t3 }}>{new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -860,7 +920,9 @@ function NotesPage({ user }) {
   const [loading, setLoading]   = useState(true)
   const [enhancing, setEnh]     = useState(false)
   const saveTimer = useRef(null)
-  const filtered = notes.filter(n=>!search||(n.title+' '+n.content).toLowerCase().includes(search.toLowerCase()))
+  const filtered = notes
+    .filter(n => !search || (n.title+' '+n.content).toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b) => new Date(b.updated_at) - new Date(a.updated_at))
 
   useEffect(() => {
     async function init() {
@@ -899,8 +961,23 @@ function NotesPage({ user }) {
   async function enhance() {
     if (!content.trim()) return toast('Add some content first','error')
     setEnh(true)
-    const r = await ai([{ role:'user', content:`Improve and enhance this note. Make it clearer, better structured, and more useful while preserving all original information:\n\n${title?'Title: '+title+'\n\n':''}${content}` }],'',2000)
-    setContent(r); updateNote(title,r,tags); setEnh(false)
+    const r = await ai([{ role:'user', content:`You are a professional editor. Improve this note:
+
+${title ? `Title: ${title}\n\n` : ''}${content}
+
+Requirements:
+- Preserve ALL original information and facts — never remove anything important
+- Fix grammar, spelling, and clarity
+- Improve structure with clear headers (## Heading) where helpful
+- Use **bold** for key points and \`code\` for technical terms
+- Add bullet points for lists of items
+- Make it more actionable and useful
+- Keep the same voice and intent
+
+Return only the improved note content, no preamble.` }], '', 2000)
+    if (r && !r.startsWith('⚠')) { setContent(r); updateNote(title, r, tags); toast('Note enhanced ✨', 'success') }
+    else toast(r || 'Enhancement failed', 'error')
+    setEnh(false)
   }
 
   function addTag() {
@@ -1041,14 +1118,22 @@ function TasksPage({ user }) {
   }
 
   async function aiBreak() {
-    if(!aiIn.trim())return
+    if (!aiIn.trim()) return
     setAiLoad(true)
-    const r=await ai([{role:'user',content:`Break this goal into 5-8 specific actionable tasks. Return ONLY a JSON array of strings, no markdown, no explanation. Goal: ${aiIn}`}],'',1200)
+    const r = await ai([{ role:'user', content:`Break this goal into 5-8 specific, actionable tasks. Each task should be concrete and completable in one sitting.
+
+Goal: ${aiIn}
+
+Return ONLY a valid JSON array of strings. No markdown fences, no explanation, no preamble. Example format:
+["Research competitors in the market", "Write landing page copy", "Set up Stripe payments"]` }], '', 1200)
     try {
-      const arr=JSON.parse(r.match(/\[[\s\S]*\]/)?.[0]||'[]')
-      if(arr.length){ persist([...arr.map(title=>({id:uid(),title:String(title),status:'todo',priority:'medium',description:'',due_date:'',created_at:ts(),updated_at:ts()})),...tasks]); setAiIn(''); toast(`Added ${arr.length} tasks!`,'success') }
-      else toast('No tasks in response','error')
-    } catch { toast('Could not parse AI response','error') }
+      const match = r.match(/\[[\s\S]*\]/)
+      const arr = JSON.parse(match?.[0] || '[]')
+      if (arr.length) {
+        persist([...arr.map(title => ({ id:uid(), title:String(title).trim(), status:'todo', priority:'medium', description:'', due_date:'', created_at:ts(), updated_at:ts() })), ...tasks])
+        setAiIn(''); toast(`✅ Added ${arr.length} tasks!`, 'success')
+      } else toast('No tasks found in response — try rephrasing', 'error')
+    } catch { toast('Could not parse AI response — try again', 'error') }
     setAiLoad(false)
   }
 
@@ -1097,6 +1182,7 @@ function TasksPage({ user }) {
                   <div style={{ flex:1, overflowY:'auto', padding:8 }}>
                     {ct.map(task => {
                       const [pc,,pl]=PRI[task.priority]||PRI.medium
+                      const overdue = task.due_date && task.status !== 'done' && new Date(task.due_date) < new Date()
                       return (
                         <div key={task.id} style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 12px', marginBottom:8 }}>
                           <div style={{ display:'flex', alignItems:'flex-start', gap:8, marginBottom:8 }}>
@@ -1106,7 +1192,7 @@ function TasksPage({ user }) {
                           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:4 }}>
                             <Badge color={task.priority==='high'?'red':task.priority==='medium'?'yellow':'green'}>{pl}</Badge>
                             <div style={{ display:'flex', gap:3, alignItems:'center' }}>
-                              {task.due_date && <span style={{ fontSize:10, color:C.t3 }}>{fmtDate(task.due_date)}</span>}
+                              {task.due_date && <span style={{ fontSize:10, color:overdue?C.red:C.t3, fontWeight:overdue?600:400 }}>{overdue?'⚠ ':''}{fmtDate(task.due_date)}</span>}
                               {CIDX[task.status]>0 && <button onClick={()=>move(task.id,-1)} title="Move left" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:4, color:C.t2, cursor:'pointer', fontSize:11, padding:'1px 5px', lineHeight:1, fontFamily:'inherit' }}>←</button>}
                               {CIDX[task.status]<2 && <button onClick={()=>move(task.id,1)} title="Move right" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:4, color:C.t2, cursor:'pointer', fontSize:11, padding:'1px 5px', lineHeight:1, fontFamily:'inherit' }}>→</button>}
                               <button onClick={()=>setModal(task)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:12, padding:2, fontFamily:'inherit' }}>✎</button>
@@ -1154,16 +1240,79 @@ function TasksPage({ user }) {
 
 // ── YOUTUBE AI ────────────────────────────────────────────────
 const YT = [
-  { id:'titles',  label:'Titles',   icon:'🏷', fn:(t,tr)=>`Generate 10 SEO-optimized YouTube video titles. Make them click-worthy, specific, and varied (numbers, questions, how-tos, etc).\n\n${t?'Topic: '+t+'\n\n':''}${tr?'Transcript:\n'+tr.slice(0,3000):''}` },
-  { id:'captions',label:'Captions', icon:'📝', fn:(t,tr)=>`Write 3 platform-optimized captions for this video:\n1. YouTube description (500 chars + 10 relevant hashtags)\n2. Instagram/TikTok (150 chars + 10 hashtags)\n3. LinkedIn post (200 chars + 10 hashtags)\n\n${t?'Topic: '+t+'\n\n':''}${tr?'Transcript:\n'+tr.slice(0,3000):''}` },
-  { id:'shorts',  label:'Shorts',   icon:'▶',  fn:(t,tr)=>`Identify 5 viral YouTube Shorts ideas. For each: hook (first 3 sec), duration (15-60s), why it would go viral, 3-step outline.\n\n${t?'Topic: '+t+'\n\n':''}${tr?'Transcript:\n'+tr.slice(0,3000):''}` },
-  { id:'strategy',label:'Strategy', icon:'📅', fn:(t,tr)=>`Create a 7-day YouTube content calendar. Include daily video ideas, thumbnail concepts, community post ideas, and channel growth tips.\n\n${t?'Topic/Channel: '+t+'\n\n':''}${tr?'Reference content:\n'+tr.slice(0,3000):''}` },
+  { id:'summary',  label:'Summary',  icon:'📋', fn:(t,tr)=>`Create a comprehensive, structured summary of this YouTube video.
+
+${t?`Video: ${t}\n`:''}${tr?`Transcript:\n${tr.slice(0,4000)}`:''}
+
+Structure your response as:
+## 🎯 Core Message (2-3 sentences)
+
+## 📌 Key Takeaways
+- (5-8 specific, actionable takeaways — not generic)
+
+## 🕐 Key Moments (if transcript has timestamps or clear sections)
+- Intro / hook
+- Main points
+- Conclusion
+
+## 💡 Action Items
+- (3-5 things the viewer should do after watching)
+
+Be specific and extract real information from the content. Never give generic summaries.` },
+  { id:'titles',  label:'Titles',   icon:'🏷', fn:(t,tr)=>`Generate 10 high-converting YouTube video titles.
+
+${t?`Topic: ${t}\n`:''}${tr?`Transcript:\n${tr.slice(0,3000)}`:''}
+
+Requirements:
+- Mix styles: numbers ("7 Ways to..."), questions ("Why does...?"), how-tos, power words
+- Each title under 70 characters (YouTube truncates at ~60)
+- SEO-optimized with searchable keywords
+- Emotionally compelling — triggers curiosity or urgency
+- No clickbait that fails to deliver
+
+Number each title 1-10. Include a ✅ next to your top pick.` },
+  { id:'captions', label:'Captions', icon:'📝', fn:(t,tr)=>`Write 3 platform-specific captions for this video.
+
+${t?`Topic: ${t}\n`:''}${tr?`Transcript:\n${tr.slice(0,3000)}`:''}
+
+## 📺 YouTube Description (500-600 chars)
+Full description with hook, what viewers learn, and 10 relevant hashtags.
+
+## 📱 Instagram / TikTok (150 chars max)
+Short punchy caption + 10 trending hashtags.
+
+## 💼 LinkedIn (250 chars)
+Professional framing + 5 industry hashtags.` },
+  { id:'shorts',  label:'Shorts',   icon:'▶',  fn:(t,tr)=>`Identify 5 YouTube Shorts ideas from this content.
+
+${t?`Topic: ${t}\n`:''}${tr?`Transcript:\n${tr.slice(0,3000)}`:''}
+
+For each Short:
+**Hook** (exact first line, under 3 seconds)
+**Duration**: X seconds
+**Content outline**: 3-4 steps
+**Why it'll perform**: specific reason (trend, emotion, shareability)
+**Thumbnail idea**: describe the visual
+
+Make each one specific to the actual content, not generic.` },
+  { id:'strategy',label:'Strategy', icon:'📅', fn:(t,tr)=>`Create a 7-day YouTube content calendar based on this.
+
+${t?`Channel/Topic: ${t}\n`:''}${tr?`Reference content:\n${tr.slice(0,3000)}`:''}
+
+For each day include:
+- **Video idea** (with working title)
+- **Target keyword** (searchable phrase, low competition)
+- **Thumbnail concept** (describe the visual)
+- **Best upload time** for the niche
+- **Community post** to complement the video
+
+End with 3 channel growth tips specific to this niche.` },
 ]
 
 function YouTubeAIPage({ user }) {
   const [title, setTitle]   = useState('')
   const [trans, setTrans]   = useState('')
-  const [active, setActive] = useState('titles')
+  const [active, setActive] = useState('summary')
   const [outputs, setOut]   = useState({})
   const [loading, setL]     = useState(false)
 
@@ -1171,7 +1320,7 @@ function YouTubeAIPage({ user }) {
     if (!title.trim()&&!trans.trim()) return toast('Add a topic or paste a transcript first','error')
     sb.logEvent('youtube','youtube'); setL(true)
     const type=YT.find(t=>t.id===active)
-    const r=await ai([{role:'user',content:type.fn(title,trans)}],'You are a YouTube growth expert who helps creators build viral channels.',2000)
+    const r=await ai([{role:'user',content:type.fn(title,trans)}],'You are an expert YouTube strategist and content creator with 10+ years growing channels to millions of subscribers. Always give specific, complete, actionable output. Never give generic advice.',2500)
     setOut(p=>({...p,[active]:r})); setL(false)
   }
 
@@ -1210,8 +1359,8 @@ function YouTubeAIPage({ user }) {
         </div>
         <div style={{ padding:20, minHeight:200 }}>
           {loading ? <div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner />Generating…</div>
-           : outputs[active] ? <pre style={{ margin:0, fontFamily:'inherit', fontSize:14, color:C.t1, whiteSpace:'pre-wrap', lineHeight:1.7 }}>{outputs[active]}</pre>
-           : <div style={{ textAlign:'center', color:C.t3, padding:'30px 0', fontSize:14 }}>Generate output will appear here</div>}
+           : outputs[active] ? <div style={{ fontSize:14, color:C.t1, lineHeight:1.7 }}>{renderMsg(outputs[active])}</div>
+           : <div style={{ textAlign:'center', color:C.t3, padding:'30px 0', fontSize:14 }}>Output will appear here — add a topic or transcript above and click Generate</div>}
         </div>
       </Card>
     </div>
@@ -1228,7 +1377,18 @@ function CodeAIPage({ user }) {
   const [out,setOut]     = useState('')
   const [loading,setL]   = useState(false)
   const [act,setAct]     = useState(null)
-  const SYS = `You are an expert ${lang} developer. Write clean, production-ready code.`
+  const SYS = `You are an expert ${lang} developer. Always:
+- Write clean, production-ready code with clear comments
+- Follow best practices and modern patterns for ${lang}
+- Include error handling where appropriate
+- Add brief inline comments explaining non-obvious logic
+- For generated code: include a short usage example at the end`
+
+  function downloadCode() {
+    const ext = { JavaScript:'js', TypeScript:'ts', Python:'py', React:'jsx', 'HTML/CSS':'html', Rust:'rs', Go:'go', Swift:'swift', SQL:'sql', Bash:'sh' }
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([out], {type:'text/plain'})), download: `code.${ext[lang]||'txt'}` })
+    a.click(); URL.revokeObjectURL(a.href)
+  }
 
   async function run(action, prompt) {
     setAct(action); setL(true); sb.logEvent('code','code')
@@ -1269,8 +1429,8 @@ function CodeAIPage({ user }) {
         </div>
         <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'12px 16px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-            <span style={{ fontSize:13, color:C.t2 }}>Output</span>
-            {out && <Button onClick={()=>copyText(out)} variant="secondary" size="sm">📋 Copy</Button>}
+            <span style={{ fontSize:13, color:C.t2 }}>Output · {lang}</span>
+            {out && <div style={{ display:'flex', gap:6 }}><Button onClick={()=>copyText(out)} variant="secondary" size="sm">📋 Copy</Button><Button onClick={downloadCode} variant="secondary" size="sm">⬇ Download</Button></div>}
           </div>
           <div style={{ flex:1, overflowY:'auto', padding:16 }}>
             {loading?<div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner />Generating…</div>
@@ -1302,9 +1462,37 @@ function BuilderPage({ user }) {
   async function build() {
     if(!desc.trim()) return toast('Describe your product first','error')
     sb.logEvent('builder','builder'); setL(true)
-    const r=await ai([{role:'user',content:`Create a complete, beautiful, responsive single-page HTML landing page for: ${desc}\n\nStyle guide: ${BGUIDES[style]}\n\nRequirements:\n- All CSS in <style> tags\n- Hero section with compelling headline and CTA button\n- 3-4 feature/benefit cards\n- Stats or social proof section\n- Final CTA section\n- Clean footer\n- Mobile responsive with media queries\n- No external dependencies\n\nReturn ONLY valid HTML starting with <!DOCTYPE html> and nothing else.`}],'You are an expert web designer who creates stunning, conversion-optimized landing pages.',4000)
-    const m=r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
-    setHtml(m?m[1]:r); setView('preview'); setL(false)
+    const prompt = `Create a stunning, complete, production-ready single-page landing page HTML file.
+
+Product/Business: ${desc}
+Style: ${style} — ${BGUIDES[style]}
+
+REQUIRED SECTIONS (all must be present):
+1. Navigation bar — logo (use first word of product name), 3-4 nav links, CTA button
+2. Hero — powerful headline (8 words max), sub-headline (1-2 sentences), primary + secondary CTA buttons, hero visual (CSS-only: geometric shapes, gradient orbs, or grid pattern)
+3. Social proof bar — 3 logos (text-based), or "Trusted by X+ users" metric
+4. Features — 3 cards with icon (emoji), title, and 2-sentence description
+5. How it works — 3 numbered steps with brief description
+6. Testimonial — one compelling quote with name and role
+7. Pricing or CTA section — one clear call-to-action with button
+8. Footer — logo, tagline, 3 column links, copyright
+
+TECHNICAL REQUIREMENTS:
+- All CSS in <style> tag — zero external dependencies
+- Smooth scroll: html { scroll-behavior: smooth }
+- Fade-in on load: @keyframes fadeUp { from { opacity:0; transform:translateY(24px) } to { opacity:1; transform:translateY(0) } }
+- Apply animation to hero and section headings
+- Hover effects on all buttons (transform: translateY(-2px), box-shadow)
+- Hover effects on feature cards (border color change, subtle lift)
+- Mobile responsive: @media (max-width: 768px) { flex to column, font sizes reduced }
+- Smooth gradient backgrounds where appropriate
+- No placeholder images — use CSS shapes, gradients, or emoji as visuals
+
+Return ONLY valid HTML starting with <!DOCTYPE html>. No explanation, no markdown fences.`
+
+    const r = await ai([{role:'user',content:prompt}], 'You are a world-class web designer who creates stunning, conversion-optimised landing pages that look like they cost $10,000 to build. Every element is polished, every section purposeful. Never use placeholder images. Use CSS art for visuals.', 4000)
+    const m = r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
+    setHtml(m ? m[1] : r); setView('preview'); setL(false)
   }
 
   function dl() {
@@ -1323,7 +1511,7 @@ function BuilderPage({ user }) {
           </select>
           <Button onClick={build} disabled={loading}>{loading?<Spinner size={14} color="#fff"/>:'⬡'} Build Site</Button>
         </div>
-        {loading && <p style={{ margin:'10px 0 0', fontSize:13, color:C.t2 }}>⚡ Building your landing page… (~20 seconds)</p>}
+        {loading && <p style={{ margin:'10px 0 0', fontSize:13, color:C.accent }}>⚡ Building your landing page with all sections, animations, and responsive styles… (~30 seconds)</p>}
       </div>
       {html ? (
         <>
