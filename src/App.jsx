@@ -6,69 +6,158 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 
 // ── VOICE RECOGNITION HOOK ───────────────────────────────────
+// ── SPEECH RECOGNITION HOOK ─────────────────────────────────
+// Explicitly requests microphone permission before starting recognition
+// so browsers never throw "not-allowed" silently.
 function useSpeechRecognition() {
   const [listening, setListening] = useState(false)
   const [transcript, setTranscript] = useState('')
   const recoRef = useRef(null)
 
-  const start = useCallback((onFinal) => {
+  const start = useCallback(async (onFinal) => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) { toast('Speech recognition not supported in this browser. Try Chrome or Edge.', 'error'); return }
+    if (!SR) {
+      toast('Voice input requires Chrome, Edge, or Safari.', 'error')
+      return
+    }
+
+    // Request mic permission explicitly — this shows the browser prompt and
+    // prevents the "not-allowed" error that fires when recognition starts cold.
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Stop the stream immediately — we only needed the permission grant.
+      stream.getTracks().forEach(t => t.stop())
+    } catch (err) {
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        toast('Microphone access denied. Allow mic access in your browser settings then try again.', 'error')
+      } else if (err.name === 'NotFoundError') {
+        toast('No microphone found. Connect a mic and try again.', 'error')
+      } else {
+        toast('Microphone error: ' + err.message, 'error')
+      }
+      return
+    }
+
     const reco = new SR()
     recoRef.current = reco
     reco.lang = 'en-GB'
     reco.interimResults = true
     reco.continuous = false
+    reco.maxAlternatives = 1
+
+    reco.onstart  = () => setListening(true)
     reco.onresult = (e) => {
       const t = Array.from(e.results).map(r => r[0].transcript).join('')
       setTranscript(t)
       if (e.results[e.results.length - 1].isFinal) onFinal?.(t)
     }
-    reco.onend = () => setListening(false)
-    reco.onerror = (e) => { setListening(false); if (e.error !== 'no-speech') toast('Mic error: ' + e.error, 'error') }
+    reco.onend   = () => setListening(false)
+    reco.onerror = (e) => {
+      setListening(false)
+      const msgs = {
+        'not-allowed':    'Microphone access denied. Check browser permissions.',
+        'audio-capture':  'No microphone detected.',
+        'network':        'Network error during speech recognition.',
+        'no-speech':      null, // silent — user just didn't speak
+        'aborted':        null, // silent — user cancelled
+      }
+      const msg = msgs[e.error]
+      if (msg) toast(msg, 'error')
+    }
+
     reco.start()
-    setListening(true)
   }, [])
 
-  const stop = useCallback(() => { recoRef.current?.stop(); setListening(false) }, [])
+  const stop = useCallback(() => {
+    recoRef.current?.stop()
+    setListening(false)
+  }, [])
 
   return { listening, transcript, setTranscript, start, stop }
 }
 
-// ── TEXT-TO-SPEECH HOOK ───────────────────────────────────────
+// ── TTS HOOK ─────────────────────────────────────────────────
+// Loads voices asynchronously (voiceschanged fires after first getVoices() call).
+// Picks the best available UK English voice in priority order:
+// Google UK English > Microsoft George/Hazel > macOS Daniel > any en-GB > any en
 function useTTS() {
-  const [speaking, setSpeaking] = useState(false)
-  const [rate, setRate] = useState(1.0)
+  const [speaking, setSpeaking]   = useState(false)
+  const [rate, setRate]           = useState(1.0)
+  const [voices, setVoices]       = useState([])
+  const [voiceIdx, setVoiceIdx]   = useState(0) // 0=auto/best, 1=UK Male, 2=UK Female
   const uttRef = useRef(null)
+
+  // Load voices — must listen to voiceschanged because getVoices() is empty on first call
+  useEffect(() => {
+    function load() {
+      const all = window.speechSynthesis?.getVoices() || []
+      if (all.length) setVoices(all)
+    }
+    load()
+    window.speechSynthesis?.addEventListener('voiceschanged', load)
+    return () => window.speechSynthesis?.removeEventListener('voiceschanged', load)
+  }, [])
+
+  // Pick best voice for a given preference (male/female/auto)
+  function pickVoice(pref) {
+    if (!voices.length) return null
+
+    // Priority lists — ordered best to acceptable
+    const malePriority   = ['Google UK English Male', 'Microsoft George', 'Daniel', 'Arthur']
+    const femalePriority = ['Google UK English Female', 'Microsoft Hazel', 'Microsoft Libby', 'Karen', 'Moira']
+
+    const tryFind = (names) => names.reduce((found, name) =>
+      found || voices.find(v => v.name === name), null)
+
+    if (pref === 'male')   return tryFind(malePriority)   || voices.find(v => v.lang === 'en-GB') || voices.find(v => v.lang.startsWith('en'))
+    if (pref === 'female') return tryFind(femalePriority) || voices.find(v => v.lang === 'en-GB') || voices.find(v => v.lang.startsWith('en'))
+    // Auto: prefer Google UK Male → Google UK Female → any en-GB → any en
+    return tryFind([...malePriority, ...femalePriority])
+      || voices.find(v => v.lang === 'en-GB')
+      || voices.find(v => v.lang.startsWith('en'))
+  }
+
+  const PREFS = ['auto', 'male', 'female']
 
   function speak(text) {
     if (!window.speechSynthesis) return
-    if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return }
-    const clean = text.replace(/#{1,3}\s/g,'').replace(/\*{1,2}(.+?)\*{1,2}/g,'$1').replace(/`(.+?)`/g,'$1').replace(/\[(.+?)\]\(.+?\)/g,'$1')
+    if (window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel()
+      setSpeaking(false)
+      return
+    }
+    // Strip markdown symbols so they aren't spoken aloud
+    const clean = text
+      .replace(/#{1,6}\s+/g, '')
+      .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1')
+      .replace(/`{1,3}[^`]*`{1,3}/g, 'code block')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/^\s*[-*•]\s+/gm, '')
+      .replace(/\n{2,}/g, '. ')
+      .trim()
+
     const u = new SpeechSynthesisUtterance(clean)
     uttRef.current = u
-    u.lang = 'en-GB'
-    u.rate = rate
-    // Prefer a premium voice if available
-    const voices = window.speechSynthesis.getVoices()
-    const preferred = voices.find(v => v.lang === 'en-GB' && v.name.toLowerCase().includes('daniel'))
-      || voices.find(v => v.lang === 'en-GB')
-      || voices.find(v => v.lang.startsWith('en'))
-    if (preferred) u.voice = preferred
+    u.lang  = 'en-GB'
+    u.rate  = rate
+    u.pitch = 1.0
+
+    const voice = pickVoice(PREFS[voiceIdx])
+    if (voice) u.voice = voice
+
     u.onstart = () => setSpeaking(true)
     u.onend   = () => setSpeaking(false)
-    u.onerror = () => setSpeaking(false)
+    u.onerror = (e) => { if (e.error !== 'interrupted') setSpeaking(false) }
+
     window.speechSynthesis.speak(u)
   }
 
-  function pause() {
-    if (window.speechSynthesis.speaking) { window.speechSynthesis.pause(); setSpeaking(false) }
-  }
-  function resume() {
-    if (window.speechSynthesis.paused) { window.speechSynthesis.resume(); setSpeaking(true) }
-  }
+  function stop() { window.speechSynthesis?.cancel(); setSpeaking(false) }
 
-  return { speaking, speak, pause, resume, rate, setRate }
+  // Available UK voices for the picker (derived from loaded voices)
+  const ukVoices = voices.filter(v => v.lang.startsWith('en'))
+
+  return { speaking, speak, stop, rate, setRate, voices: ukVoices, voiceIdx, setVoiceIdx, PREFS }
 }
 
 // ── IMAGE FILE UTILS ──────────────────────────────────────────
@@ -845,7 +934,7 @@ function ChatPage({ user }) {
   const fileRef   = useRef(null)
 
   const { listening, transcript, setTranscript, start: startReco, stop: stopReco } = useSpeechRecognition()
-  const { speaking, speak, rate, setRate } = useTTS()
+  const { speaking, speak, stop: stopTTS, rate, setRate, voiceIdx, setVoiceIdx, PREFS } = useTTS()
   const [showSpeed, setShowSpeed] = useState(false)
   const [activeTTS, setActiveTTS] = useState(null) // message id being read aloud
 
@@ -934,12 +1023,14 @@ function ChatPage({ user }) {
   }
 
   function handleTTS(msg) {
-    if (activeTTS === msg.id) { window.speechSynthesis?.cancel(); setActiveTTS(null); return }
+    if (activeTTS === msg.id) { stopTTS(); setActiveTTS(null); return }
     setActiveTTS(msg.id)
     speak(msg.content)
-    // Clear active when done
-    const u = window.speechSynthesis
-    const check = setInterval(() => { if (!u?.speaking) { setActiveTTS(null); clearInterval(check) } }, 500)
+    const check = setInterval(() => {
+      if (!window.speechSynthesis?.speaking && !window.speechSynthesis?.pending) {
+        setActiveTTS(null); clearInterval(check)
+      }
+    }, 400)
   }
 
   function del(id, e) {
@@ -1023,13 +1114,30 @@ function ChatPage({ user }) {
                     </div>
                     <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:4, flexWrap:'wrap' }}>
                       {m.role === 'assistant' && <>
-                        <button onClick={() => copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>📋 Copy</button>
-                        <button onClick={() => handleTTS(m)} style={{ background:'none', border:'none', color:activeTTS===m.id?C.accent:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit' }}>{activeTTS===m.id?'⏹ Stop':'🔊 Read'}</button>
+                        <button onClick={() => copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit', transition:'color .15s' }}>📋 Copy</button>
+                        <button onClick={() => handleTTS(m)}
+                          style={{ background: activeTTS===m.id ? C.accentM : 'none', border: activeTTS===m.id ? `1px solid ${C.borderFocus}` : '1px solid transparent', borderRadius:6, color: activeTTS===m.id ? C.accent : C.t3, cursor:'pointer', fontSize:11, padding:'2px 8px', fontFamily:'inherit', transition:'all .15s' }}>
+                          {activeTTS===m.id ? '⏹ Stop' : '🔊 Read'}
+                        </button>
                         {activeTTS === m.id && (
-                          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
-                            {[0.75,1,1.25,1.5,2].map(r => (
-                              <button key={r} onClick={() => { setRate(r); window.speechSynthesis?.cancel(); setActiveTTS(null) }}
-                                style={{ background:rate===r?C.accentM:'none', border:`1px solid ${rate===r?C.accent:C.border}`, borderRadius:4, color:rate===r?C.accent:C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit' }}>{r}×</button>
+                          <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 8px', background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
+                            {/* Speed */}
+                            <span style={{ fontSize:10, color:C.t3, marginRight:2 }}>Speed</span>
+                            {[0.75, 1, 1.25, 1.5, 2].map(r => (
+                              <button key={r}
+                                onClick={() => setRate(r)}
+                                style={{ background: rate===r ? C.accent : 'none', border: `1px solid ${rate===r ? C.accent : C.border}`, borderRadius:4, color: rate===r ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit', transition:'all .1s' }}>
+                                {r}×
+                              </button>
+                            ))}
+                            {/* Voice */}
+                            <span style={{ fontSize:10, color:C.t3, marginLeft:4, marginRight:2 }}>Voice</span>
+                            {PREFS.map((p, i) => (
+                              <button key={p}
+                                onClick={() => { setVoiceIdx(i); stopTTS(); setActiveTTS(null) }}
+                                style={{ background: voiceIdx===i ? C.accent : 'none', border: `1px solid ${voiceIdx===i ? C.accent : C.border}`, borderRadius:4, color: voiceIdx===i ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 6px', fontFamily:'inherit', textTransform:'capitalize', transition:'all .1s' }}>
+                                {p}
+                              </button>
                             ))}
                           </div>
                         )}
