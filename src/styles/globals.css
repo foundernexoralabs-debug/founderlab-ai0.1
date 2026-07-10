@@ -1,13 +1,41 @@
-/* Modern glassmorphism buttons */
+/* FounderLab AI — global styles (plain CSS, no Tailwind) */
+
 .btn-premium {
-  @apply px-6 py-3 rounded-2xl font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 shadow-lg shadow-indigo-200 hover:shadow-xl hover:scale-[1.02] active:scale-95 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  display: inline-flex;
+  align-items: center;
+  padding: 12px 24px;
+  border-radius: 16px;
+  font-weight: 500;
+  font-size: 14px;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border: none;
+  box-shadow: 0 4px 20px rgba(99,102,241,.35);
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s, opacity .15s;
 }
+.btn-premium:hover  { transform: translateY(-2px); box-shadow: 0 6px 28px rgba(99,102,241,.45); }
+.btn-premium:active { transform: scale(.97); }
+.btn-premium:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 
 .btn-glass {
-  @apply px-4 py-2 rounded-xl bg-white/70 backdrop-blur-md border border-white/30 shadow-sm hover:bg-white/90 transition;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 12px;
+  background: rgba(255,255,255,.06);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,.12);
+  color: #eeeef8;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background .15s, border-color .15s;
 }
+.btn-glass:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.2); }
 
-/* Voice selector card */
 .glass-card {
-  @apply bg-white/80 backdrop-blur-lg border border-white/30 rounded-2xl;
+  background: rgba(15,15,26,.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 16px;
 }

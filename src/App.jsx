@@ -1,42 +1,46 @@
 // ============================================================
 // FOUNDERLAB AI — src/App.jsx  |  Phase 2 Complete
-// Single file · Inline styles only · No external libraries
-// Colors, data patterns, and auth match master specification
+// Single file · Inline styles · Voice + TTS via dedicated modules
 // ============================================================
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import VoiceSpeedSelector from '@/components/settings/VoiceSpeedSelector'
+import { DEFAULT_VOICE_CONFIG } from '@/lib/voiceService'
+import { loadBrowserVoices, synthesizeSpeech, stopSpeech } from '@/services/speechService'
+import { getMicrophoneStream } from '@/lib/microphone'
+import ViralClipStudio from '@/components/viral-clip-studio/ClipStudio'
 
-// ── VOICE RECOGNITION HOOK ───────────────────────────────────
-// ── SPEECH RECOGNITION HOOK ─────────────────────────────────
-// Explicitly requests microphone permission before starting recognition
-// so browsers never throw "not-allowed" silently.
+// ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
+const LS_VOICE = 'fl_voice_config'
+function getVoiceConfig() {
+  try { return { ...DEFAULT_VOICE_CONFIG, ...JSON.parse(localStorage.getItem(LS_VOICE) || '{}') } }
+  catch { return { ...DEFAULT_VOICE_CONFIG } }
+}
+function persistVoiceConfig(c) {
+  try { localStorage.setItem(LS_VOICE, JSON.stringify(c)) } catch {}
+}
+
+// ── SPEECH RECOGNITION HOOK ───────────────────────────────────
+// Uses getMicrophoneStream() from microphone.ts for clean, error-mapped
+// permission handling before SpeechRecognition acquires the hardware.
 function useSpeechRecognition() {
-  const [listening, setListening] = useState(false)
+  const [listening,  setListening]  = useState(false)
   const [transcript, setTranscript] = useState('')
   const recoRef = useRef(null)
 
   const start = useCallback(async (onFinal) => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) {
-      toast('Voice input requires Chrome, Edge, or Safari.', 'error')
-      return
-    }
+    if (!SR) { toast('Voice input requires Chrome, Edge, or Safari.', 'error'); return }
 
-    // Request mic permission explicitly — this shows the browser prompt and
-    // prevents the "not-allowed" error that fires when recognition starts cold.
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      // Stop the stream immediately — we only needed the permission grant.
-      stream.getTracks().forEach(t => t.stop())
-    } catch (err) {
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        toast('Microphone access denied. Allow mic access in your browser settings then try again.', 'error')
-      } else if (err.name === 'NotFoundError') {
-        toast('No microphone found. Connect a mic and try again.', 'error')
-      } else {
-        toast('Microphone error: ' + err.message, 'error')
-      }
-      return
-    }
+    // getMicrophoneStream() maps all browser permission errors to clear messages
+    let stream
+    try { stream = await getMicrophoneStream() }
+    catch (err) { toast(err.message, 'error'); return }
+
+    // Release stream — we only need the permission grant
+    stream.getTracks().forEach(t => t.stop())
+
+    // 150 ms settle: audio subsystem releases hardware before SpeechRecognition re-acquires
+    await new Promise(r => setTimeout(r, 150))
 
     const reco = new SR()
     recoRef.current = reco
@@ -44,7 +48,6 @@ function useSpeechRecognition() {
     reco.interimResults = true
     reco.continuous = false
     reco.maxAlternatives = 1
-
     reco.onstart  = () => setListening(true)
     reco.onresult = (e) => {
       const t = Array.from(e.results).map(r => r[0].transcript).join('')
@@ -54,110 +57,52 @@ function useSpeechRecognition() {
     reco.onend   = () => setListening(false)
     reco.onerror = (e) => {
       setListening(false)
-      const msgs = {
-        'not-allowed':    'Microphone access denied. Check browser permissions.',
-        'audio-capture':  'No microphone detected.',
-        'network':        'Network error during speech recognition.',
-        'no-speech':      null, // silent — user just didn't speak
-        'aborted':        null, // silent — user cancelled
+      const silent = new Set(['no-speech', 'aborted'])
+      if (!silent.has(e.error)) {
+        const msgs = {
+          'not-allowed':   'Mic blocked — allow microphone access in browser settings.',
+          'audio-capture': 'No microphone found.',
+          'network':       'Network error during speech recognition.',
+        }
+        toast(msgs[e.error] || ('Speech error: ' + e.error), 'error')
       }
-      const msg = msgs[e.error]
-      if (msg) toast(msg, 'error')
     }
-
     reco.start()
   }, [])
 
-  const stop = useCallback(() => {
-    recoRef.current?.stop()
-    setListening(false)
-  }, [])
-
+  const stop = useCallback(() => { recoRef.current?.stop(); setListening(false) }, [])
   return { listening, transcript, setTranscript, start, stop }
 }
 
 // ── TTS HOOK ─────────────────────────────────────────────────
-// Loads voices asynchronously (voiceschanged fires after first getVoices() call).
-// Picks the best available UK English voice in priority order:
-// Google UK English > Microsoft George/Hazel > macOS Daniel > any en-GB > any en
-function useTTS() {
+// Delegates to speechService.ts: ElevenLabs proxy first, browser fallback.
+// voiceConfig comes from localStorage (fl_voice_config) via SettingsPage.
+function useTTS(voiceConfig) {
   const [speaking, setSpeaking]   = useState(false)
-  const [rate, setRate]           = useState(1.0)
-  const [voices, setVoices]       = useState([])
-  const [voiceIdx, setVoiceIdx]   = useState(0) // 0=auto/best, 1=UK Male, 2=UK Female
-  const uttRef = useRef(null)
+  const [elAvailable, setElAvail] = useState(null) // null=checking, true, false
 
-  // Load voices — must listen to voiceschanged because getVoices() is empty on first call
+  // Load browser voices on mount (must happen early — voiceschanged is async)
+  useEffect(() => { loadBrowserVoices() }, [])
+
+  // Probe ElevenLabs availability once on mount
   useEffect(() => {
-    function load() {
-      const all = window.speechSynthesis?.getVoices() || []
-      if (all.length) setVoices(all)
-    }
-    load()
-    window.speechSynthesis?.addEventListener('voiceschanged', load)
-    return () => window.speechSynthesis?.removeEventListener('voiceschanged', load)
+    fetch('/api/tts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: ' ', gender: 'male' }),
+    })
+      .then(r => { const ct = r.headers.get('Content-Type') || ''; setElAvail(ct.includes('audio')) })
+      .catch(() => setElAvail(false))
   }, [])
 
-  // Pick best voice for a given preference (male/female/auto)
-  function pickVoice(pref) {
-    if (!voices.length) return null
-
-    // Priority lists — ordered best to acceptable
-    const malePriority   = ['Google UK English Male', 'Microsoft George', 'Daniel', 'Arthur']
-    const femalePriority = ['Google UK English Female', 'Microsoft Hazel', 'Microsoft Libby', 'Karen', 'Moira']
-
-    const tryFind = (names) => names.reduce((found, name) =>
-      found || voices.find(v => v.name === name), null)
-
-    if (pref === 'male')   return tryFind(malePriority)   || voices.find(v => v.lang === 'en-GB') || voices.find(v => v.lang.startsWith('en'))
-    if (pref === 'female') return tryFind(femalePriority) || voices.find(v => v.lang === 'en-GB') || voices.find(v => v.lang.startsWith('en'))
-    // Auto: prefer Google UK Male → Google UK Female → any en-GB → any en
-    return tryFind([...malePriority, ...femalePriority])
-      || voices.find(v => v.lang === 'en-GB')
-      || voices.find(v => v.lang.startsWith('en'))
+  async function speak(text) {
+    if (speaking) { stopSpeech(); setSpeaking(false); return }
+    setSpeaking(true)
+    try { await synthesizeSpeech(voiceConfig, text) }
+    finally { setSpeaking(false) }
   }
 
-  const PREFS = ['auto', 'male', 'female']
-
-  function speak(text) {
-    if (!window.speechSynthesis) return
-    if (window.speechSynthesis.speaking) {
-      window.speechSynthesis.cancel()
-      setSpeaking(false)
-      return
-    }
-    // Strip markdown symbols so they aren't spoken aloud
-    const clean = text
-      .replace(/#{1,6}\s+/g, '')
-      .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1')
-      .replace(/`{1,3}[^`]*`{1,3}/g, 'code block')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-      .replace(/^\s*[-*•]\s+/gm, '')
-      .replace(/\n{2,}/g, '. ')
-      .trim()
-
-    const u = new SpeechSynthesisUtterance(clean)
-    uttRef.current = u
-    u.lang  = 'en-GB'
-    u.rate  = rate
-    u.pitch = 1.0
-
-    const voice = pickVoice(PREFS[voiceIdx])
-    if (voice) u.voice = voice
-
-    u.onstart = () => setSpeaking(true)
-    u.onend   = () => setSpeaking(false)
-    u.onerror = (e) => { if (e.error !== 'interrupted') setSpeaking(false) }
-
-    window.speechSynthesis.speak(u)
-  }
-
-  function stop() { window.speechSynthesis?.cancel(); setSpeaking(false) }
-
-  // Available UK voices for the picker (derived from loaded voices)
-  const ukVoices = voices.filter(v => v.lang.startsWith('en'))
-
-  return { speaking, speak, stop, rate, setRate, voices: ukVoices, voiceIdx, setVoiceIdx, PREFS }
+  function stop() { stopSpeech(); setSpeaking(false) }
+  return { speaking, speak, stop, elAvailable }
 }
 
 // ── IMAGE FILE UTILS ──────────────────────────────────────────
@@ -295,11 +240,27 @@ const sb = {
 
 // ── SAVE / LOAD (Supabase KV store + localStorage fallback) ──
 const save = async (key, value) => {
-  if (sb.session?.user_id) { try { await sb.setData(key, value) } catch {} return }
-  localStorage.setItem(key, JSON.stringify(value))
+  // Always write to localStorage as an instant local copy
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch {}
+  // If logged in, also sync to Supabase cloud
+  if (sb.session?.user_id) {
+    try { await sb.setData(key, value) } catch (e) {
+      console.warn('[save] Supabase write failed for', key, '— local copy kept:', e?.message)
+    }
+  }
 }
 const load = async (key, def = null) => {
-  if (sb.session?.user_id) { try { const r = await sb.getData(key); return r !== null ? r : def } catch { return def } }
+  if (sb.session?.user_id) {
+    try {
+      const r = await sb.getData(key)
+      if (r !== null && r !== undefined) return r
+      // Cloud returned nothing — try local copy (e.g. data saved before login)
+      const local = localStorage.getItem(key)
+      return local ? JSON.parse(local) : def
+    } catch {
+      try { const local = localStorage.getItem(key); return local ? JSON.parse(local) : def } catch { return def }
+    }
+  }
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : def } catch { return def }
 }
 async function migrateLocalToCloud() {
@@ -1390,7 +1351,12 @@ function TasksPage({ user }) {
     init()
   }, [])
 
-  function persist(u) { setTasks(u); save('fl_tasks',u) }
+  const saveTimer = useRef(null)
+  function persist(u) {
+    setTasks(u)
+    clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(() => save('fl_tasks', u), 400)
+  }
 
   function saveTask(task) {
     const ex = tasks.find(t=>t.id===task.id)
@@ -2287,6 +2253,7 @@ const NAV=[
   {id:'notes',    label:'Notes',     icon:'📝'},
   {id:'tasks',    label:'Tasks',     icon:'✅'},
   {id:'youtube',  label:'YouTube AI',icon:'▶'},
+  {id:'clips',    label:'Clip Studio',icon:'🎬'},
   {id:'code',     label:'Code AI',   icon:'⌨'},
   {id:'builder',  label:'Builder',   icon:'⬡'},
 ]
@@ -2422,6 +2389,7 @@ function AppInner() {
       case 'notes':     return <NotesPage user={user} />
       case 'tasks':     return <TasksPage user={user} />
       case 'youtube':   return <YouTubeAIPage user={user} />
+      case 'clips':     return <div style={{ height:'100%', overflowY:'auto' }}><ViralClipStudio /></div>
       case 'code':      return <CodeAIPage user={user} />
       case 'builder':   return <BuilderPage user={user} />
       case 'settings':  return <SettingsPage user={user} profile={profile} onProfileUpdate={setProfile} onSignOut={signOut} />

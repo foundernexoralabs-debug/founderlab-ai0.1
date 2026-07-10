@@ -1,89 +1,77 @@
-import * as sdk from "microsoft-cognitiveservices-speech-sdk";
-import {
-  AZURE_VOICES,
-  ELEVENLABS_VOICES,
-  VoiceConfig,
-  getSSML,
-} from "@/lib/voiceService";
-
 /**
- * Synthesize speech using Azure Neural Voices.
- * Returns a Blob containing audio/mpeg.
+ * Speech synthesis service.
+ * Provider priority: ElevenLabs (via /api/tts proxy) → Browser Web Speech API.
+ * API keys never touch the frontend — the proxy reads process.env server-side.
  */
-export async function synthesizeSpeech(
-  config: VoiceConfig,
-  text: string
-): Promise<Blob> {
-  if (config.provider === "elevenlabs") {
-    return synthesizeElevenLabs(config, text);
-  }
+import { VoiceConfig, pickBrowserVoice, cleanForSpeech } from '@/lib/voiceService'
 
-  const speechKey = process.env.NEXT_PUBLIC_AZURE_SPEECH_KEY!;
-  const region = process.env.NEXT_PUBLIC_AZURE_SPEECH_REGION!;
-  const voiceName =
-    config.gender === "male"
-      ? AZURE_VOICES.male
-      : AZURE_VOICES.female;
+let _browserVoices: SpeechSynthesisVoice[] = []
 
-  const speechConfig = sdk.SpeechConfig.fromSubscription(speechKey, region);
-  speechConfig.speechSynthesisVoiceName = voiceName;
-  speechConfig.speechSynthesisOutputFormat =
-    sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3;
-
-  const ssml = getSSML(config, text);
-  const synthesizer = new sdk.SpeechSynthesizer(speechConfig);
-
-  return new Promise((resolve, reject) => {
-    synthesizer.speakSsmlAsync(
-      ssml,
-      (result) => {
-        synthesizer.close();
-        if (
-          result.reason === sdk.ResultReason.SynthesizingAudioCompleted
-        ) {
-          const audioData = result.audioData;
-          const blob = new Blob([audioData], { type: "audio/mpeg" });
-          resolve(blob);
-        } else {
-          reject(new Error(`Speech synthesis failed: ${result.reason}`));
-        }
-      },
-      (err) => {
-        synthesizer.close();
-        reject(err);
-      }
-    );
-  });
+// Load browser voices async — must wait for voiceschanged event
+export function loadBrowserVoices(): Promise<SpeechSynthesisVoice[]> {
+  return new Promise(resolve => {
+    const synth = window.speechSynthesis
+    if (!synth) { resolve([]); return }
+    const voices = synth.getVoices()
+    if (voices.length) { _browserVoices = voices; resolve(voices); return }
+    synth.addEventListener('voiceschanged', function handler() {
+      const v = synth.getVoices()
+      if (v.length) { _browserVoices = v; synth.removeEventListener('voiceschanged', handler); resolve(v) }
+    })
+  })
 }
 
-async function synthesizeElevenLabs(
-  config: VoiceConfig,
-  text: string
-): Promise<Blob> {
-  const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY!;
-  const voiceId = ELEVENLABS_VOICES.male.id; // currently only Brian is defined
+export async function synthesizeSpeech(config: VoiceConfig, text: string): Promise<void> {
+  const clean = cleanForSpeech(text)
+  if (!clean) return
 
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "xi-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        text,
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          speed: 1 + config.speed / 100, // convert -50..50 to 0.5..1.5
-        },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error("ElevenLabs synthesis failed");
+  if (config.provider === 'elevenlabs') {
+    const ok = await speakElevenLabs(config, clean)
+    if (ok) return
+    // ElevenLabs failed (no key, quota, network) — fall through to browser
   }
-  return response.blob();
+  return speakBrowser(config, clean)
+}
+
+export function stopSpeech(): void {
+  window.speechSynthesis?.cancel()
+}
+
+async function speakElevenLabs(config: VoiceConfig, text: string): Promise<boolean> {
+  try {
+    const r = await fetch('/api/tts', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ text: text.slice(0, 2500), gender: config.gender }),
+    })
+    const ct = r.headers.get('Content-Type') || ''
+    if (!ct.includes('audio')) return false   // got JSON fallback response
+    const blob = await r.blob()
+    if (!blob.size) return false
+    const url = URL.createObjectURL(blob)
+    return new Promise(resolve => {
+      const audio = new Audio(url)
+      audio.playbackRate = 1 + config.speed / 100  // -50..+50 → 0.5..1.5
+      audio.onended  = () => { URL.revokeObjectURL(url); resolve(true) }
+      audio.onerror  = () => { URL.revokeObjectURL(url); resolve(false) }
+      audio.play().catch(() => resolve(false))
+    })
+  } catch { return false }
+}
+
+function speakBrowser(config: VoiceConfig, text: string): Promise<void> {
+  return new Promise(resolve => {
+    const synth = window.speechSynthesis
+    if (!synth) { resolve(); return }
+    synth.cancel()
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang  = 'en-GB'
+    u.rate  = 1 + config.speed / 100
+    u.pitch = 1.0
+    const voice = pickBrowserVoice(config.gender, _browserVoices)
+    if (voice) u.voice = voice
+    u.onend   = () => resolve()
+    u.onerror = () => resolve()
+    synth.speak(u)
+  })
 }
