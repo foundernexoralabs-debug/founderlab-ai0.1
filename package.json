@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "yt-dlp-wrap": "^1.0.10"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
