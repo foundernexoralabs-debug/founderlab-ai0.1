@@ -208,11 +208,12 @@ const sb = {
       return res.ok ? await res.json() : null
     } catch { return null }
   },
-  async _patch(path, body) {
+  async _patch(path, body, prefer = 'return=minimal') {
     try {
-      const res = await fetch(`${SB_URL}/rest/v1/${path}`, { method: 'PATCH', headers: { ...this._h(), Prefer: 'return=minimal' }, body: JSON.stringify(body) })
-      return res.ok
-    } catch { return false }
+      const res = await fetch(`${SB_URL}/rest/v1/${path}`, { method: 'PATCH', headers: { ...this._h(), Prefer: prefer }, body: JSON.stringify(body) })
+      if (!res.ok) return prefer.includes('representation') ? [] : false
+      return prefer.includes('representation') ? await res.json() : true
+    } catch { return prefer.includes('representation') ? [] : false }
   },
   async _post(path, body, prefer = 'return=minimal') {
     try {
@@ -223,8 +224,26 @@ const sb = {
 
   async getProfile()       { const d = await this._get(`profiles?id=eq.${this.session.user_id}&select=*`); return Array.isArray(d) ? d[0] || null : null },
   async updateProfile(obj) { return this._post('profiles', { id: this.session.user_id, ...obj }, 'resolution=merge-duplicates,return=minimal') },
-  async getData(key)       { const d = await this._get(`user_data?user_id=eq.${this.session.user_id}&key=eq.${encodeURIComponent(key)}&select=value`); return Array.isArray(d) && d.length ? d[0].value : null },
-  async setData(key, val)  { return this._post('user_data', { user_id: this.session.user_id, key, value: val }, 'resolution=merge-duplicates,return=minimal') },
+  // getData: always read the MOST RECENT row for this key — protects against
+  // duplicate rows if the DB is missing a unique(user_id,key) constraint.
+  async getData(key) {
+    const d = await this._get(`user_data?user_id=eq.${this.session.user_id}&key=eq.${encodeURIComponent(key)}&select=id,value&order=id.desc&limit=1`)
+    return Array.isArray(d) && d.length ? d[0].value : null
+  },
+  // setData: does NOT rely on PostgREST upsert (which silently no-ops into a
+  // plain insert if the DB lacks a unique constraint). Instead: try to PATCH
+  // the existing row for (user_id,key); if none exists, INSERT one. This is
+  // correct and idempotent no matter what the live schema looks like.
+  async setData(key, val) {
+    const uid = this.session.user_id
+    const updated = await this._patch(
+      `user_data?user_id=eq.${uid}&key=eq.${encodeURIComponent(key)}`,
+      { value: val },
+      'return=representation'
+    )
+    if (Array.isArray(updated) && updated.length > 0) return true
+    return this._post('user_data', { user_id: uid, key, value: val }, 'return=minimal')
+  },
   async exportAll()        { return this._get(`user_data?user_id=eq.${this.session.user_id}&select=key,value`) || [] },
   async logEvent(ev, pg)   { try { await this._post('usage_events', { user_id: this.session.user_id, event: ev, page: pg }) } catch {} },
   async getEventCounts()   {
