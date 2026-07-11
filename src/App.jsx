@@ -7,6 +7,9 @@ import VoiceSpeedSelector from '@/components/settings/VoiceSpeedSelector'
 import { DEFAULT_VOICE_CONFIG } from '@/lib/voiceService'
 import { loadBrowserVoices, synthesizeSpeech, stopSpeech } from '@/services/speechService'
 import { getMicrophoneStream } from '@/lib/microphone'
+import { zipSupported, createZip, readZip, downloadBlob } from '@/lib/zip'
+import { detectLanguage, detectFromDescription } from '@/lib/langDetect'
+import { parseFiles, isPreviewable, buildPreviewDoc } from '@/lib/codeFiles'
 
 // ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
 const LS_VOICE = 'fl_voice_config'
@@ -437,6 +440,21 @@ async function ai(messages, system = '', max = 1200) {
 function uid()  { try { return crypto.randomUUID() } catch { return Date.now().toString(36) + Math.random().toString(36).slice(2) } }
 function ts()   { return new Date().toISOString() }
 function timeg(){ const h = new Date().getHours(); return h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening' }
+
+// Cross-module handoff: stash a payload for another page, then switch to it.
+// The destination page reads+clears fl_handoff_<page> on mount (see BuilderPage/ChatPage).
+function flNavigate(page, payload) {
+  try { if (payload !== undefined) localStorage.setItem(`fl_handoff_${page}`, JSON.stringify(payload)) } catch {}
+  window.dispatchEvent(new CustomEvent('fl:navigate', { detail: { page } }))
+}
+function flConsumeHandoff(page) {
+  try {
+    const raw = localStorage.getItem(`fl_handoff_${page}`)
+    if (!raw) return null
+    localStorage.removeItem(`fl_handoff_${page}`)
+    return JSON.parse(raw)
+  } catch { return null }
+}
 function fmtDate(iso) { if (!iso) return ''; try { return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short' }) } catch { return '' } }
 function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied!', 'success')).catch(() => {}) }
 
@@ -927,7 +945,17 @@ function ChatPage({ user }) {
     async function init() {
       setLD(true); sb.logEvent('chat', 'chat')
       const d = await load('fl_convos', [])
-      setConvos(Array.isArray(d) ? d : [])
+      const list = Array.isArray(d) ? d : []
+      setConvos(list)
+      const h = flConsumeHandoff('chat')
+      if (h?.message) {
+        const c = { id: uid(), title: h.message.slice(0,40), pinned:false, messages: [], created_at: ts(), updated_at: ts() }
+        const updated = [c, ...list]
+        setConvos(updated); save('fl_convos', updated)
+        setActiveId(c.id)
+        setInput(h.message)
+        toast('Loaded from Code AI — review and press Enter to send', 'success')
+      }
       setLD(false)
     }
     init()
@@ -2104,74 +2132,531 @@ function YouTubeAIPage({ user }) {
 
 // ── CODE AI ──────────────────────────────────────────────────
 const LANGS=['JavaScript','TypeScript','Python','React','HTML/CSS','Rust','Go','Swift','SQL','Bash']
+const EXT_BY_LANG2 = { JavaScript:'js', TypeScript:'ts', Python:'py', React:'jsx', 'HTML/CSS':'html', Rust:'rs', Go:'go', Swift:'swift', SQL:'sql', Bash:'sh' }
+const IMPROVE_FOCUSES = ['Performance','Security','Accessibility','Mobile','SEO','Readability','Best Practices']
+const WS_TABS = [
+  { id:'code',    label:'Code',    icon:'{ }' },
+  { id:'preview', label:'Preview', icon:'▶' },
+  { id:'explain', label:'Explain', icon:'💡' },
+  { id:'files',   label:'Files',   icon:'📁' },
+  { id:'tests',   label:'Tests',   icon:'🧪' },
+  { id:'terminal',label:'Terminal',icon:'>_' },
+]
 
 function CodeAIPage({ user }) {
-  const [lang,setLang]   = useState('JavaScript')
-  const [desc,setDesc]   = useState('')
-  const [code,setCode]   = useState('')
-  const [out,setOut]     = useState('')
-  const [loading,setL]   = useState(false)
-  const [act,setAct]     = useState(null)
-  const SYS = `You are an expert ${lang} developer. Always:
+  // ── Core state (kept from the original implementation) ──────
+  const [desc, setDesc]     = useState('')
+  const [code, setCode]     = useState('')
+  const [loading, setL]     = useState(false)
+  const [act, setAct]       = useState(null)
+
+  // ── Language auto-detection (new) ────────────────────────────
+  const [manualLang, setManualLang] = useState(null)     // user override, null = auto
+  const [advancedOpen, setAdvOpen]  = useState(false)
+  const detected = detectFromDescription(desc) || detectLanguage(code)
+  const lang = manualLang || detected || 'JavaScript'
+
+  // ── Workspace output state ───────────────────────────────────
+  const [tab, setTab]         = useState('code')
+  const [rawOut, setRawOut]   = useState('')      // last raw AI response (generate/improve)
+  const [explainOut, setExplainOut] = useState('')
+  const [reviewIssues, setReviewIssues] = useState(null) // parsed [{severity,title,why,fix,fixedCode}]
+  const [reviewRaw, setReviewRaw] = useState('')
+  const [testsOut, setTestsOut]   = useState('')
+  const [terminalOut, setTerminalOut] = useState('')
+  const [improveFocus, setImproveFocus] = useState(new Set())
+
+  // ── Imported codebase (GitHub / uploaded project) ────────────
+  const [codebase, setCodebase]   = useState(null) // { files:[{path,content}], source, label }
+  const [ghInput, setGhInput]     = useState('')
+  const [importing, setImporting] = useState(false)
+  const zipInputRef = useRef(null)
+
+  // ── GitHub push / deploy ──────────────────────────────────────
+  const [ghPat, setGhPat]         = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghRepoName, setGhRepoName] = useState('')
+  const [ghRepoUrl, setGhRepoUrl] = useState('')
+  const [pushing, setPushing]     = useState(false)
+  const [showGhForm, setShowGhForm] = useState(false)
+
+  const files = parseFiles(rawOut || code, 'main', EXT_BY_LANG2[lang] || 'txt')
+  const previewable = isPreviewable(files)
+
+  const SYS = `You are a senior ${lang} software engineer. Always:
 - Write clean, production-ready code with clear comments
-- Follow best practices and modern patterns for ${lang}
+- Follow current best practices and idiomatic patterns for ${lang}
 - Include error handling where appropriate
-- Add brief inline comments explaining non-obvious logic
-- For generated code: include a short usage example at the end`
+- Prefix multi-file responses with a filename comment (e.g. "// file: src/App.jsx") before each fenced block
+- Keep prose explanation OUTSIDE the code fences so it can be shown separately`
 
-  function downloadCode() {
-    const ext = { JavaScript:'js', TypeScript:'ts', Python:'py', React:'jsx', 'HTML/CSS':'html', Rust:'rs', Go:'go', Swift:'swift', SQL:'sql', Bash:'sh' }
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([out], {type:'text/plain'})), download: `code.${ext[lang]||'txt'}` })
-    a.click(); URL.revokeObjectURL(a.href)
-  }
+  function saveGhPat(v) { setGhPat(v); try { localStorage.setItem('fl_github_pat', v) } catch {} }
 
-  async function run(action, prompt) {
+  // ── Generate / Explain / Improve ─────────────────────────────
+  async function run(action, prompt, opts = {}) {
     setAct(action); setL(true); sb.logEvent('code','code')
-    setOut(await ai([{role:'user',content:prompt}],SYS,2000)); setL(false)
+    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    if (opts.into === 'rawOut') { setRawOut(r); setTab('code') }
+    if (opts.into === 'explainOut') { setExplainOut(r); setTab('explain') }
+    if (opts.into === 'testsOut') { setTestsOut(r); setTab('tests') }
+    if (opts.into === 'terminalOut') { setTerminalOut(r); setTab('terminal') }
+    setL(false)
+    return r
   }
+
+  function generate() {
+    if (!desc.trim()) return toast('Describe what to build first', 'error')
+    run('gen', `Write clean, well-commented ${lang} code that: ${desc}`, { into:'rawOut' })
+  }
+
+  function explain() {
+    const src = code.trim() || rawOut
+    if (!src) return toast('Paste or generate code first', 'error')
+    run('exp', `Explain this ${lang} code clearly — what it does, how it works, and the key patterns used:\n\n${src}`, { into:'explainOut' })
+  }
+
+  async function debugReview() {
+    const src = code.trim() || rawOut
+    if (!src) return toast('Paste or generate code first', 'error')
+    setAct('dbg'); setL(true); sb.logEvent('code','code')
+    const prompt = `Perform a professional code review of this ${lang} code. Categorise every issue found by severity.
+
+${src}
+
+Return ONLY valid JSON, no markdown fences, no prose outside the JSON, in exactly this shape:
+{"issues":[{"severity":"critical|warning|suggestion","title":"short title","why":"why this happens / why it matters","fix":"how to fix it, in plain English","fixedCode":"a short corrected code snippet, or null if not applicable"}]}
+
+If the code has no issues, return {"issues":[]}.`
+    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    try {
+      const jsonMatch = r.match(/\{[\s\S]*\}/)
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : r)
+      setReviewIssues(Array.isArray(parsed.issues) ? parsed.issues : [])
+      setReviewRaw('')
+    } catch {
+      setReviewIssues(null)
+      setReviewRaw(r)
+    }
+    setTab('explain'); setL(false)
+  }
+
+  function improve() {
+    const src = code.trim() || rawOut
+    if (!src) return toast('Paste or generate code first', 'error')
+    const focuses = [...improveFocus]
+    const focusLine = focuses.length ? `Specifically optimise for: ${focuses.join(', ')}.` : 'Improve overall readability, performance, and best practices.'
+    run('imp', `Improve this ${lang} code. ${focusLine} Explain what you changed and why (outside the code fence), then give the improved code:\n\n${src}`, { into:'rawOut' })
+  }
+
+  async function generateTests() {
+    const src = code.trim() || rawOut
+    if (!src) return toast('Paste or generate code first', 'error')
+    setAct('tst'); setL(true); sb.logEvent('code','code')
+    const prompt = `Write comprehensive tests for this ${lang} code: unit tests, integration tests, and edge cases.
+
+${src}
+
+After the test code, add a section titled "AI-Estimated Coverage" listing:
+- Scenarios covered
+- Scenarios NOT covered / recommended additional tests
+This is an AI estimate, not a real coverage tool — label it as such.`
+    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    setTestsOut(r); setTab('tests'); setL(false)
+  }
+
+  async function generateTerminal() {
+    setAct('term'); setL(true)
+    const prompt = `For this ${lang} project, list the exact terminal commands to: 1) install dependencies, 2) run it locally, 3) run tests, 4) build for production, 5) deploy. Use realistic tooling for ${lang}. Format as labelled shell code blocks, no extra prose.`
+    const r = await ai([{ role:'user', content: prompt }], SYS, 800)
+    setTerminalOut(r); setTab('terminal'); setL(false)
+  }
+
+  // ── GitHub import ─────────────────────────────────────────────
+  async function importGithub() {
+    const m = ghInput.trim().match(/(?:github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/|$)/)
+    if (!m) return toast('Enter a repo as owner/repo or a GitHub URL', 'error')
+    const [, owner, repo] = m
+    setImporting(true)
+    try {
+      const metaRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`)
+      if (!metaRes.ok) throw new Error(metaRes.status === 404 ? 'Repository not found (must be public)' : `GitHub error ${metaRes.status}`)
+      const meta = await metaRes.json()
+      const branch = meta.default_branch || 'main'
+      const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`)
+      if (!treeRes.ok) throw new Error('Could not read repository file tree')
+      const tree = await treeRes.json()
+      const candidates = (tree.tree || [])
+        .filter(t => t.type === 'blob' && t.size < 40000)
+        .filter(t => !/node_modules|\.git\/|dist\/|build\/|\.lock$|\.png$|\.jpg$|\.jpeg$|\.gif$|\.svg$|\.ico$|\.woff|\.ttf/i.test(t.path))
+        .sort((a,b) => {
+          const score = p => /readme/i.test(p) ? 0 : /package\.json|requirements\.txt|cargo\.toml|go\.mod/i.test(p) ? 1 : /^src\//i.test(p) ? 2 : 3
+          return score(a.path) - score(b.path)
+        })
+        .slice(0, 18)
+
+      const filesList = []
+      for (const t of candidates) {
+        try {
+          const r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${t.path}`)
+          if (r.ok) filesList.push({ path: t.path, content: await r.text() })
+        } catch {}
+      }
+      if (!filesList.length) throw new Error('No readable source files found')
+      setCodebase({ files: filesList, source: 'github', label: `${owner}/${repo}` })
+      toast(`Imported ${filesList.length} files from ${owner}/${repo}`, 'success')
+      await analyzeCodebase(filesList, `${owner}/${repo}`)
+    } catch (e) {
+      toast(e.message, 'error')
+    }
+    setImporting(false)
+  }
+
+  async function handleZipUpload(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    if (!zipSupported) return toast('ZIP import needs a modern browser (Chrome, Edge, or Safari 16.4+)', 'error')
+    setImporting(true)
+    try {
+      const buf = await file.arrayBuffer()
+      const entries = await readZip(buf)
+      const textFiles = entries
+        .filter(f => !/\.(png|jpe?g|gif|svg|ico|woff2?|ttf|eot|zip|jar|exe|dll|so)$/i.test(f.path))
+        .filter(f => !/node_modules|\.git\//i.test(f.path))
+        .slice(0, 30)
+        .map(f => ({ path: f.path, content: new TextDecoder().decode(f.content) }))
+      if (!textFiles.length) throw new Error('No readable source files found in the ZIP')
+      setCodebase({ files: textFiles, source: 'upload', label: file.name })
+      toast(`Imported ${textFiles.length} files from ${file.name}`, 'success')
+      await analyzeCodebase(textFiles, file.name)
+    } catch (e) {
+      toast('Import failed: ' + e.message, 'error')
+    }
+    setImporting(false)
+  }
+
+  async function analyzeCodebase(filesList, label) {
+    setL(true); setAct('analyze')
+    const bundle = filesList.map(f => `--- ${f.path} ---\n${f.content.slice(0, 2000)}`).join('\n\n').slice(0, 14000)
+    const prompt = `You imported the codebase "${label}". Analyse it and explain:
+1. What this project is and its architecture (frameworks, structure, key modules)
+2. Any bugs or issues you can see
+3. Concrete suggestions for improvement
+4. How to continue developing it
+
+Files:
+${bundle}`
+    const r = await ai([{ role:'user', content: prompt }], 'You are a senior software engineer reviewing an unfamiliar codebase for the first time.', 3000)
+    setExplainOut(r); setTab('explain'); setL(false)
+  }
+
+  // ── One-click actions ──────────────────────────────────────────
+  async function downloadZip() {
+    const list = codebase?.files?.length ? codebase.files : files
+    if (!list.length) return toast('Nothing to download yet', 'error')
+    if (!zipSupported) {
+      list.forEach(f => downloadBlob(new Blob([f.content], { type:'text/plain' }), f.path.split('/').pop()))
+      toast('Downloaded files individually (ZIP not supported in this browser)', 'success')
+      return
+    }
+    const blob = await createZip(list)
+    downloadBlob(blob, `${(codebase?.label || 'founderlab-code').replace(/[^\w.-]/g,'-')}.zip`)
+    toast('ZIP downloaded', 'success')
+  }
+
+  async function pushToGithub() {
+    const list = codebase?.files?.length ? codebase.files : files
+    if (!list.length) return toast('Nothing to push yet', 'error')
+    if (!ghPat || !ghRepoName.trim()) { setShowGhForm(true); return }
+    setPushing(true)
+    try {
+      const userRes = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${ghPat}` } })
+      if (!userRes.ok) throw new Error('Invalid GitHub token — check it has "repo" scope')
+      const ghUser = await userRes.json()
+
+      const createRes = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers: { Authorization: `token ${ghPat}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: ghRepoName.trim(), private: false, auto_init: true }),
+      })
+      if (!createRes.ok && createRes.status !== 422) throw new Error('Could not create repository')
+      const repoFullName = `${ghUser.login}/${ghRepoName.trim()}`
+
+      for (const f of list) {
+        const content = typeof f.content === 'string' ? f.content : new TextDecoder().decode(f.content)
+        const b64 = btoa(unescape(encodeURIComponent(content)))
+        await fetch(`https://api.github.com/repos/${repoFullName}/contents/${f.path}`, {
+          method: 'PUT',
+          headers: { Authorization: `token ${ghPat}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: `Add ${f.path} via FounderLab AI`, content: b64 }),
+        })
+      }
+      const repoUrl = `https://github.com/${repoFullName}`
+      setGhRepoUrl(repoUrl)
+      setShowGhForm(false)
+      toast('Pushed to GitHub', 'success')
+    } catch (e) {
+      toast(e.message, 'error')
+    }
+    setPushing(false)
+  }
+
+  function deployToVercel() {
+    if (!ghRepoUrl) { toast('Push to GitHub first, then deploy', 'error'); return }
+    window.open(`https://vercel.com/new/clone?repository-url=${encodeURIComponent(ghRepoUrl)}`, '_blank', 'noopener,noreferrer')
+  }
+
+  async function saveAsProject() {
+    const list = codebase?.files?.length ? codebase.files : files
+    if (!list.length) return toast('Nothing to save yet', 'error')
+    const projects = await load('fl_projects', [])
+    const project = { id: uid(), name: codebase?.label || desc.slice(0,40) || 'Untitled project', language: lang, files: list, created_at: ts(), updated_at: ts() }
+    await save('fl_projects', [project, ...(Array.isArray(projects)?projects:[])])
+    toast('Saved as Project', 'success')
+  }
+
+  function continueInBuilder() {
+    const previewDoc = buildPreviewDoc(files)
+    flNavigate('builder', { desc: desc || `Continue building this ${lang} project`, html: previewDoc || undefined })
+    toast('Opening in Builder…', 'success')
+  }
+
+  function continueInChat() {
+    const src = code.trim() || rawOut
+    flNavigate('chat', { message: `Here's ${lang} code I was working on in Code AI:\n\n${src.slice(0,3000)}\n\nHelp me continue from here.` })
+    toast('Opening in AI Chat…', 'success')
+  }
+
+  const hasOutput = !!(rawOut || explainOut || testsOut || terminalOut || reviewIssues || reviewRaw)
+  const SEV_COLOR = { critical: C.red, warning: C.yellow, suggestion: C.accent }
+  const SEV_LABEL = { critical: 'Critical', warning: 'Warning', suggestion: 'Suggestion' }
 
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100%', overflow:'hidden' }}>
+      {/* ── Header ── */}
       <div style={{ padding:'16px 24px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-        <h2 style={{ margin:'0 0 12px', fontSize:20, fontWeight:700, color:C.t1 }}>Code AI</h2>
-        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-          {LANGS.map(l=><button key={l} onClick={()=>setLang(l)} style={{ padding:'5px 12px', borderRadius:999, border:`1px solid ${lang===l?C.accent:C.border}`, background:lang===l?C.accentM:'transparent', color:lang===l?C.accent:C.t2, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:'inherit', transition:'all .15s' }}>{l}</button>)}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
+          <h2 style={{ margin:0, fontSize:20, fontWeight:700, color:C.t1 }}>Code AI</h2>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <Badge color={detected ? 'green' : 'accent'}>
+              {manualLang ? `Language: ${manualLang}` : detected ? `Detected: ${detected}` : `Default: ${lang}`}
+            </Badge>
+            <button onClick={() => setAdvOpen(v => !v)}
+              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.t2, cursor:'pointer', fontSize:12, padding:'5px 10px', fontFamily:'inherit' }}>
+              ⚙ Advanced
+            </button>
+          </div>
         </div>
+        {advancedOpen && (
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:12 }}>
+            <button onClick={() => setManualLang(null)}
+              style={{ padding:'5px 12px', borderRadius:999, border:`1px solid ${!manualLang?C.accent:C.border}`, background:!manualLang?C.accentM:'transparent', color:!manualLang?C.accent:C.t2, cursor:'pointer', fontSize:12, fontFamily:'inherit' }}>
+              Auto
+            </button>
+            {LANGS.map(l => (
+              <button key={l} onClick={() => setManualLang(l)}
+                style={{ padding:'5px 12px', borderRadius:999, border:`1px solid ${manualLang===l?C.accent:C.border}`, background:manualLang===l?C.accentM:'transparent', color:manualLang===l?C.accent:C.t2, cursor:'pointer', fontSize:12, fontFamily:'inherit' }}>
+                {l}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
+
       <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
-        <div style={{ width:'44%', borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-          <div style={{ padding:16, borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
+        {/* ── Left: input pane ── */}
+        <div style={{ width:'42%', borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', overflowY:'auto' }}>
+          <div style={{ padding:16, borderBottom:`1px solid ${C.border}` }}>
             <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t3, marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Describe what to build</label>
-            <Input rows={3} value={desc} onChange={e=>setDesc(e.target.value)} placeholder={`Describe the ${lang} code to generate…`} style={{ marginBottom:8, fontSize:13 }} />
-            <Button onClick={()=>desc.trim()&&run('gen',`Write clean, well-commented ${lang} code that: ${desc}`)} disabled={loading||!desc.trim()} full size="sm">
+            <Input rows={3} value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Describe the code to generate — language is detected automatically…" style={{ marginBottom:8, fontSize:13 }} />
+            <Button onClick={generate} disabled={loading||!desc.trim()} full size="sm">
               {loading&&act==='gen'?<Spinner size={13} color="#fff"/>:'✨'} Generate {lang}
             </Button>
           </div>
-          <div style={{ flex:1, padding:16, display:'flex', flexDirection:'column' }}>
+
+          <div style={{ padding:16, borderBottom:`1px solid ${C.border}` }}>
             <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t3, marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Paste existing code</label>
-            <textarea value={code} onChange={e=>setCode(e.target.value)} placeholder="Paste your code here…" style={{ flex:1, background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontFamily:'monospace', fontSize:12, padding:12, outline:'none', resize:'none', lineHeight:1.6 }} />
+            <textarea value={code} onChange={e=>setCode(e.target.value)} placeholder="Paste your code here…"
+              style={{ width:'100%', height:140, background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontFamily:'monospace', fontSize:12, padding:12, outline:'none', resize:'vertical', lineHeight:1.6, boxSizing:'border-box' }} />
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, marginTop:8 }}>
-              {[['exp','📖 Explain',`Explain this ${lang} code clearly. What it does, how it works, key patterns:`],
-                ['dbg','🐛 Debug',`Debug this ${lang} code. Find all bugs, explain each, provide fixed version:`],
-                ['imp','⬆ Improve',`Improve this ${lang} code for readability, performance, best practices:`],
-                ['tst','🧪 Tests',`Write comprehensive unit tests for this ${lang} code. Cover edge cases:`]].map(([a,l,p])=>(
-                <Button key={a} onClick={()=>code.trim()?run(a,p+'\n\n'+code):toast('Paste code first','error')} disabled={loading} variant="secondary" size="sm">
-                  {loading&&act===a?<Spinner size={12} color={C.accent}/>:null}{l}
-                </Button>
-              ))}
+              <Button onClick={explain} disabled={loading} variant="secondary" size="sm">{loading&&act==='exp'?<Spinner size={12} color={C.accent}/>:'📖'} Explain</Button>
+              <Button onClick={debugReview} disabled={loading} variant="secondary" size="sm">{loading&&act==='dbg'?<Spinner size={12} color={C.accent}/>:'🐛'} Code Review</Button>
+              <Button onClick={improve} disabled={loading} variant="secondary" size="sm">{loading&&act==='imp'?<Spinner size={12} color={C.accent}/>:'⬆'} Improve</Button>
+              <Button onClick={generateTests} disabled={loading} variant="secondary" size="sm">{loading&&act==='tst'?<Spinner size={12} color={C.accent}/>:'🧪'} Tests</Button>
+            </div>
+            <div style={{ marginTop:10 }}>
+              <p style={{ margin:'0 0 6px', fontSize:11, color:C.t3, fontWeight:600, textTransform:'uppercase', letterSpacing:'.05em' }}>Improve focus (optional)</p>
+              <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                {IMPROVE_FOCUSES.map(f => {
+                  const on = improveFocus.has(f)
+                  return (
+                    <button key={f} onClick={() => setImproveFocus(s => { const n=new Set(s); n.has(f)?n.delete(f):n.add(f); return n })}
+                      style={{ padding:'4px 10px', borderRadius:999, border:`1px solid ${on?C.accent:C.border}`, background:on?C.accentM:'transparent', color:on?C.accent:C.t2, cursor:'pointer', fontSize:11, fontFamily:'inherit', transition:'all .15s' }}>
+                      {f}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           </div>
+
+          {/* ── Import codebase ── */}
+          <div style={{ padding:16 }}>
+            <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t3, marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Import a project</label>
+            <div style={{ display:'flex', gap:6, marginBottom:8 }}>
+              <Input value={ghInput} onChange={e=>setGhInput(e.target.value)} placeholder="owner/repo or GitHub URL" style={{ flex:1, fontSize:13 }} onKeyDown={e=>e.key==='Enter'&&importGithub()} />
+              <Button onClick={importGithub} disabled={importing||!ghInput.trim()} variant="secondary" size="sm">
+                {importing?<Spinner size={12} color={C.accent}/>:'🔗'} Import
+              </Button>
+            </div>
+            <input ref={zipInputRef} type="file" accept=".zip" style={{ display:'none' }} onChange={handleZipUpload} />
+            <Button onClick={() => zipInputRef.current?.click()} disabled={importing} variant="secondary" size="sm" full>
+              ⬆ Upload project (.zip)
+            </Button>
+            {codebase && (
+              <div style={{ marginTop:8, padding:'8px 10px', background:C.surf, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2 }}>
+                📁 {codebase.label} — {codebase.files.length} files loaded
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* ── Right: workspace ── */}
         <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'12px 16px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-            <span style={{ fontSize:13, color:C.t2 }}>Output · {lang}</span>
-            {out && <div style={{ display:'flex', gap:6 }}><Button onClick={()=>copyText(out)} variant="secondary" size="sm">📋 Copy</Button><Button onClick={downloadCode} variant="secondary" size="sm">⬇ Download</Button></div>}
+          {/* Tab bar */}
+          <div style={{ display:'flex', alignItems:'center', borderBottom:`1px solid ${C.border}`, flexShrink:0, padding:'0 8px', overflowX:'auto' }}>
+            {WS_TABS.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                style={{ padding:'11px 14px', background:'none', border:'none', borderBottom:`2px solid ${tab===t.id?C.accent:'transparent'}`, color:tab===t.id?C.t1:C.t3, cursor:'pointer', fontSize:13, fontWeight:tab===t.id?600:400, fontFamily:'inherit', display:'flex', alignItems:'center', gap:5, whiteSpace:'nowrap', transition:'all .15s' }}>
+                <span style={{ fontSize:11 }}>{t.icon}</span> {t.label}
+              </button>
+            ))}
+            <div style={{ marginLeft:'auto', display:'flex', gap:6, padding:'6px 0' }}>
+              {(rawOut || code) && <Button onClick={()=>copyText(rawOut||code)} variant="secondary" size="sm">📋 Copy</Button>}
+            </div>
           </div>
+
+          {/* Tab content */}
           <div style={{ flex:1, overflowY:'auto', padding:16 }}>
-            {loading?<div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner />Generating…</div>
-             :out?<pre style={{ margin:0, fontFamily:'monospace', fontSize:13, color:C.t1, whiteSpace:'pre-wrap', lineHeight:1.6 }}>{out}</pre>
-             :<div style={{ textAlign:'center', color:C.t3, padding:'50px 0', fontSize:14 }}>Output appears here</div>}
+            {loading ? (
+              <div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner />Working…</div>
+            ) : (
+              <>
+                {tab === 'code' && (
+                  files.length ? (
+                    <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                      {files.map((f,i) => (
+                        <div key={i} style={{ border:`1px solid ${C.border}`, borderRadius:8, overflow:'hidden' }}>
+                          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'7px 12px', background:C.surfHigh, fontSize:11, color:C.t2, fontFamily:'monospace' }}>
+                            <span>{f.path}</span>
+                            <button onClick={()=>copyText(f.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, fontFamily:'inherit' }}>📋</button>
+                          </div>
+                          <pre style={{ margin:0, padding:12, fontFamily:'monospace', fontSize:12.5, color:C.t1, whiteSpace:'pre-wrap', lineHeight:1.6, overflowX:'auto' }}>{f.content}</pre>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <EmptyState icon="{ }" title="No code yet" description="Generate or paste code on the left to see it here." />
+                )}
+
+                {tab === 'preview' && (
+                  previewable ? (
+                    <iframe title="Live preview" srcDoc={buildPreviewDoc(files)}
+                      style={{ width:'100%', height:'100%', minHeight:400, border:`1px solid ${C.border}`, borderRadius:8, background:'#fff' }} />
+                  ) : <EmptyState icon="▶" title="No preview available" description="Live preview works for HTML/CSS/JS output. Generate a website or frontend component to preview it here." />
+                )}
+
+                {tab === 'explain' && (
+                  <>
+                    {explainOut && <div style={{ fontSize:14, color:C.t1, lineHeight:1.75, marginBottom: reviewIssues||reviewRaw ? 24 : 0 }}>{renderMsg(explainOut)}</div>}
+                    {reviewIssues && (
+                      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                        <p style={{ margin:0, fontSize:13, fontWeight:600, color:C.t1 }}>Code Review — {reviewIssues.length} issue{reviewIssues.length!==1?'s':''} found</p>
+                        {reviewIssues.length === 0 && <p style={{ margin:0, fontSize:13, color:C.green }}>✅ No issues found.</p>}
+                        {reviewIssues.map((iss,i) => (
+                          <div key={i} style={{ border:`1px solid ${C.border}`, borderRadius:10, padding:14, borderLeft:`3px solid ${SEV_COLOR[iss.severity]||C.t3}` }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                              <Badge color={iss.severity==='critical'?'red':iss.severity==='warning'?'yellow':'accent'}>{SEV_LABEL[iss.severity]||iss.severity}</Badge>
+                              <span style={{ fontSize:13, fontWeight:600, color:C.t1 }}>{iss.title}</span>
+                            </div>
+                            {iss.why && <p style={{ margin:'0 0 6px', fontSize:13, color:C.t2 }}>{iss.why}</p>}
+                            {iss.fix && <p style={{ margin:'0 0 6px', fontSize:13, color:C.t2 }}><strong style={{color:C.t1}}>Fix:</strong> {iss.fix}</p>}
+                            {iss.fixedCode && (
+                              <div style={{ marginTop:8 }}>
+                                <pre style={{ margin:0, background:'#050508', border:`1px solid ${C.border}`, borderRadius:6, padding:10, fontFamily:'monospace', fontSize:12, color:C.green, whiteSpace:'pre-wrap', overflowX:'auto' }}>{iss.fixedCode}</pre>
+                                <button onClick={()=>{ setRawOut(iss.fixedCode); setTab('code'); toast('Applied to Code tab','success') }}
+                                  style={{ marginTop:6, background:C.accentM, border:`1px solid ${C.borderFocus}`, borderRadius:6, color:C.accent, cursor:'pointer', fontSize:11, padding:'4px 10px', fontFamily:'inherit' }}>
+                                  Apply fix →
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {reviewRaw && <div style={{ fontSize:14, color:C.t1, lineHeight:1.75 }}>{renderMsg(reviewRaw)}</div>}
+                    {!explainOut && !reviewIssues && !reviewRaw && <EmptyState icon="💡" title="No explanation yet" description="Click Explain or Code Review on the left to analyse your code." />}
+                  </>
+                )}
+
+                {tab === 'files' && (
+                  files.length ? (
+                    <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                      {files.map((f,i) => (
+                        <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 12px', background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
+                          <span style={{ fontSize:14 }}>📄</span>
+                          <span style={{ flex:1, fontSize:13, color:C.t1, fontFamily:'monospace' }}>{f.path}</span>
+                          <span style={{ fontSize:11, color:C.t3 }}>{f.content.length.toLocaleString()} chars</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <EmptyState icon="📁" title="No files yet" description="Generated or imported files will be listed here." />
+                )}
+
+                {tab === 'tests' && (
+                  testsOut ? <div style={{ fontSize:14, color:C.t1, lineHeight:1.75 }}>{renderMsg(testsOut)}</div>
+                    : <EmptyState icon="🧪" title="No tests yet" description="Click Tests on the left to generate unit, integration, and edge-case tests with a coverage estimate." />
+                )}
+
+                {tab === 'terminal' && (
+                  <div>
+                    {terminalOut ? (
+                      <div style={{ fontSize:13, color:C.t1, lineHeight:1.7 }}>{renderMsg(terminalOut)}</div>
+                    ) : (
+                      <EmptyState icon=">_" title="No commands yet" description="Generate suggested install / run / build / deploy commands for this project." action={
+                        <Button onClick={generateTerminal} disabled={loading} size="sm">{loading&&act==='term'?<Spinner size={12} color="#fff"/>:'>_'} Suggest commands</Button>
+                      } />
+                    )}
+                  </div>
+                )}
+              </>
+            )}
           </div>
+
+          {/* ── One-click actions ── */}
+          {(hasOutput || codebase) && (
+            <div style={{ borderTop:`1px solid ${C.border}`, padding:'10px 16px', flexShrink:0 }}>
+              {showGhForm && (
+                <div style={{ display:'flex', gap:6, marginBottom:8, flexWrap:'wrap' }}>
+                  <Input value={ghRepoName} onChange={e=>setGhRepoName(e.target.value)} placeholder="new-repo-name" style={{ flex:1, minWidth:140, fontSize:12 }} />
+                  <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (repo scope)"
+                    style={{ flex:1, minWidth:160, background:C.surf, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'8px 10px', fontFamily:'inherit', outline:'none' }} />
+                  <Button onClick={pushToGithub} disabled={pushing} size="sm">{pushing?<Spinner size={12} color="#fff"/>:'🚀'} Push</Button>
+                </div>
+              )}
+              {ghRepoUrl && (
+                <p style={{ margin:'0 0 8px', fontSize:12, color:C.green }}>
+                  ✅ Pushed — <a href={ghRepoUrl} target="_blank" rel="noopener noreferrer" style={{ color:C.accent }}>{ghRepoUrl}</a>
+                </p>
+              )}
+              <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+                <Button onClick={downloadZip} variant="secondary" size="sm">⬇ Download ZIP</Button>
+                <Button onClick={pushToGithub} disabled={pushing} variant="secondary" size="sm">{pushing?<Spinner size={12} color={C.accent}/>:'🐙'} Push to GitHub</Button>
+                <Button onClick={deployToVercel} variant="secondary" size="sm">▲ Deploy to Vercel</Button>
+                <Button onClick={continueInBuilder} variant="secondary" size="sm">⬡ Continue in Builder</Button>
+                <Button onClick={continueInChat} variant="secondary" size="sm">💬 Continue in AI Chat</Button>
+                <Button onClick={saveAsProject} variant="secondary" size="sm">💾 Save as Project</Button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -2193,6 +2678,12 @@ function BuilderPage({ user }) {
   const [html,setHtml]   = useState('')
   const [loading,setL]   = useState(false)
   const [view,setView]   = useState('preview')
+
+  useEffect(() => {
+    const h = flConsumeHandoff('builder')
+    if (h?.desc) setDesc(h.desc)
+    if (h?.html) { setHtml(h.html); setView('preview'); toast('Loaded from Code AI', 'success') }
+  }, [])
 
   async function build() {
     if(!desc.trim()) return toast('Describe your product first','error')
@@ -2749,7 +3240,11 @@ function AppInner() {
     boot()
     const onResize=()=>setMobile(window.innerWidth<768)
     window.addEventListener('resize',onResize)
-    return ()=>window.removeEventListener('resize',onResize)
+    // Cross-module handoff bus: any page can call flNavigate(page, payload) to
+    // switch tabs and hand data to the destination page (e.g. Code AI → Builder).
+    const onNav = (e) => { if (e.detail?.page) setPage(e.detail.page) }
+    window.addEventListener('fl:navigate', onNav)
+    return ()=>{ window.removeEventListener('resize',onResize); window.removeEventListener('fl:navigate', onNav) }
   }, [])
 
   async function afterAuth() {
