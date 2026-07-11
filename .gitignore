@@ -5,5 +5,5 @@ dist/
 .env
 .vercel/
 .DS_Store
-deploy.js
-deploy.mjs
+/deploy.js
+/deploy.mjs
