@@ -7,7 +7,6 @@ import VoiceSpeedSelector from '@/components/settings/VoiceSpeedSelector'
 import { DEFAULT_VOICE_CONFIG } from '@/lib/voiceService'
 import { loadBrowserVoices, synthesizeSpeech, stopSpeech } from '@/services/speechService'
 import { getMicrophoneStream } from '@/lib/microphone'
-import ViralClipStudio from '@/components/viral-clip-studio/ClipStudio'
 
 // ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
 const LS_VOICE = 'fl_voice_config'
@@ -291,11 +290,11 @@ const PROVIDERS = {
     id: 'anthropic', name: 'Anthropic Claude', icon: '✦',
     sub: 'Best quality · Cloud API',
     models: [
-      { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4 (recommended)' },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4 (recommended)' },
       { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (fastest)' },
       { id: 'claude-opus-4-6', label: 'Claude Opus 4.6 (most capable)' },
     ],
-    default: 'claude-sonnet-4-20250514',
+    default: 'claude-sonnet-4-6',
     keyEnv: 'ANTHROPIC_API_KEY',
     docsUrl: 'https://console.anthropic.com',
   },
@@ -1627,83 +1626,380 @@ ${tr?'Use exact timestamps if available in transcript.':'Suggest ideal moments b
 ]
 
 function YouTubeAIPage({ user }) {
-  const [title, setTitle]   = useState('')
-  const [url, setUrl]       = useState('')
-  const [trans, setTrans]   = useState('')
-  const [active, setActive] = useState('summary')
-  const [outputs, setOut]   = useState({})
-  const [loading, setL]     = useState(false)
+  // ── Input state ─────────────────────────────────────────────
+  const [url,      setUrl]      = useState('')
+  const [title,    setTitle]    = useState('')
+  const [trans,    setTrans]    = useState('')
+  const [active,   setActive]   = useState('summary')
+  const [outputs,  setOut]      = useState({})
+  const [loading,  setL]        = useState(false)
 
-  const videoId = url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/)?.[1]
+  // ── Video info state ─────────────────────────────────────────
+  const [videoInfo, setVideoInfo]   = useState(null)
+  const [infoLoad,  setInfoLoad]    = useState(false)
+  const [autoTransMsg, setATMsg]    = useState('')
 
-  async function generate() {
-    const isViral = active === 'viral'
-    const topicStr = isViral ? `${url ? 'YouTube URL: ' + url + '\n' : ''}${title ? 'Topic: ' + title : ''}`.trim() : title
-    if (!topicStr && !trans.trim()) return toast('Add a topic, URL, or transcript first', 'error')
-    sb.logEvent('youtube','youtube'); setL(true)
-    const type = YT.find(t => t.id === active)
-    const r = await ai([{role:'user', content: type.fn(topicStr, trans)}], 'You are an expert YouTube strategist and viral content creator with 10+ years growing channels to millions of subscribers. Always give specific, complete, actionable output. Never give generic advice.', 3000)
-    setOut(p => ({...p, [active]: r})); setL(false)
+  // ── Viral clip studio state ──────────────────────────────────
+  const [analysis,      setAnalysis]     = useState(null)
+  const [karaokeStyle,  setKaraokeStyle] = useState('highlight')
+  const [aspectRatio,   setAspectRatio]  = useState('9:16')
+  const [exportSettings,setExportSettings] = useState({ resolution:'1080p', fps:30, codec:'h264', bitrateControl:'CBR', includeCaptions:true, includeAudioDub:false })
+  const [dubStatus,     setDubStatus]    = useState(null)
+  const [dubScript,     setDubScript]    = useState('')
+
+  const videoId = url.match(/(?:v=|youtu\.be\/|\/shorts\/)([A-Za-z0-9_-]{11})/)?.[1]
+  const wc      = trans.trim().split(/\s+/).filter(Boolean).length
+
+  // ── Auto-fetch video info when URL changes ───────────────────
+  useEffect(() => {
+    if (!videoId) { setVideoInfo(null); return }
+    let cancelled = false
+    setInfoLoad(true)
+    fetch('/api/youtube/info', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) })
+      .then(r => r.json())
+      .then(d => { if (!cancelled) { setVideoInfo(d); if (!title && d.title) setTitle(d.title) } })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setInfoLoad(false) })
+    return () => { cancelled = true }
+  }, [videoId])
+
+  // ── Auto-fetch transcript ────────────────────────────────────
+  async function fetchAutoTranscript() {
+    if (!videoId) return
+    setATMsg('Fetching captions…')
+    const r = await fetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
+    const d = await r.json()
+    if (d.transcript) { setTrans(d.transcript); setATMsg('✅ Captions loaded automatically') }
+    else setATMsg(d.message || '⚠ No captions found — paste transcript manually')
   }
 
-  const wc = trans.trim().split(/\s+/).filter(Boolean).length
+  // ── AI text generation (Summary / Titles / Captions / Shorts / Strategy) ─
+  async function generate() {
+    if (!title.trim() && !trans.trim() && !url.trim()) return toast('Add a YouTube URL, title, or paste a transcript', 'error')
+    sb.logEvent('youtube', 'youtube')
+    if (active === 'clips') { return runViralAnalysis() }
+    const type = YT.find(t => t.id === active)
+    if (!type) return
+    setL(true)
+    const topicStr = url ? `YouTube URL: ${url}\nTitle: ${title}` : title
+    const r = await ai(
+      [{ role:'user', content: type.fn(topicStr, trans) }],
+      'You are a world-class YouTube growth strategist with a proven track record of 50M+ views. Give specific, complete, actionable output every time. Never give generic advice. Always finish your response.',
+      3000
+    )
+    setOut(p => ({ ...p, [active]: r }))
+    setL(false)
+  }
 
+  // ── Full Viral Clip Analysis ─────────────────────────────────
+  async function runViralAnalysis() {
+    if (!trans.trim() && !url.trim()) return toast('Add a YouTube URL or paste a transcript first', 'error')
+    let text = trans
+    if (!text && videoId) {
+      setL(true)
+      const r = await fetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
+      const d = await r.json()
+      text = d.transcript || ''
+      if (text) setTrans(text)
+    }
+    setL(true)
+    const r = await fetch('/api/youtube/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript: text, duration: videoInfo?.duration || 0, url }),
+    })
+    const d = await r.json()
+    if (d.error) { toast('Analysis failed: ' + d.error, 'error'); setL(false); return }
+    setAnalysis(d)
+    setOut(p => ({ ...p, clips: `Viral Score: ${d.viralityScore}/100\n\n${d.reason}\n\nBest Hook: "${d.hook}"\n\nShort Script:\n${d.shortScript || 'See clip ranges below.'}` }))
+    setL(false)
+  }
+
+  async function handleDub(gender) {
+    if (!analysis?.shortScript && !trans.trim()) return toast('Run analysis first to get a script', 'error')
+    setDubStatus('loading')
+    const r = await fetch('/api/youtube/ai-dub', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ transcript: analysis?.shortScript || trans.slice(0,1000), gender }) })
+    const d = await r.json()
+    if (d.fallback) { toast(d.message || 'Add ELEVENLABS_API_KEY for AI voice', 'error'); setDubStatus(null); return }
+    if (r.ok && r.headers.get('Content-Type')?.includes('audio')) {
+      const blob = new Blob([await r.arrayBuffer()], { type:'audio/mpeg' })
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download:'ai_dub.mp3' })
+      a.click(); URL.revokeObjectURL(a.href)
+      setDubStatus('done')
+    }
+  }
+
+  // ── Clip config summary for export ──────────────────────────
+  function buildFFmpegCommand(range) {
+    if (!videoId || !range) return null
+    return `# 1. Download clip from YouTube:\nyt-dlp -f "bestvideo[height<=1920]+bestaudio" --merge-output-format mp4 -o "source.mp4" "https://youtube.com/watch?v=${videoId}"\n\n# 2. Trim to viral segment:\nffmpeg -i source.mp4 -ss ${range.start} -to ${range.end} -c copy clip.mp4\n\n# 3. Reframe for ${aspectRatio}:\nffmpeg -i clip.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -c:a copy reframed.mp4\n\n# 4. Export at ${exportSettings.resolution} ${exportSettings.fps}fps:\nffmpeg -i reframed.mp4 -vf "scale=1920:1080,fps=${exportSettings.fps}" -c:v ${exportSettings.codec==='h265'?'libx265':'libx264'} -preset medium -b:v 8M output_pro.mp4`
+  }
+
+  // ── Render ───────────────────────────────────────────────────
   return (
-    <div style={{ height:'100%', overflowY:'auto', padding:'32px 32px 48px', maxWidth:900 }}>
-      <h2 style={{ margin:'0 0 24px', fontSize:22, fontWeight:700, color:C.t1 }}>YouTube AI</h2>
-      <Card style={{ padding:24, marginBottom:20 }}>
+    <div style={{ height:'100%', overflowY:'auto', padding:'28px 28px 56px', maxWidth:940 }}>
+
+      {/* Header */}
+      <div style={{ marginBottom:24 }}>
+        <h2 style={{ margin:'0 0 4px', fontSize:22, fontWeight:700, background:'linear-gradient(135deg,#6366f1,#a855f7)', WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent', backgroundClip:'text' }}>
+          YouTube AI Studio
+        </h2>
+        <p style={{ margin:0, fontSize:13, color:C.t2 }}>Analyse videos, generate viral content, and export production-ready Shorts — all in one place.</p>
+      </div>
+
+      {/* Input panel */}
+      <Card style={{ padding:22, marginBottom:18 }}>
         <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-          {/* URL field — shown for all tabs, required for Viral */}
+
+          {/* URL */}
           <div>
-            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>
-              YouTube URL <span style={{ color:C.t3, fontWeight:400, textTransform:'none' }}>{active==='viral'?'(required for Viral Short)':'(optional)'}</span>
-            </label>
-            <Input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.youtube.com/watch?v=..." />
+            <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t3, marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em' }}>YouTube URL</label>
+            <Input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.youtube.com/watch?v=... or youtu.be/..." />
           </div>
-          {/* Video embed if valid URL */}
-          {videoId && (
-            <div style={{ borderRadius:10, overflow:'hidden', border:`1px solid ${C.border}`, aspectRatio:'16/9', background:'#000' }}>
-              <iframe
-                src={`https://www.youtube-nocookie.com/embed/${videoId}`}
-                style={{ width:'100%', height:'100%', border:'none' }}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-                title="YouTube preview"
-              />
+
+          {/* Video info bar */}
+          {(infoLoad || videoInfo) && (
+            <div style={{ display:'flex', gap:12, alignItems:'center', padding:'10px 14px', background:C.bg, borderRadius:10, border:`1px solid ${C.border}` }}>
+              {videoInfo?.thumbnail && <img src={videoInfo.thumbnail} alt="" style={{ width:64, height:36, borderRadius:6, objectFit:'cover', flexShrink:0 }} />}
+              <div style={{ flex:1, minWidth:0 }}>
+                {infoLoad ? <span style={{ fontSize:12, color:C.t3 }}>Loading video info…</span> : <>
+                  <p style={{ margin:'0 0 2px', fontSize:13, fontWeight:600, color:C.t1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{videoInfo?.title}</p>
+                  <p style={{ margin:0, fontSize:11, color:C.t3 }}>{videoInfo?.author}{videoInfo?.duration ? ` · ${Math.floor(videoInfo.duration/60)}:${String(videoInfo.duration%60).padStart(2,'0')}` : ''}{videoInfo?.viewCount ? ` · ${(videoInfo.viewCount/1000).toFixed(0)}K views` : ''}</p>
+                </>}
+              </div>
+              {videoId && !infoLoad && (
+                <button onClick={fetchAutoTranscript} style={{ background:C.accentM, border:`1px solid ${C.borderFocus}`, borderRadius:8, color:C.accent, cursor:'pointer', fontSize:12, padding:'5px 12px', fontFamily:'inherit', whiteSpace:'nowrap', flexShrink:0 }}>
+                  🔤 Auto-fetch captions
+                </button>
+              )}
             </div>
           )}
+
+          {autoTransMsg && <p style={{ margin:0, fontSize:12, color:autoTransMsg.startsWith('✅')?C.green:C.t3 }}>{autoTransMsg}</p>}
+
+          {/* Video embed */}
+          {videoId && (
+            <div style={{ borderRadius:10, overflow:'hidden', border:`1px solid ${C.border}`, background:'#000', position:'relative', paddingTop:'56.25%' }}>
+              <iframe src={`https://www.youtube-nocookie.com/embed/${videoId}`}
+                style={{ position:'absolute', top:0, left:0, width:'100%', height:'100%', border:'none' }}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="YouTube preview" />
+            </div>
+          )}
+
+          {/* Title */}
           <div>
-            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Video Title or Topic <span style={{ color:C.t3, fontWeight:400, textTransform:'none' }}>(optional)</span></label>
+            <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t3, marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em' }}>Title / Topic <span style={{ fontWeight:400, textTransform:'none' }}>(auto-filled from URL)</span></label>
             <Input value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. How I built a $10k/mo SaaS in 60 days" onKeyDown={e=>e.key==='Enter'&&generate()} />
           </div>
+
+          {/* Transcript */}
           <div>
-            <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Paste Transcript <span style={{ color:C.t3, fontWeight:400 }}>({wc} words) — greatly improves output</span></label>
-            <Input value={trans} onChange={e=>setTrans(e.target.value)} placeholder="Paste your video transcript here…" rows={5} />
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
+              <label style={{ fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.06em' }}>Transcript <span style={{ fontWeight:400, textTransform:'none', color:C.t3 }}>({wc} words)</span></label>
+              {videoId && <button onClick={fetchAutoTranscript} style={{ background:'none', border:'none', color:C.accent, cursor:'pointer', fontSize:11, fontFamily:'inherit', padding:0 }}>↓ Auto-fetch captions</button>}
+            </div>
+            <Input value={trans} onChange={e=>setTrans(e.target.value)} placeholder="Paste transcript here for better results — or click Auto-fetch above…" rows={4} />
+            <p style={{ margin:'5px 0 0', fontSize:11, color:C.t3 }}>Tip: YouTube → click ⋯ under the video → Show transcript → Copy all</p>
           </div>
-          <Tip>Get any YouTube transcript free: open a video → click "…" below the video → Show transcript → Copy all text.</Tip>
         </div>
       </Card>
-      <div style={{ display:'flex', gap:8, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
-        {YT.map(t=>(
-          <button key={t.id} onClick={()=>setActive(t.id)} style={{ padding:'8px 16px', borderRadius:8, border:`1px solid ${active===t.id?(t.id==='viral'?C.red:C.accent):C.border}`, background:active===t.id?(t.id==='viral'?'rgba(239,68,68,.12)':C.accentM):'transparent', color:active===t.id?(t.id==='viral'?C.red:C.accent):C.t2, cursor:'pointer', fontSize:13, fontWeight:500, fontFamily:'inherit', display:'flex', alignItems:'center', gap:6, transition:'all .15s' }}>
+
+      {/* Tab bar */}
+      <div style={{ display:'flex', gap:6, marginBottom:16, flexWrap:'wrap', alignItems:'center' }}>
+        {YT.map(t => (
+          <button key={t.id} onClick={()=>setActive(t.id)}
+            style={{ padding:'8px 15px', borderRadius:8, border:`2px solid ${active===t.id ? (t.id==='clips'?C.red:C.accent) : C.border}`, background:active===t.id ? (t.id==='clips'?'rgba(239,68,68,.1)':C.accentM) : 'transparent', color:active===t.id ? (t.id==='clips'?C.red:C.accent) : C.t2, cursor:'pointer', fontSize:13, fontWeight:active===t.id?600:400, fontFamily:'inherit', display:'flex', alignItems:'center', gap:5, transition:'all .15s' }}>
             {t.icon} {t.label}
           </button>
         ))}
-        <Button onClick={generate} disabled={loading||(active==='viral'?(!url.trim()&&!title.trim()&&!trans.trim()):(!title.trim()&&!trans.trim()))} style={{ marginLeft:'auto' }}>
-          {loading?<Spinner size={14} color="#fff"/>:'✨'} Generate
+        <Button onClick={generate} disabled={loading} style={{ marginLeft:'auto' }}>
+          {loading ? <Spinner size={14} color="#fff"/> : (active==='clips'?'🎯':'✨')} {active==='clips'?'Analyse for Viral Clips':'Generate'}
         </Button>
       </div>
-      <Card style={{ padding:0, overflow:'hidden' }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'12px 18px', borderBottom:`1px solid ${C.border}` }}>
-          <span style={{ fontSize:14, fontWeight:500, color:C.t1 }}>{YT.find(t=>t.id===active)?.icon} {YT.find(t=>t.id===active)?.label} Output</span>
+
+      {/* Output panel */}
+      <Card style={{ padding:0, overflow:'hidden', marginBottom: analysis && active==='clips' ? 18 : 0 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'11px 18px', borderBottom:`1px solid ${C.border}` }}>
+          <span style={{ fontSize:14, fontWeight:600, color:C.t1 }}>{YT.find(t=>t.id===active)?.icon} {YT.find(t=>t.id===active)?.label}</span>
           {outputs[active] && <Button onClick={()=>copyText(outputs[active])} variant="secondary" size="sm">📋 Copy</Button>}
         </div>
-        <div style={{ padding:20, minHeight:200 }}>
-          {loading ? <div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner />Generating…</div>
-           : outputs[active] ? <div style={{ fontSize:14, color:C.t1, lineHeight:1.7 }}>{renderMsg(outputs[active])}</div>
-           : <div style={{ textAlign:'center', color:C.t3, padding:'30px 0', fontSize:14 }}>Output will appear here — add a topic or transcript above and click Generate</div>}
+        <div style={{ padding:20, minHeight:180 }}>
+          {loading
+            ? <div style={{ display:'flex', alignItems:'center', gap:10, color:C.t2, fontSize:14 }}><Spinner /> {active==='clips'?'Analysing transcript for viral moments…':'Generating…'}</div>
+            : outputs[active]
+              ? <div style={{ fontSize:14, color:C.t1, lineHeight:1.75 }}>{renderMsg(outputs[active])}</div>
+              : <div style={{ textAlign:'center', color:C.t3, padding:'28px 0', fontSize:14 }}>
+                  {active==='clips' ? '🎯 Paste a transcript or URL above, then click Analyse for Viral Clips' : 'Output appears here — add content above and click Generate'}
+                </div>
+          }
         </div>
       </Card>
+
+      {/* ── VIRAL CLIP STUDIO PANELS (shown after analysis) ────── */}
+      {analysis && active==='clips' && (
+        <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+
+          {/* Virality score */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+              <div style={{ position:'relative', width:72, height:72, flexShrink:0 }}>
+                <svg width={72} height={72} style={{ transform:'rotate(-90deg)' }}>
+                  <circle cx={36} cy={36} r={30} fill="none" stroke={C.border} strokeWidth={6}/>
+                  <circle cx={36} cy={36} r={30} fill="none"
+                    stroke={analysis.viralityScore>=80?C.green:analysis.viralityScore>=60?C.yellow:C.red}
+                    strokeWidth={6} strokeLinecap="round"
+                    strokeDasharray={`${2*Math.PI*30}`}
+                    strokeDashoffset={`${2*Math.PI*30*(1-analysis.viralityScore/100)}`}
+                    style={{ transition:'stroke-dashoffset .6s ease' }}/>
+                </svg>
+                <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, fontWeight:700, color:analysis.viralityScore>=80?C.green:analysis.viralityScore>=60?C.yellow:C.red }}>{analysis.viralityScore}</span>
+              </div>
+              <div style={{ flex:1 }}>
+                <p style={{ margin:'0 0 4px', fontSize:15, fontWeight:700, color:C.t1 }}>Viral Score: {analysis.viralityScore}/100</p>
+                <p style={{ margin:'0 0 6px', fontSize:13, color:C.t2 }}>{analysis.reason}</p>
+                {analysis.hashtags?.length>0 && (
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:5 }}>
+                    {analysis.hashtags.map((h,i) => <span key={i} style={{ fontSize:11, color:C.accent, background:C.accentM, borderRadius:99, padding:'2px 9px', border:`1px solid ${C.borderFocus}` }}>{h}</span>)}
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          {/* Clip ranges */}
+          {analysis.clipRanges?.length>0 && (
+            <Card style={{ padding:18 }}>
+              <p style={{ margin:'0 0 12px', fontSize:13, fontWeight:600, color:C.t1 }}>📍 Best Clip Moments</p>
+              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                {analysis.clipRanges.map((r,i) => {
+                  const cmd = buildFFmpegCommand(r)
+                  return (
+                    <div key={i} style={{ padding:'12px 14px', background:C.bg, borderRadius:10, border:`1px solid ${C.border}` }}>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4 }}>
+                        <span style={{ fontSize:13, fontWeight:600, color:C.t1 }}>{r.label}</span>
+                        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <span style={{ fontSize:12, color:C.t3 }}>{Math.floor(r.start/60)}:{String(r.start%60).padStart(2,'0')} – {Math.floor(r.end/60)}:{String(r.end%60).padStart(2,'0')} ({r.end-r.start}s)</span>
+                          <span style={{ fontSize:11, fontWeight:600, color:r.score>=80?C.green:r.score>=60?C.yellow:C.red }}>{r.score}/100</span>
+                        </div>
+                      </div>
+                      {cmd && (
+                        <details style={{ marginTop:6 }}>
+                          <summary style={{ fontSize:11, color:C.accent, cursor:'pointer', userSelect:'none' }}>📋 Export commands (run locally)</summary>
+                          <div style={{ display:'flex', justifyContent:'flex-end', marginTop:6, marginBottom:4 }}>
+                            <button onClick={()=>copyText(cmd)} style={{ background:C.accentM, border:`1px solid ${C.borderFocus}`, borderRadius:6, color:C.accent, cursor:'pointer', fontSize:11, padding:'3px 10px', fontFamily:'inherit' }}>Copy all</button>
+                          </div>
+                          <pre style={{ margin:0, background:'#050508', borderRadius:8, padding:'10px 12px', fontSize:11, color:C.green, overflowX:'auto', whiteSpace:'pre-wrap', lineHeight:1.6, border:`1px solid ${C.border}` }}>{cmd}</pre>
+                        </details>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </Card>
+          )}
+
+          {/* Karaoke captions preview */}
+          {(() => {
+            const KP = require ? null : null // avoid SSR issue — component imported at module level
+            const words = analysis.shortScript
+              ? analysis.shortScript.split(' ').map((w,i,arr) => ({ word:w, start:i*(analysis.clipRanges?.[0]?.end||60)/arr.length, end:(i+1)*(analysis.clipRanges?.[0]?.end||60)/arr.length }))
+              : []
+            return (
+              <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:16 }}>
+                <p style={{ margin:'0 0 12px', fontSize:13, fontWeight:600, color:C.t1 }}>🎬 Karaoke Caption Style</p>
+                <div style={{ display:'flex', gap:6, marginBottom:12, flexWrap:'wrap' }}>
+                  {['highlight','pop','bounce','fade'].map(s => (
+                    <button key={s} onClick={()=>setKaraokeStyle(s)}
+                      style={{ padding:'5px 14px', borderRadius:99, border:`1px solid ${karaokeStyle===s?C.accent:C.border}`, background:karaokeStyle===s?C.accentM:'transparent', color:karaokeStyle===s?C.accent:C.t2, cursor:'pointer', fontSize:12, fontFamily:'inherit', textTransform:'capitalize', transition:'all .15s' }}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ background:'#000', borderRadius:8, padding:'14px 18px', minHeight:48, display:'flex', alignItems:'center', flexWrap:'wrap', gap:4 }}>
+                  {analysis.shortScript
+                    ? analysis.shortScript.slice(0,80).split(' ').map((w,i) => (
+                        <span key={i} style={{ display:'inline-block', padding:'2px 6px', borderRadius:5, fontSize:14, fontWeight:500, background:karaokeStyle==='highlight'?C.accent:'rgba(255,255,255,.08)', color:'#fff', transform:karaokeStyle==='pop'?'scale(1.1)':'scale(1)', transition:'all .15s' }}>{w}</span>
+                      ))
+                    : <span style={{ color:C.t3, fontSize:12 }}>Run analysis above to preview captions</span>
+                  }
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Smart reframe */}
+          <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:16 }}>
+            <p style={{ margin:'0 0 12px', fontSize:13, fontWeight:600, color:C.t1 }}>📱 Smart Reframe</p>
+            <div style={{ display:'flex', gap:8 }}>
+              {[{id:'9:16',label:'9:16',desc:'Shorts · TikTok · Reels',icon:'▮'},{id:'1:1',label:'1:1',desc:'Instagram',icon:'◼'},{id:'16:9',label:'16:9',desc:'YouTube',icon:'▬'}].map(r => (
+                <button key={r.id} onClick={()=>setAspectRatio(r.id)}
+                  style={{ flex:1, padding:'12px 8px', borderRadius:10, border:`2px solid ${aspectRatio===r.id?C.accent:C.border}`, background:aspectRatio===r.id?C.accentM:'transparent', cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'center', gap:3, transition:'all .15s' }}>
+                  <span style={{ fontSize:18, color:aspectRatio===r.id?C.accent:C.t2 }}>{r.icon}</span>
+                  <span style={{ fontSize:13, fontWeight:700, color:aspectRatio===r.id?C.accent:C.t1 }}>{r.label}</span>
+                  <span style={{ fontSize:10, color:C.t3, textAlign:'center' }}>{r.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* AI voice dub */}
+          <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:16 }}>
+            <p style={{ margin:'0 0 12px', fontSize:13, fontWeight:600, color:C.t1 }}>🔊 AI Voice Dub</p>
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+              <button onClick={()=>handleDub('male')} disabled={dubStatus==='loading'}
+                style={{ padding:'8px 16px', borderRadius:10, border:`1px solid ${C.borderFocus}`, background:C.accentM, color:C.accent, cursor:dubStatus==='loading'?'not-allowed':'pointer', fontSize:13, fontFamily:'inherit', opacity:dubStatus==='loading'?0.6:1, transition:'all .15s' }}>
+                {dubStatus==='loading'?'⏳ Generating…':'♂ Male Voice (Brian)'}
+              </button>
+              <button onClick={()=>handleDub('female')} disabled={dubStatus==='loading'}
+                style={{ padding:'8px 16px', borderRadius:10, border:`1px solid ${C.borderFocus}`, background:C.accentM, color:C.accent, cursor:dubStatus==='loading'?'not-allowed':'pointer', fontSize:13, fontFamily:'inherit', opacity:dubStatus==='loading'?0.6:1, transition:'all .15s' }}>
+                ♀ Female Voice
+              </button>
+              {dubStatus==='done' && <span style={{ fontSize:12, color:C.green, alignSelf:'center' }}>✅ Downloaded</span>}
+            </div>
+            {!process.env.ELEVENLABS_API_KEY && <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3 }}>Add ELEVENLABS_API_KEY in Vercel settings for premium voices.</p>}
+          </div>
+
+          {/* Export settings */}
+          <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:16 }}>
+            <p style={{ margin:'0 0 14px', fontSize:13, fontWeight:600, color:C.t1 }}>⚙️ Export Configuration</p>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:12 }}>
+              {[['Resolution','resolution',['1080p','1440p','4K']],['FPS','fps',['30','60']],['Codec','codec',[{v:'h264',l:'H.264'},{v:'h265',l:'H.265'}]],['Bitrate','bitrateControl',['CBR','VBR']]].map(([label,key,opts]) => (
+                <div key={key}>
+                  <label style={{ display:'block', fontSize:11, color:C.t3, marginBottom:4, fontWeight:600, textTransform:'uppercase', letterSpacing:'.05em' }}>{label}</label>
+                  <select value={exportSettings[key]} onChange={e=>setExportSettings(s=>({...s,[key]:key==='fps'?Number(e.target.value):e.target.value}))}
+                    style={{ width:'100%', background:'rgba(255,255,255,.03)', border:`1px solid ${C.border}`, borderRadius:7, color:C.t1, fontSize:13, padding:'7px 10px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
+                    {opts.map(o => typeof o==='string' ? <option key={o}>{o}</option> : <option key={o.v} value={o.v}>{o.l}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+            <div style={{ display:'flex', gap:16 }}>
+              <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, color:C.t2, cursor:'pointer' }}>
+                <input type="checkbox" checked={exportSettings.includeCaptions} onChange={e=>setExportSettings(s=>({...s,includeCaptions:e.target.checked}))} style={{ accentColor:C.accent }} /> Burn captions
+              </label>
+              <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, color:C.t2, cursor:'pointer' }}>
+                <input type="checkbox" checked={exportSettings.includeAudioDub} onChange={e=>setExportSettings(s=>({...s,includeAudioDub:e.target.checked}))} style={{ accentColor:C.accent }} /> AI Voice Dub
+              </label>
+            </div>
+          </div>
+
+          {/* Export summary card */}
+          <div style={{ background:'rgba(99,102,241,.06)', border:`1px solid ${C.borderFocus}`, borderRadius:12, padding:18 }}>
+            <p style={{ margin:'0 0 8px', fontSize:13, fontWeight:700, color:C.accent }}>🚀 Your Clip is Configured</p>
+            <p style={{ margin:'0 0 12px', fontSize:12, color:C.t2, lineHeight:1.6 }}>
+              Format: <strong style={{color:C.t1}}>{aspectRatio}</strong> · Captions: <strong style={{color:C.t1}}>{karaokeStyle}</strong> · Export: <strong style={{color:C.t1}}>{exportSettings.resolution} {exportSettings.fps}fps {exportSettings.codec.toUpperCase()}</strong>
+            </p>
+            <p style={{ margin:'0 0 10px', fontSize:12, color:C.t3 }}>
+              Copy the FFmpeg commands above to export locally in seconds — or open in CapCut / DaVinci Resolve with these timestamps.
+            </p>
+            {analysis.clipRanges?.[0] && videoId && (
+              <a href={`https://www.youtube.com/watch?v=${videoId}&t=${analysis.clipRanges[0].start}s`} target="_blank" rel="noopener noreferrer"
+                style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'8px 16px', borderRadius:10, background:C.accent, color:'#fff', textDecoration:'none', fontSize:13, fontWeight:600, transition:'all .15s' }}>
+                ▶ Open at best moment on YouTube
+              </a>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2253,7 +2549,6 @@ const NAV=[
   {id:'notes',    label:'Notes',     icon:'📝'},
   {id:'tasks',    label:'Tasks',     icon:'✅'},
   {id:'youtube',  label:'YouTube AI',icon:'▶'},
-  {id:'clips',    label:'Clip Studio',icon:'🎬'},
   {id:'code',     label:'Code AI',   icon:'⌨'},
   {id:'builder',  label:'Builder',   icon:'⬡'},
 ]
@@ -2389,7 +2684,6 @@ function AppInner() {
       case 'notes':     return <NotesPage user={user} />
       case 'tasks':     return <TasksPage user={user} />
       case 'youtube':   return <YouTubeAIPage user={user} />
-      case 'clips':     return <div style={{ height:'100%', overflowY:'auto' }}><ViralClipStudio /></div>
       case 'code':      return <CodeAIPage user={user} />
       case 'builder':   return <BuilderPage user={user} />
       case 'settings':  return <SettingsPage user={user} profile={profile} onProfileUpdate={setProfile} onSignOut={signOut} />
