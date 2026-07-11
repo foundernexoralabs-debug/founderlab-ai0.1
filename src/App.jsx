@@ -12,6 +12,8 @@ import { detectLanguage, detectFromDescription } from '@/lib/langDetect'
 import { parseFiles, isPreviewable, buildPreviewDoc } from '@/lib/codeFiles'
 import { downloadProjectZip, pushToGithub as pushToGithubShared, openVercelDeploy } from '@/lib/deploy'
 import { classifyEdit, extractSection, replaceSection, KNOWN_SECTIONS } from '@/lib/htmlSections'
+import { REQUIRED_PAGES, REQUIRED_COMPONENTS, CONFIG_FILES, classifyProjectEdit } from '@/lib/nextProjectSpec'
+import { buildProjectPreview, isPreviewableProject } from '@/lib/previewBundle'
 
 // ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
 const LS_VOICE = 'fl_voice_config'
@@ -2647,12 +2649,29 @@ ${bundle}`
 // ── WEBSITE BUILDER ───────────────────────────────────────────
 const BSTYLES=['Dark Modern','Clean Minimal','Bold Startup','Luxury Premium']
 const BGUIDES={
-  'Dark Modern':'dark background #0a0a0f, accent color #6366f1 (indigo), white text, modern clean layout with subtle glass-morphism',
-  'Clean Minimal':'pure white background, black text, generous whitespace, minimal sans-serif typography, very clean',
-  'Bold Startup':'vibrant gradient background purple-to-pink, bold large white typography, energetic design with high contrast',
-  'Luxury Premium':'deep black background, gold #d4af37 accents, elegant serif fonts, premium sophisticated layout',
+  'Dark Modern':'dark background #09090f, indigo/purple gradient accents (#6366f1 → #a855f7), white text, glassmorphism cards with backdrop-blur, subtle glow effects',
+  'Clean Minimal':'white background, black text, generous whitespace, minimal sans-serif typography, soft shadows instead of borders, restrained accent color',
+  'Bold Startup':'vibrant purple-to-pink gradient background, bold large white typography, energetic high-contrast layout, playful micro-interactions',
+  'Luxury Premium':'deep black background, gold (#d4af37) accents, elegant serif display type paired with clean sans body text, generous negative space',
 }
-const SECTION_SPEC = `Tag the top-level element of every major section with a matching data-section attribute, using exactly these values where the section exists: data-section="navbar", data-section="hero", data-section="social-proof", data-section="features", data-section="how-it-works", data-section="testimonial", data-section="pricing", data-section="cta", data-section="footer". This is required for the visual editor to work.`
+
+const FILE_CONVENTIONS = `STRICT FILE CONVENTIONS (required — the code must compile with a simple in-browser transform, so follow these exactly):
+- Every file has EXACTLY ONE export: "export default function ComponentName(props) { ... }" — always a named function declaration, never an arrow const, never additional named exports.
+- Use TypeScript prop types/interfaces freely.
+- Import shared components as: import ComponentName from '@/components/ComponentName'
+- For navigation use: import Link from 'next/link'  — and  import { useRouter, usePathname } from 'next/navigation'
+- NEVER use next/image or any external image URL. Build all visuals with Tailwind gradients, CSS shapes, or inline SVG icons only.
+- Add 'use client' at the top of any file using useState/useEffect/onClick/form handlers.
+- Style EXCLUSIVELY with raw Tailwind CSS utility classes written directly in every className — backdrop-blur-xl, bg-white/5, border border-white/10, rounded-2xl, gradient backgrounds, generous padding, transition-all duration-300, hover:scale-[1.02], hover:shadow-xl hover:shadow-indigo-500/20 — on every interactive element. NEVER define custom classes via @layer/@apply in globals.css and reference them by name (e.g. never className="glass-panel") — always write the full utility class list inline on every element, every time, even if repetitive. globals.css should only contain the three @tailwind directives, a font import if needed, and plain standard CSS (@keyframes, global resets) — nothing that requires a build step to resolve.
+- Every visible button must have a real onClick — navigation buttons use <Link>, action buttons use real React state (toggle, form submit with validation, modal open/close). No dead buttons.
+- Never use lorem ipsum or generic placeholder copy — write real, specific, compelling copy for this exact product.
+- Every <Link href> must point to one of: / /features /pricing /about /contact /dashboard /login /signup — never a broken or fake link.
+- Prefix each file with a comment line exactly like: // file: components/Navbar.tsx
+- Return each file as its own separate fenced code block.`
+
+async function callGenAI(prompt) {
+  return ai([{ role:'user', content: prompt }], 'You are a senior product designer and frontend engineer at a top design studio, building premium, modern, production-quality Next.js 14 App Router + TypeScript + Tailwind CSS SaaS websites. Every pixel is intentional. Nothing looks like a template.', 5500)
+}
 
 // ── Persistent project storage (shared fl_projects key with Code AI) ─────
 async function loadAllProjects() {
@@ -2671,9 +2690,10 @@ function BuilderPage({ user }) {
   // ── Describe & plan ───────────────────────────────────────────
   const [desc,setDesc]       = useState('')
   const [style,setStyle]     = useState('Dark Modern')
-  const [overview,setOverview] = useState(null)   // { projectType, audience, goals, pages, features, techStack, designSystem, database, api, missingInfo, progressEstimate }
+  const [overview,setOverview] = useState(null)
   const [missingAnswers,setMissingAnswers] = useState({})
   const [stage,setStage]     = useState(null)      // null | 'planning' | 'generating' | 'editing'
+  const [stageDetail,setStageDetail] = useState('')
 
   // ── Project (persistent memory) ─────────────────────────────────
   const [projects,setProjects]   = useState([])
@@ -2681,11 +2701,11 @@ function BuilderPage({ user }) {
   const saveTimer = useRef(null)
 
   // ── Output / versions ───────────────────────────────────────────
-  const [html,setHtml]         = useState('')
-  const [versions,setVersions] = useState([])      // [{id,label,html,ts}]
+  const [files,setFiles]       = useState([])       // real separate project files (components + pages + globals.css + layout.tsx)
+  const [versions,setVersions] = useState([])        // [{id,label,files,ts}]
   const [activeIdx,setActiveIdx] = useState(-1)
-  const [compareIdx,setCompareIdx] = useState(null)
   const [view,setView]         = useState('preview')
+  const [activeFile,setActiveFile] = useState(null)  // path, for code view
   const [editIn,setEditIn]     = useState('')
 
   // ── Export / GitHub ──────────────────────────────────────────────
@@ -2696,20 +2716,14 @@ function BuilderPage({ user }) {
   const [pushing,setPushing]     = useState(false)
 
   const loading = stage !== null
+  const previewHtml = files.length && isPreviewableProject(files) ? buildProjectPreview(files) : null
 
-  // ── Load projects + handle Code AI handoff ─────────────────────
   useEffect(() => {
     async function init() {
       const all = await loadAllProjects()
       setProjects(all.filter(p => p.type === 'builder'))
       const h = flConsumeHandoff('builder')
       if (h?.desc) setDesc(h.desc)
-      if (h?.html) {
-        setHtml(h.html); setView('preview')
-        setVersions([{ id: uid(), label: 'From Code AI', html: h.html, ts: ts() }])
-        setActiveIdx(0)
-        toast('Loaded from Code AI', 'success')
-      }
     }
     init()
   }, [])
@@ -2718,10 +2732,9 @@ function BuilderPage({ user }) {
 
   function persistNow(overrides = {}) {
     const project = {
-      id: projectId || uid(),
-      type: 'builder',
+      id: projectId || uid(), type: 'builder',
       name: overview?.projectType || desc.slice(0,40) || 'Untitled project',
-      desc, style, overview, html, versions, activeIdx,
+      desc, style, overview, files, versions, activeIdx,
       created_at: ts(), updated_at: ts(),
       ...overrides,
     }
@@ -2736,36 +2749,33 @@ function BuilderPage({ user }) {
 
   function loadProject(p) {
     setProjectId(p.id); setDesc(p.desc||''); setStyle(p.style||'Dark Modern')
-    setOverview(p.overview||null); setHtml(p.html||''); setVersions(p.versions||[])
-    setActiveIdx(typeof p.activeIdx === 'number' ? p.activeIdx : ((p.versions && p.versions.length) ? p.versions.length - 1 : -1))
+    setOverview(p.overview||null); setFiles(p.files||[]); setVersions(p.versions||[])
+    setActiveIdx(typeof p.activeIdx === 'number' ? p.activeIdx : ((p.versions?.length||0)-1))
     setView('preview'); setGhRepoUrl(''); toast(`Loaded "${p.name}"`, 'success')
   }
 
   function newProject() {
-    setProjectId(null); setDesc(''); setOverview(null); setHtml('')
+    setProjectId(null); setDesc(''); setOverview(null); setFiles([])
     setVersions([]); setActiveIdx(-1); setGhRepoUrl('')
   }
 
-  // ── Step 1: Plan (auto-detects everything, asks only for gaps) ──
+  // ── Step 1: Plan ────────────────────────────────────────────────
   async function planOverview() {
     if (!desc.trim()) return toast('Describe your idea first', 'error')
-    setStage('planning')
+    setStage('planning'); setStageDetail('Analysing your idea…')
     const prompt = `A founder wants to build: "${desc}"
 
-Analyse this idea and produce a complete project plan. Infer everything you reasonably can — only flag something as missing if it's truly essential and can't be inferred.
+Analyse this idea and produce a complete project plan for a modern multi-page SaaS website with pages: Home, Features, Pricing, About, Contact, Dashboard, Login, Signup. Infer everything you reasonably can — only flag something as missing if it's truly essential and can't be inferred.
 
 Return ONLY valid JSON, no markdown fences, no prose, in exactly this shape:
 {
-  "projectType": "short label e.g. SaaS landing page / Portfolio / E-commerce store",
+  "projectType": "short label",
   "audience": "who this is for",
   "goals": ["primary goal", "secondary goal"],
-  "pages": ["Home", "..."],
   "features": ["feature 1", "feature 2", "..."],
-  "techStack": "e.g. Static HTML/CSS/JS — no build step needed",
-  "designSystem": "1-2 sentence description of the visual style",
-  "database": { "needed": false, "schema": "" },
-  "api": { "needed": false, "routes": [] },
-  "auth": { "needed": false },
+  "techStack": "Next.js 14 App Router, TypeScript, Tailwind CSS",
+  "designSystem": "1-2 sentence description of the visual style and mood",
+  "dashboardContent": "what the Dashboard page should realistically show for this product",
   "missingInfo": [],
   "progressEstimate": 0
 }`
@@ -2774,130 +2784,164 @@ Return ONLY valid JSON, no markdown fences, no prose, in exactly this shape:
       const m = r.match(/\{[\s\S]*\}/)
       const parsed = JSON.parse(m ? m[0] : r)
       setOverview(parsed)
-      if (parsed.missingInfo?.length) setMissingAnswers(Object.fromEntries(parsed.missingInfo.map(k => [k,''])))
-      else setMissingAnswers({})
+      setMissingAnswers(parsed.missingInfo?.length ? Object.fromEntries(parsed.missingInfo.map(k => [k,''])) : {})
     } catch {
-      setOverview({ raw: r, projectType: 'Project', pages: [], features: [], missingInfo: [], progressEstimate: 0 })
+      setOverview({ raw:r, projectType:'Project', features:[], missingInfo:[], progressEstimate:0 })
     }
     setStage(null)
   }
 
   function confirmMissingInfo() {
-    const extra = Object.entries(missingAnswers).filter(([,v]) => v.trim()).map(([k,v]) => `${k}: ${v}`).join('. ')
+    const extra = Object.entries(missingAnswers).filter(([,v])=>v.trim()).map(([k,v])=>`${k}: ${v}`).join('. ')
     if (extra) setDesc(d => `${d}\n\n${extra}`)
     setOverview(o => ({ ...o, missingInfo: [] }))
     setMissingAnswers({})
   }
 
-  // ── Step 2: Generate ──────────────────────────────────────────
+  // ── Step 2: Generate — real, separate Next.js files (never one HTML file) ──
   async function generate() {
     if (!desc.trim()) return toast('Describe your product first', 'error')
     sb.logEvent('builder','builder'); setStage('generating')
     const ov = overview
-    const pagesLine = ov?.pages?.length ? `Pages: ${ov.pages.join(', ')}.` : ''
-    const featuresLine = ov?.features?.length ? `Must include these features: ${ov.features.join(', ')}.` : ''
     const designLine = ov?.designSystem ? `Design direction: ${ov.designSystem}.` : ''
+    const featuresLine = ov?.features?.length ? `Core features to reflect in the copy/UI: ${ov.features.join(', ')}.` : ''
 
-    const prompt = `Create a stunning, complete, production-ready single-page ${ov?.projectType || 'landing page'} HTML file.
+    // Phase 1 — design system + shared components + root layout
+    setStageDetail('Designing the shared component system…')
+    const phase1Prompt = `Build the shared design system for this project.
 
-Product/Business: ${desc}
+Product: ${desc}
 Style: ${style} — ${BGUIDES[style]}
-${pagesLine} ${featuresLine} ${designLine}
+${designLine} ${featuresLine}
 
-REQUIRED SECTIONS (all must be present unless clearly irrelevant to this product):
-1. Navigation bar — logo (use first word of product name), 3-4 nav links, CTA button
-2. Hero — powerful headline (8 words max), sub-headline (1-2 sentences), primary + secondary CTA buttons, hero visual (CSS-only: geometric shapes, gradient orbs, or grid pattern)
-3. Social proof bar — 3 logos (text-based), or "Trusted by X+ users" metric
-4. Features — cards with icon (emoji), title, and 2-sentence description, covering the feature list above
-5. How it works — numbered steps with brief description
-6. Testimonial — one compelling quote with name and role
-7. Pricing or CTA section — one clear call-to-action with button
-8. Footer — logo, tagline, 3 column links, copyright
+${FILE_CONVENTIONS}
 
-TECHNICAL REQUIREMENTS:
-- All CSS in <style> tag — zero external dependencies
-- ${SECTION_SPEC}
-- Smooth scroll: html { scroll-behavior: smooth }
-- Fade-in on load: @keyframes fadeUp { from { opacity:0; transform:translateY(24px) } to { opacity:1; transform:translateY(0) } }
-- Apply animation to hero and section headings
-- Hover effects on all buttons (transform: translateY(-2px), box-shadow)
-- Hover effects on feature cards (border color change, subtle lift)
-- Mobile responsive: @media (max-width: 768px) { flex to column, font sizes reduced }
-- Semantic HTML, proper heading hierarchy, alt text on any SVG icons via <title>, for SEO/accessibility
-- Smooth gradient backgrounds where appropriate
-- No placeholder images, no lorem ipsum — use CSS shapes, gradients, or emoji as visuals, and write real, specific copy about this product
+Generate EXACTLY these files:
+- app/globals.css — "@tailwind base; @tailwind components; @tailwind utilities;" plus, using only plain standard CSS (no @apply, no @layer with custom class names — components must use raw Tailwind utility classes inline instead), a couple of @keyframes animations (e.g. fade-in-up) and any global font-face/reset rules needed.
+- app/layout.tsx — the root layout: imports Navbar and Footer, wraps {children} between them, exports "metadata" (title + description) for SEO. Must have 'use client' NOT set (layout stays a server component) — do not add interactivity here.
+- components/Navbar.tsx — sticky glassmorphism navbar: logo derived from the product name, links to Home/Features/Pricing/About/Contact, Login + Signup buttons on the right, a working mobile hamburger menu (real useState toggle).
+- components/Footer.tsx — modern footer: logo, tagline, link columns, inline-SVG social icons, copyright.
+- components/Button.tsx — reusable button with a "variant" prop ('primary'|'secondary'|'ghost'), gradient background on primary, hover/active micro-interactions.
+- components/GlassCard.tsx — reusable glassmorphism card wrapper (backdrop-blur, translucent border, rounded-2xl, hover lift).
+- components/Skeleton.tsx — reusable loading skeleton using className="fl-skeleton" (shimmer animation already provided globally), accepting a "className" prop for sizing.`
 
-Return ONLY valid HTML starting with <!DOCTYPE html>. No explanation, no markdown fences.`
+    const r1 = await callGenAI(phase1Prompt)
+    const phase1Files = parseFiles(r1, 'shared', 'tsx').filter(f => f.path !== 'shared.tsx')
 
-    const r = await ai([{role:'user',content:prompt}], 'You are a world-class web designer and front-end engineer who creates stunning, conversion-optimised, accessible, SEO-ready pages that look like they cost $10,000 to build. Every element is polished and purposeful. Never use placeholder images or lorem ipsum.', 4500)
-    const m = r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
-    const newHtml = m ? m[1] : r
-    const snap = { id: uid(), label: 'Generated', html: newHtml, ts: ts() }
-    const newVersions = [snap]
-    setHtml(newHtml); setVersions(newVersions); setActiveIdx(0); setView('preview'); setStage(null)
-    persistNow({ html: newHtml, versions: newVersions, activeIdx: 0 })
+    // Phase 2 — all 8 pages, using the shared components just built
+    setStageDetail('Building all 8 pages…')
+    const componentContext = phase1Files.filter(f => f.path.startsWith('components/')).map(f => `--- ${f.path} ---\n${f.content}`).join('\n\n')
+    const phase2Prompt = `These shared components already exist — use them exactly as defined, matching their real prop names:
+
+${componentContext}
+
+Now build all 8 pages for: ${desc}
+Style: ${style} — ${BGUIDES[style]}
+${designLine} ${featuresLine}
+${ov?.dashboardContent ? `Dashboard should realistically show: ${ov.dashboardContent}.` : ''}
+
+${FILE_CONVENTIONS}
+
+Do NOT import or render Navbar/Footer inside page files — the root layout already wraps every page with them. Just build each page's content.
+
+Generate EXACTLY these files:
+${REQUIRED_PAGES.map(p => `- ${p.file} (route ${p.route}) — the "${p.name}" page`).join('\n')}
+
+Special requirements:
+- app/login/page.tsx and app/signup/page.tsx: 'use client', real controlled form inputs, real client-side validation (empty fields, email format, password length), simulate the submit with a realistic ~600ms delay via setTimeout representing a future real API call, then show a clear success or validation-error message.
+- app/dashboard/page.tsx: 'use client', shows a <Skeleton /> loading state for ~500ms (useEffect + setTimeout) before revealing realistic product-specific content (not generic placeholders).
+- app/contact/page.tsx: 'use client', a real controlled contact form with validation and a success state on submit.`
+
+    const r2 = await callGenAI(phase2Prompt)
+    const phase2Files = parseFiles(r2, 'page', 'tsx').filter(f => f.path !== 'page.tsx')
+
+    const allFiles = [...phase1Files, ...phase2Files]
+    if (!allFiles.some(f => f.path === 'app/page.tsx')) {
+      toast('Generation incomplete — try again', 'error'); setStage(null); return
+    }
+
+    const snap = { id: uid(), label: 'Generated', files: allFiles, ts: ts() }
+    setFiles(allFiles); setVersions([snap]); setActiveIdx(0); setView('preview'); setActiveFile('app/page.tsx'); setStage(null)
+    persistNow({ files: allFiles, versions: [snap], activeIdx: 0 })
   }
 
-  // ── Step 3: Smart section editing ────────────────────────────
+  // ── Step 3: Smart, targeted editing — never regenerates the whole project ──
   async function applyEdit() {
     const instruction = editIn.trim()
     if (!instruction) return
-    if (!html) return toast('Generate a site first', 'error')
+    if (!files.length) return toast('Generate a project first', 'error')
     setStage('editing')
-    const classification = classifyEdit(instruction)
-    let newHtml = html
+    const classification = classifyProjectEdit(instruction, files)
+    setStageDetail(classification.type === 'design-system'
+      ? 'Updating the design system…'
+      : `Updating ${classification.paths[0]}…`)
 
-    if (classification.type === 'section') {
-      const fragment = extractSection(html, classification.section)
-      if (fragment) {
-        const prompt = `Here is the "${classification.section}" section of a website (HTML fragment):
+    let updatedFiles = files
+    if (classification.paths.length === 1) {
+      const path = classification.paths[0]
+      const current = files.find(f => f.path === path)
+      const prompt = `Here is the file "${path}" from a Next.js project:
 
-${fragment}
+${current ? current.content : '(file does not exist yet — create it)'}
 
 Instruction: ${instruction}
 
-Return ONLY the replacement HTML for this section — same root tag and data-section attribute, no explanation, no markdown fences.`
-        const r = await ai([{ role:'user', content: prompt }], 'You are an expert front-end engineer making precise, surgical edits. Only change what was asked. Keep everything else about the section identical.', 1600)
-        const cleaned = r.replace(/```html?/gi,'').replace(/```/g,'').trim()
-        newHtml = replaceSection(html, classification.section, cleaned)
+${FILE_CONVENTIONS}
+
+Return ONLY the full replacement content for this ONE file, prefixed with "// file: ${path}", as a single fenced code block. No explanation.`
+      const r = await callGenAI(prompt)
+      const parsed = parseFiles(r, 'edit', 'tsx')
+      const newContent = parsed[0]?.content
+      if (newContent) {
+        updatedFiles = files.some(f => f.path === path)
+          ? files.map(f => f.path === path ? { ...f, content: newContent } : f)
+          : [...files, { path, content: newContent }]
+      }
+    } else {
+      // design-system: regenerate the small set of shared files together in one call
+      const currentBundle = classification.paths.map(p => {
+        const f = files.find(x => x.path === p)
+        return f ? `--- ${p} ---\n${f.content}` : ''
+      }).filter(Boolean).join('\n\n')
+      const prompt = `Here are the shared design-system files from a Next.js project:
+
+${currentBundle}
+
+Instruction (apply this site-wide aesthetic change): ${instruction}
+
+${FILE_CONVENTIONS}
+
+Return the full replacement content for EACH file above, each prefixed with its own "// file: path" comment and its own fenced code block. Keep functionality identical — only change the visual design.`
+      const r = await callGenAI(prompt)
+      const parsed = parseFiles(r, 'edit', 'tsx')
+      if (parsed.length) {
+        updatedFiles = files.map(f => {
+          const match = parsed.find(p => p.path === f.path)
+          return match ? { ...f, content: match.content } : f
+        })
       }
     }
 
-    if (classification.type === 'global' || newHtml === html) {
-      const prompt = `Here is a complete website HTML file:
-
-${html}
-
-Instruction: ${instruction}
-
-Apply this change across the page as needed. Keep everything else the same. ${SECTION_SPEC}
-
-Return ONLY the full updated HTML starting with <!DOCTYPE html>. No explanation, no markdown fences.`
-      const r = await ai([{ role:'user', content: prompt }], 'You are a world-class web designer making a precise, well-executed revision to an existing page.', 4500)
-      const m = r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
-      if (m) newHtml = m[1]
-    }
-
-    const snap = { id: uid(), label: instruction.slice(0,50), html: newHtml, ts: ts() }
+    const snap = { id: uid(), label: instruction.slice(0,50), files: updatedFiles, ts: ts() }
     const newVersions = [...versions, snap]
-    setHtml(newHtml); setVersions(newVersions); setActiveIdx(newVersions.length-1); setEditIn(''); setStage(null)
-    persistNow({ html: newHtml, versions: newVersions, activeIdx: newVersions.length-1 })
-    toast('Applied', 'success')
+    setFiles(updatedFiles); setVersions(newVersions); setActiveIdx(newVersions.length-1); setEditIn(''); setStage(null)
+    persistNow({ files: updatedFiles, versions: newVersions, activeIdx: newVersions.length-1 })
+    toast('Applied — only the affected file' + (classification.paths.length>1?'s were':' was') + ' changed', 'success')
   }
 
   // ── Version history ───────────────────────────────────────────
   function goToVersion(i) {
     if (i < 0 || i >= versions.length) return
-    setActiveIdx(i); setHtml(versions[i].html)
-    persistNow({ html: versions[i].html, activeIdx: i })
+    setActiveIdx(i); setFiles(versions[i].files)
+    persistNow({ files: versions[i].files, activeIdx: i })
   }
   function undo() { goToVersion(activeIdx - 1) }
   function redo() { goToVersion(activeIdx + 1) }
   function duplicateVersion(i) {
-    const snap = { id: uid(), label: `${versions[i].label} (copy)`, html: versions[i].html, ts: ts() }
+    const snap = { id: uid(), label: `${versions[i].label} (copy)`, files: versions[i].files, ts: ts() }
     const newVersions = [...versions, snap]
-    setVersions(newVersions); setActiveIdx(newVersions.length-1); setHtml(snap.html)
-    persistNow({ versions: newVersions, activeIdx: newVersions.length-1, html: snap.html })
+    setVersions(newVersions); setActiveIdx(newVersions.length-1); setFiles(snap.files)
+    persistNow({ versions: newVersions, activeIdx: newVersions.length-1, files: snap.files })
   }
 
   // ── Export ──────────────────────────────────────────────────────
@@ -2907,32 +2951,39 @@ Return ONLY the full updated HTML starting with <!DOCTYPE html>. No explanation,
 ${desc}
 
 ## Pages
-${(overview?.pages||['Home']).map(p=>`- ${p}`).join('\n')}
+${REQUIRED_PAGES.map(p=>`- ${p.name} — \`${p.route}\``).join('\n')}
 
 ## Features
-${(overview?.features||[]).map(f=>`- ${f}`).join('\n') || '- See index.html'}
+${(overview?.features||[]).map(f=>`- ${f}`).join('\n') || '- See source'}
 
 ## Tech stack
-${overview?.techStack || 'Static HTML, CSS, and JavaScript — no build step required.'}
+Next.js 14 (App Router) · TypeScript · Tailwind CSS
 
 ## Run locally
-Open \`index.html\` directly in a browser, or deploy the folder to any static host (Vercel, Netlify, GitHub Pages).
+\`\`\`
+npm install
+npm run dev
+\`\`\`
+Then open http://localhost:3000
+
+## Deploy
+Push to GitHub and import at vercel.com/new — zero configuration needed.
 
 ---
 Generated with FounderLab AI Builder.
 `
-    return [{ path:'index.html', content: html }, { path:'README.md', content: readme }]
+    return [...CONFIG_FILES(), { path:'README.md', content: readme }, ...files]
   }
 
   async function dl() {
     try {
-      const r = await downloadProjectZip(exportFiles(), overview?.projectType || 'founderlab-site')
+      const r = await downloadProjectZip(exportFiles(), overview?.projectType || 'founderlab-app')
       toast(r.fallback ? 'Downloaded files individually' : 'ZIP downloaded', 'success')
     } catch (e) { toast(e.message, 'error') }
   }
 
   async function pushGithub() {
-    if (!html) return toast('Generate a site first', 'error')
+    if (!files.length) return toast('Generate a project first', 'error')
     if (!ghPat || !ghRepoName.trim()) { setShowGhForm(true); return }
     setPushing(true)
     try {
@@ -2949,15 +3000,15 @@ Generated with FounderLab AI Builder.
 
   // ── Cross-module integration ────────────────────────────────────
   function continueInChat() {
-    const summary = overview ? `Project: ${overview.projectType}\nAudience: ${overview.audience}\nPages: ${(overview.pages||[]).join(', ')}\nFeatures: ${(overview.features||[]).join(', ')}` : desc
-    flNavigate('chat', { message: `I'm building this with FounderLab Builder:\n\n${summary}\n\nLet's keep working on it — what should we improve next?` })
+    const summary = overview ? `Project: ${overview.projectType}\nAudience: ${overview.audience}\nFeatures: ${(overview.features||[]).join(', ')}\nPages: ${REQUIRED_PAGES.map(p=>p.name).join(', ')}` : desc
+    flNavigate('chat', { message: `I'm building this with FounderLab Builder (a real Next.js + TypeScript + Tailwind project):\n\n${summary}\n\nLet's keep working on it — what should we improve next?` })
     toast('Opening in AI Chat…', 'success')
   }
 
   async function saveOverviewToNotes() {
     if (!overview) return toast('Plan the project first', 'error')
     const notes = await load('fl_notes', [])
-    const content = `# ${overview.projectType}\n\n**Audience:** ${overview.audience}\n\n**Goals:** ${(overview.goals||[]).join(', ')}\n\n**Pages:** ${(overview.pages||[]).join(', ')}\n\n**Features:**\n${(overview.features||[]).map(f=>`- ${f}`).join('\n')}\n\n**Tech stack:** ${overview.techStack}\n\n**Design:** ${overview.designSystem}`
+    const content = `# ${overview.projectType}\n\n**Audience:** ${overview.audience}\n\n**Goals:** ${(overview.goals||[]).join(', ')}\n\n**Features:**\n${(overview.features||[]).map(f=>`- ${f}`).join('\n')}\n\n**Tech stack:** ${overview.techStack}\n\n**Design:** ${overview.designSystem}`
     const n = { id: uid(), title: overview.projectType || 'Project overview', content, tags: ['builder','project-plan'], created_at: ts(), updated_at: ts() }
     await save('fl_notes', [n, ...(Array.isArray(notes)?notes:[])])
     toast('Overview saved to Notes', 'success')
@@ -2972,12 +3023,13 @@ Generated with FounderLab AI Builder.
   }
 
   function debugInCodeAI() {
-    if (!html) return toast('Generate a site first', 'error')
-    flNavigate('code', { code: html, desc: `Debug and improve this ${overview?.projectType || 'website'}` })
+    if (!files.length) return toast('Generate a project first', 'error')
+    const bundle = files.map(f => `// file: ${f.path}\n${f.content}`).join('\n\n')
+    flNavigate('code', { code: bundle.slice(0,6000), desc: `Debug and improve this ${overview?.projectType || 'website'} (Next.js project)` })
     toast('Opening in Code AI…', 'success')
   }
 
-  const stageLabel = { planning:'🧠 Planning your project…', generating:'⚡ Generating your site — sections, animations, responsive styles…', editing:'✨ Applying your edit…' }[stage]
+  const stageLabel = stage ? (stageDetail || { planning:'🧠 Planning…', generating:'⚡ Generating your project…', editing:'✨ Applying your edit…' }[stage]) : null
 
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100%', overflow:'hidden' }}>
@@ -3028,23 +3080,20 @@ Generated with FounderLab AI Builder.
             </div>
           ) : (
             <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, fontSize:12, color:C.t2 }}>
-              <div><strong style={{color:C.t1}}>Pages</strong><br/>{(overview.pages||[]).join(', ')||'—'}</div>
               <div><strong style={{color:C.t1}}>Features</strong><br/>{(overview.features||[]).join(', ')||'—'}</div>
-              <div><strong style={{color:C.t1}}>Tech stack</strong><br/>{overview.techStack||'—'}</div>
+              <div><strong style={{color:C.t1}}>Tech stack</strong><br/>{overview.techStack||'Next.js · TypeScript · Tailwind'}</div>
               <div><strong style={{color:C.t1}}>Design</strong><br/>{overview.designSystem||'—'}</div>
-              {overview.database?.needed && <div><strong style={{color:C.t1}}>Database</strong><br/>{overview.database.schema||'Needed'}</div>}
-              {overview.api?.needed && <div><strong style={{color:C.t1}}>API routes</strong><br/>{(overview.api.routes||[]).join(', ')}</div>}
+              <div><strong style={{color:C.t1}}>Pages</strong><br/>{REQUIRED_PAGES.map(p=>p.name).join(', ')}</div>
             </div>
           )}
         </div>
       )}
 
       {/* ── Main: rail + dominant preview ── */}
-      {html ? (
+      {files.length ? (
         <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
           {/* Left rail */}
           <div style={{ width:260, borderRight:`1px solid ${C.border}`, overflowY:'auto', padding:14, display:'flex', flexDirection:'column', gap:16, flexShrink:0 }}>
-            {/* Version history */}
             <div>
               <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Version History</p>
               <div style={{ display:'flex', gap:6, marginBottom:8 }}>
@@ -3068,12 +3117,10 @@ Generated with FounderLab AI Builder.
               </div>
             </div>
 
-            {/* Export */}
             <div>
               <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Export</p>
               <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
                 <Button onClick={dl} variant="secondary" size="sm" full>⬇ Download ZIP</Button>
-                <Button onClick={()=>copyText(html)} variant="secondary" size="sm" full>📋 Copy code</Button>
                 {showGhForm && (
                   <div style={{ display:'flex', flexDirection:'column', gap:6, padding:8, background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
                     <Input value={ghRepoName} onChange={e=>setGhRepoName(e.target.value)} placeholder="repo-name" style={{ fontSize:12 }} />
@@ -3088,7 +3135,6 @@ Generated with FounderLab AI Builder.
               </div>
             </div>
 
-            {/* Cross-module */}
             <div>
               <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Continue working</p>
               <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
@@ -3102,34 +3148,46 @@ Generated with FounderLab AI Builder.
 
           {/* Dominant preview */}
           <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'8px 20px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'8px 20px', borderBottom:`1px solid ${C.border}`, flexShrink:0, gap:10, flexWrap:'wrap' }}>
               <div style={{ display:'flex', gap:3, background:C.bg, borderRadius:8, padding:3 }}>
                 {['preview','code'].map(v=><button key={v} onClick={()=>setView(v)} style={{ padding:'5px 14px', borderRadius:6, border:'none', background:view===v?C.surf:'transparent', color:view===v?C.t1:C.t3, cursor:'pointer', fontSize:13, fontFamily:'inherit', transition:'all .15s' }}>{v==='preview'?'👁 Preview':'< > Code'}</button>)}
               </div>
+              {view==='code' && (
+                <div style={{ display:'flex', gap:4, flexWrap:'wrap', flex:1, justifyContent:'flex-end' }}>
+                  {files.map(f => (
+                    <button key={f.path} onClick={()=>setActiveFile(f.path)}
+                      style={{ padding:'3px 9px', borderRadius:6, border:`1px solid ${activeFile===f.path?C.accent:C.border}`, background:activeFile===f.path?C.accentM:'transparent', color:activeFile===f.path?C.accent:C.t3, cursor:'pointer', fontSize:11, fontFamily:'monospace' }}>
+                      {f.path.split('/').pop()}
+                    </button>
+                  ))}
+                </div>
+              )}
               <span style={{ fontSize:12, color:C.t3 }}>{versions[activeIdx]?.label}</span>
             </div>
             <div style={{ flex:1, overflow:'hidden', position:'relative' }}>
               {stage==='editing' && (
                 <div style={{ position:'absolute', inset:0, background:'rgba(9,9,15,.55)', backdropFilter:'blur(2px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:5 }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:'12px 20px' }}>
-                    <Spinner size={16} /><span style={{ fontSize:13, color:C.t1 }}>Applying your edit…</span>
+                    <Spinner size={16} /><span style={{ fontSize:13, color:C.t1 }}>{stageDetail || 'Applying your edit…'}</span>
                   </div>
                 </div>
               )}
               {view==='preview'
-                ? <iframe srcDoc={html} style={{ width:'100%', height:'100%', border:'none' }} title="Preview" sandbox="allow-scripts" />
-                : <pre style={{ margin:0, padding:20, fontFamily:'monospace', fontSize:12, color:C.t1, whiteSpace:'pre-wrap', overflowY:'auto', height:'100%', background:'#050508', boxSizing:'border-box' }}>{html}</pre>}
+                ? (previewHtml
+                    ? <iframe srcDoc={previewHtml} style={{ width:'100%', height:'100%', border:'none' }} title="Live preview" sandbox="allow-scripts" />
+                    : <EmptyState icon="⬡" title="Preview not ready" description="Generate the project to see a fully-navigable live preview." />)
+                : <pre style={{ margin:0, padding:20, fontFamily:'monospace', fontSize:12, color:C.t1, whiteSpace:'pre-wrap', overflowY:'auto', height:'100%', background:'#050508', boxSizing:'border-box' }}>{files.find(f=>f.path===activeFile)?.content || files[0]?.content || ''}</pre>}
             </div>
             {/* Smart edit bar */}
             <div style={{ padding:'10px 20px', borderTop:`1px solid ${C.border}`, flexShrink:0, display:'flex', gap:8 }}>
-              <Input value={editIn} onChange={e=>setEditIn(e.target.value)} placeholder='Tell AI what to change — "add pricing", "more premium", "use glass style"…' style={{ flex:1, fontSize:13 }} onKeyDown={e=>e.key==='Enter'&&applyEdit()} />
+              <Input value={editIn} onChange={e=>setEditIn(e.target.value)} placeholder='Tell AI what to change — "add pricing tiers", "more premium", "improve mobile navbar"…' style={{ flex:1, fontSize:13 }} onKeyDown={e=>e.key==='Enter'&&applyEdit()} />
               <Button onClick={applyEdit} disabled={loading||!editIn.trim()} size="sm">✨ Apply</Button>
             </div>
           </div>
         </div>
       ) : !loading ? (
         <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <EmptyState icon="⬡" title="Describe your product above" description="AI plans the architecture, pages, and features, then generates a complete, editable, deployable site." />
+          <EmptyState icon="⬡" title="Describe your product above" description="AI plans the architecture, then generates a real, separate-file Next.js + TypeScript + Tailwind project — 8 fully navigable pages, glassmorphism design, and instant live preview." />
         </div>
       ) : <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}><Spinner size={36} /></div>}
     </div>
