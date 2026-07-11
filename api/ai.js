@@ -85,7 +85,7 @@ async function handleGroq(req, res, { model, messages, system, max_tokens }) {
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: model || 'llama-3.2-70b-versatile',
+      model: model || 'openai/gpt-oss-120b',
       messages: fullMessages,
       max_tokens: max_tokens || 1200,
     }),
@@ -101,7 +101,7 @@ async function handleGemini(req, res, { model, messages, system, max_tokens }) {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) return err(res, 500, 'GEMINI_API_KEY is not configured on the server.')
 
-  const geminiModel = model || 'gemini-1.5-flash'
+  const geminiModel = model || 'gemini-3.5-flash'
 
   // Convert OpenAI-style messages to Gemini contents format
   // Gemini uses "user"/"model" (not "assistant"), and each message is { role, parts:[{text}] }
@@ -116,15 +116,25 @@ async function handleGemini(req, res, { model, messages, system, max_tokens }) {
     ...(system && { systemInstruction: { parts: [{ text: system }] } }),
   }
 
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/${geminiModel}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }
-  )
-  const d = await r.json()
+  async function callGemini(apiVersion) {
+    return fetch(
+      `https://generativelanguage.googleapis.com/${apiVersion}/models/${geminiModel}:generateContent?key=${apiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    )
+  }
+
+  let r = await callGemini('v1')
+  let d = await r.json()
+
+  // If the model isn't found on the stable v1 endpoint, some models (new
+  // previews, or ones mid-migration) are only reachable on v1beta — retry
+  // there automatically instead of failing outright.
+  if (!r.ok && r.status === 404) {
+    const retry = await callGemini('v1beta')
+    const retryData = await retry.json()
+    if (retry.ok) { r = retry; d = retryData }
+  }
+
   if (!r.ok) return err(res, r.status, d?.error?.message || `Gemini error ${r.status}`)
   const text = d.candidates?.[0]?.content?.parts?.[0]?.text || ''
   return ok(res, text)

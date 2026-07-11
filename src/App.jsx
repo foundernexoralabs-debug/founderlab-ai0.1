@@ -328,12 +328,12 @@ const PROVIDERS = {
     id: 'groq', name: 'Groq', icon: '⚡',
     sub: 'Ultra-fast inference · Free tier',
     models: [
-      { id: 'llama-3.2-70b-versatile', label: 'Llama 3.2 70B (recommended)' },
-      { id: 'llama-3.2-3b-instruct', label: 'Llama 3.2 3B (fastest)' },
-      { id: 'mistral-7b-instruct-v0.3', label: 'Mistral 7B Instruct' },
-      { id: 'gemma2-9b-it', label: 'Gemma 2 9B' },
+      { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B (recommended)' },
+      { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B (fastest)' },
+      { id: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
+      { id: 'moonshotai/kimi-k2-instruct-0905', label: 'Kimi K2 Instruct' },
     ],
-    default: 'llama-3.2-70b-versatile',
+    default: 'openai/gpt-oss-120b',
     keyEnv: 'GROQ_API_KEY',
     docsUrl: 'https://console.groq.com',
   },
@@ -341,11 +341,11 @@ const PROVIDERS = {
     id: 'gemini', name: 'Google Gemini', icon: '✶',
     sub: 'Google AI · Generous free tier',
     models: [
-      { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (recommended · free)' },
-      { id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
-      { id: 'gemini-1.0-pro', label: 'Gemini 1.0 Pro' },
+      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (recommended)' },
+      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite (fastest)' },
+      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (most capable)' },
     ],
-    default: 'gemini-1.5-flash',
+    default: 'gemini-3.5-flash',
     keyEnv: 'GEMINI_API_KEY',
     docsUrl: 'https://aistudio.google.com/app/apikey',
   },
@@ -362,7 +362,18 @@ const PROVIDERS = {
 // Storage helpers
 function getAIProvider()        { try { return localStorage.getItem(LS_PROVIDER) || 'anthropic' } catch { return 'anthropic' } }
 function setAIProviderLS(id)    { try { localStorage.setItem(LS_PROVIDER, id) } catch {} }
-function getProviderModel(id)   { try { const m = JSON.parse(localStorage.getItem(LS_MODELS)||'{}'); return m[id] || PROVIDERS[id]?.default || '' } catch { return PROVIDERS[id]?.default || '' } }
+function getProviderModel(id)   {
+  try {
+    const m = JSON.parse(localStorage.getItem(LS_MODELS)||'{}')
+    const cached = m[id]
+    const validIds = (PROVIDERS[id]?.models || []).map(x => x.id)
+    // Self-heal: if the cached model is no longer in the supported list (e.g. a
+    // deprecated/renamed model like an old Gemini preview string), fall back to
+    // the current default instead of sending a request that's guaranteed to fail.
+    if (cached && validIds.includes(cached)) return cached
+    return PROVIDERS[id]?.default || ''
+  } catch { return PROVIDERS[id]?.default || '' }
+}
 function setProviderModel(id,m) { try { const all = JSON.parse(localStorage.getItem(LS_MODELS)||'{}'); all[id]=m; localStorage.setItem(LS_MODELS, JSON.stringify(all)) } catch {} }
 function getOllamaURL()         { try { return localStorage.getItem(LS_OLLAMA_URL)   || 'http://localhost:11434' } catch { return 'http://localhost:11434' } }
 function getOllamaModel()       { try { return localStorage.getItem(LS_OLLAMA_MODEL) || '' } catch { return '' } }
@@ -2669,8 +2680,30 @@ const FILE_CONVENTIONS = `STRICT FILE CONVENTIONS (required — the code must co
 - Prefix each file with a comment line exactly like: // file: components/Navbar.tsx
 - Return each file as its own separate fenced code block.`
 
-async function callGenAI(prompt) {
-  return ai([{ role:'user', content: prompt }], 'You are a senior product designer and frontend engineer at a top design studio, building premium, modern, production-quality Next.js 14 App Router + TypeScript + Tailwind CSS SaaS websites. Every pixel is intentional. Nothing looks like a template.', 5500)
+async function callGenAI(prompt, maxTokens = 4000) {
+  return ai([{ role:'user', content: prompt }], 'You are a senior product designer and frontend engineer at a top design studio, building premium, modern, production-quality Next.js 14 App Router + TypeScript + Tailwind CSS SaaS websites. Every pixel is intentional. Nothing looks like a template.', maxTokens)
+}
+
+// Runs one generation call, verifies every expected file path came back,
+// and retries (with a reinforcing reminder) if any are missing — up to
+// `retries` times. Throws immediately with the real provider error message
+// if the AI call itself failed (never silently swallowed into "incomplete").
+async function genBatch(prompt, expectedPaths, maxTokens = 4000, retries = 1) {
+  let lastFiles = []
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const p = attempt === 0 ? prompt : `${prompt}\n\nIMPORTANT: Your previous response was missing these required files — you MUST include ALL of them this time, each as its own complete fenced code block: ${expectedPaths.filter(ep => !lastFiles.some(f => f.path === ep)).join(', ')}`
+    const r = await callGenAI(p, maxTokens)
+    if (typeof r === 'string' && r.startsWith('⚠')) {
+      // Real provider/connection error — surface it immediately, don't retry blindly
+      throw new Error(r.replace(/^⚠\s*/, ''))
+    }
+    const parsed = parseFiles(r, 'gen', 'tsx').filter(f => f.path !== 'gen.tsx')
+    lastFiles = parsed
+    const missing = expectedPaths.filter(ep => !parsed.some(f => f.path === ep))
+    if (missing.length === 0) return { files: parsed, missing: [] }
+  }
+  const missing = expectedPaths.filter(ep => !lastFiles.some(f => f.path === ep))
+  return { files: lastFiles, missing }
 }
 
 // ── Persistent project storage (shared fl_projects key with Code AI) ─────
@@ -2806,9 +2839,11 @@ Return ONLY valid JSON, no markdown fences, no prose, in exactly this shape:
     const designLine = ov?.designSystem ? `Design direction: ${ov.designSystem}.` : ''
     const featuresLine = ov?.features?.length ? `Core features to reflect in the copy/UI: ${ov.features.join(', ')}.` : ''
 
-    // Phase 1 — design system + shared components + root layout
-    setStageDetail('Designing the shared component system…')
-    const phase1Prompt = `Build the shared design system for this project.
+    try {
+      // Phase 1 — design system + shared components + root layout
+      setStageDetail('Designing the shared component system…')
+      const phase1Expected = ['app/globals.css','app/layout.tsx','components/Navbar.tsx','components/Footer.tsx','components/Button.tsx','components/GlassCard.tsx','components/Skeleton.tsx']
+      const phase1Prompt = `Build the shared design system for this project.
 
 Product: ${desc}
 Style: ${style} — ${BGUIDES[style]}
@@ -2825,17 +2860,36 @@ Generate EXACTLY these files:
 - components/GlassCard.tsx — reusable glassmorphism card wrapper (backdrop-blur, translucent border, rounded-2xl, hover lift).
 - components/Skeleton.tsx — reusable loading skeleton using className="fl-skeleton" (shimmer animation already provided globally), accepting a "className" prop for sizing.`
 
-    const r1 = await callGenAI(phase1Prompt)
-    const phase1Files = parseFiles(r1, 'shared', 'tsx').filter(f => f.path !== 'shared.tsx')
+      const phase1 = await genBatch(phase1Prompt, phase1Expected, 4500, 1)
+      let allFiles = phase1.files
+      const componentContext = allFiles.filter(f => f.path.startsWith('components/')).map(f => `--- ${f.path} ---\n${f.content}`).join('\n\n')
 
-    // Phase 2 — all 8 pages, using the shared components just built
-    setStageDetail('Building all 8 pages…')
-    const componentContext = phase1Files.filter(f => f.path.startsWith('components/')).map(f => `--- ${f.path} ---\n${f.content}`).join('\n\n')
-    const phase2Prompt = `These shared components already exist — use them exactly as defined, matching their real prop names:
+      // Phase 2 — pages, generated in small batches so no single response gets
+      // truncated (a full page of real Tailwind + form logic easily runs
+      // 600-1000+ tokens; asking for all 8 at once was the root cause of
+      // "Generation incomplete" — the response was silently cut off mid-file).
+      const pageBatches = [
+        [REQUIRED_PAGES[0], REQUIRED_PAGES[1]], // Home, Features
+        [REQUIRED_PAGES[2], REQUIRED_PAGES[3]], // Pricing, About
+        [REQUIRED_PAGES[4], REQUIRED_PAGES[5]], // Contact, Dashboard
+        [REQUIRED_PAGES[6], REQUIRED_PAGES[7]], // Login, Signup
+      ]
+      const allMissing = []
+
+      for (const batch of pageBatches) {
+        setStageDetail(`Building ${batch.map(p=>p.name).join(' & ')}…`)
+        const specialLines = batch.map(p => {
+          if (p.name==='Login' || p.name==='Signup') return `- ${p.file}: 'use client', real controlled form inputs, real client-side validation (empty fields, email format, password length), simulate the submit with a realistic ~600ms delay via setTimeout representing a future real API call, then show a clear success or validation-error message.`
+          if (p.name==='Dashboard') return `- ${p.file}: 'use client', shows a <Skeleton /> loading state for ~500ms (useEffect + setTimeout) before revealing realistic product-specific content (not generic placeholders).`
+          if (p.name==='Contact') return `- ${p.file}: 'use client', a real controlled contact form with validation and a success state on submit.`
+          return null
+        }).filter(Boolean).join('\n')
+
+        const batchPrompt = `These shared components already exist — use them exactly as defined, matching their real prop names:
 
 ${componentContext}
 
-Now build all 8 pages for: ${desc}
+Now build these ${batch.length} page(s) for: ${desc}
 Style: ${style} — ${BGUIDES[style]}
 ${designLine} ${featuresLine}
 ${ov?.dashboardContent ? `Dashboard should realistically show: ${ov.dashboardContent}.` : ''}
@@ -2845,24 +2899,29 @@ ${FILE_CONVENTIONS}
 Do NOT import or render Navbar/Footer inside page files — the root layout already wraps every page with them. Just build each page's content.
 
 Generate EXACTLY these files:
-${REQUIRED_PAGES.map(p => `- ${p.file} (route ${p.route}) — the "${p.name}" page`).join('\n')}
+${batch.map(p => `- ${p.file} (route ${p.route}) — the "${p.name}" page`).join('\n')}
+${specialLines ? '\nSpecial requirements:\n' + specialLines : ''}`
 
-Special requirements:
-- app/login/page.tsx and app/signup/page.tsx: 'use client', real controlled form inputs, real client-side validation (empty fields, email format, password length), simulate the submit with a realistic ~600ms delay via setTimeout representing a future real API call, then show a clear success or validation-error message.
-- app/dashboard/page.tsx: 'use client', shows a <Skeleton /> loading state for ~500ms (useEffect + setTimeout) before revealing realistic product-specific content (not generic placeholders).
-- app/contact/page.tsx: 'use client', a real controlled contact form with validation and a success state on submit.`
+        const result = await genBatch(batchPrompt, batch.map(p=>p.file), 3500, 1)
+        allFiles = [...allFiles, ...result.files]
+        allMissing.push(...result.missing)
+      }
 
-    const r2 = await callGenAI(phase2Prompt)
-    const phase2Files = parseFiles(r2, 'page', 'tsx').filter(f => f.path !== 'page.tsx')
+      if (allMissing.length > 0) {
+        toast(`Generation incomplete — could not generate: ${allMissing.join(', ')}. Try again, or try a shorter description.`, 'error')
+        setStage(null)
+        return
+      }
 
-    const allFiles = [...phase1Files, ...phase2Files]
-    if (!allFiles.some(f => f.path === 'app/page.tsx')) {
-      toast('Generation incomplete — try again', 'error'); setStage(null); return
+      const snap = { id: uid(), label: 'Generated', files: allFiles, ts: ts() }
+      setFiles(allFiles); setVersions([snap]); setActiveIdx(0); setView('preview'); setActiveFile('app/page.tsx'); setStage(null)
+      persistNow({ files: allFiles, versions: [snap], activeIdx: 0 })
+    } catch (e) {
+      // A real provider/connection error (e.g. invalid API key, unsupported
+      // model, network failure) — show it verbatim instead of a generic message.
+      toast(e.message || 'Generation failed', 'error')
+      setStage(null)
     }
-
-    const snap = { id: uid(), label: 'Generated', files: allFiles, ts: ts() }
-    setFiles(allFiles); setVersions([snap]); setActiveIdx(0); setView('preview'); setActiveFile('app/page.tsx'); setStage(null)
-    persistNow({ files: allFiles, versions: [snap], activeIdx: 0 })
   }
 
   // ── Step 3: Smart, targeted editing — never regenerates the whole project ──
@@ -3274,7 +3333,40 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   }
 
   const fbF = feedbacks.filter(f=>fbFilter==='all'||f.type===fbFilter)
-  const tabs = [{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
+  const tabs = [{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'integrations',l:'Integrations'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
+  const [ghPatSettings, setGhPatSettings] = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghUserSettings, setGhUserSettings] = useState(null)
+  const [ghChecking, setGhChecking] = useState(false)
+  const [ghInputVal, setGhInputVal] = useState('')
+
+  useEffect(() => {
+    if (ghPatSettings) checkGithubConnection(ghPatSettings)
+  }, [])
+
+  async function checkGithubConnection(pat) {
+    setGhChecking(true)
+    try {
+      const r = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${pat}` } })
+      if (r.ok) setGhUserSettings(await r.json())
+      else { setGhUserSettings(null); toast('GitHub token is invalid or expired', 'error') }
+    } catch { setGhUserSettings(null) }
+    setGhChecking(false)
+  }
+
+  function connectGithub() {
+    if (!ghInputVal.trim()) return toast('Paste a GitHub token first', 'error')
+    try { localStorage.setItem('fl_github_pat', ghInputVal.trim()) } catch {}
+    setGhPatSettings(ghInputVal.trim())
+    checkGithubConnection(ghInputVal.trim())
+    setGhInputVal('')
+  }
+
+  function disconnectGithub() {
+    try { localStorage.removeItem('fl_github_pat') } catch {}
+    setGhPatSettings(''); setGhUserSettings(null)
+    toast('GitHub disconnected', 'success')
+  }
+
 
   // ── AI Settings handlers ────────────────────────────────────
   function saveAISettings() {
@@ -3466,6 +3558,85 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
           </Card>
 
           <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
+        </div>
+      )}
+
+      {tab==='integrations' && (
+        <div style={{ maxWidth:600, display:'flex', flexDirection:'column', gap:14 }}>
+          <p style={{ margin:'0 0 4px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
+            Connect the services Builder and Code AI use to push code and deploy. Connections are saved in this browser and reused automatically — you won't be asked again.
+          </p>
+
+          {/* GitHub */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <span style={{ fontSize:20 }}>🐙</span>
+                <div>
+                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>GitHub</p>
+                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Push generated code and websites to a repository</p>
+                </div>
+              </div>
+              {ghChecking ? <Spinner size={16} />
+                : ghUserSettings ? <Badge color="green">● Connected as {ghUserSettings.login}</Badge>
+                : <Badge color="gray">○ Not connected</Badge>}
+            </div>
+            {ghUserSettings ? (
+              <Button onClick={disconnectGithub} variant="secondary" size="sm">Disconnect</Button>
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                <input type="password" value={ghInputVal} onChange={e=>setGhInputVal(e.target.value)}
+                  placeholder="Personal access token (repo scope)"
+                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }} />
+                <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                  <Button onClick={connectGithub} size="sm">Connect</Button>
+                  <a href="https://github.com/settings/tokens/new?scopes=repo&description=FounderLab%20AI" target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.accent }}>Create a token →</a>
+                </div>
+              </div>
+            )}
+          </Card>
+
+          {/* Vercel */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <span style={{ fontSize:20 }}>▲</span>
+                <div>
+                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Vercel</p>
+                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Deploy is one click — opens Vercel's own import flow, you log in there directly. No token needed.</p>
+                </div>
+              </div>
+              <Badge color="green">● Ready</Badge>
+            </div>
+          </Card>
+
+          {/* Supabase */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <span style={{ fontSize:20 }}>⚡</span>
+                <div>
+                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Supabase</p>
+                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Powers your account, notes, tasks and chat history</p>
+                </div>
+              </div>
+              <Badge color="green">● Connected</Badge>
+            </div>
+          </Card>
+
+          {/* Composio */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <span style={{ fontSize:20 }}>🔌</span>
+                <div>
+                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Composio</p>
+                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>500+ app integrations — not yet configured for this workspace</p>
+                </div>
+              </div>
+              <Badge color="gray">○ Not connected</Badge>
+            </div>
+          </Card>
         </div>
       )}
 
