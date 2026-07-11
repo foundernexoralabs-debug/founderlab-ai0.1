@@ -888,15 +888,18 @@ function ChatPage({ user }) {
   const [loadingData, setLD]      = useState(true)
   const [renaming, setRenaming]   = useState(null)
   const [renameVal, setRenameVal] = useState('')
-  const [pendingImage, setPendingImage] = useState(null) // { base64, name }
+  const [pendingImage, setPendingImage] = useState(null)
+  const [search, setSearch]       = useState('')
+  const [hoverId, setHoverId]     = useState(null)
   const msgEnd    = useRef(null)
   const saveTimer = useRef(null)
   const fileRef   = useRef(null)
+  const abortRef  = useRef(null)
+  const textRef   = useRef(null)
 
   const { listening, transcript, setTranscript, start: startReco, stop: stopReco } = useSpeechRecognition()
   const { speaking, speak, stop: stopTTS, rate, setRate, voiceIdx, setVoiceIdx, PREFS } = useTTS()
-  const [showSpeed, setShowSpeed] = useState(false)
-  const [activeTTS, setActiveTTS] = useState(null) // message id being read aloud
+  const [activeTTS, setActiveTTS] = useState(null)
 
   const active   = convos.find(c => c.id === activeId)
   const messages = active?.messages || []
@@ -912,8 +915,6 @@ function ChatPage({ user }) {
   }, [])
 
   useEffect(() => { msgEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, sending])
-
-  // Fill input from voice transcript
   useEffect(() => { if (transcript) setInput(transcript) }, [transcript])
 
   function persist(updated) {
@@ -923,8 +924,13 @@ function ChatPage({ user }) {
   }
 
   function newConvo() {
-    const c = { id: uid(), title: 'New Chat', messages: [], created_at: ts(), updated_at: ts() }
+    const c = { id: uid(), title: 'New Chat', pinned: false, messages: [], created_at: ts(), updated_at: ts() }
     persist([c, ...convos]); setActiveId(c.id)
+  }
+
+  function togglePin(id, e) {
+    e.stopPropagation()
+    persist(convos.map(c => c.id === id ? { ...c, pinned: !c.pinned } : c))
   }
 
   async function handleImagePick(e) {
@@ -936,6 +942,11 @@ function ChatPage({ user }) {
     e.target.value = ''
   }
 
+  function stopGenerating() {
+    abortRef.current = true
+    setSending(false)
+  }
+
   async function send(textOverride) {
     const t = (textOverride || input).trim()
     if ((!t && !pendingImage) || sending) return
@@ -944,7 +955,7 @@ function ChatPage({ user }) {
     let cid = activeId
     let cvs = convos
     if (!cid) {
-      const c = { id: uid(), title: t?.slice(0, 40) || 'Image', messages: [], created_at: ts(), updated_at: ts() }
+      const c = { id: uid(), title: t?.slice(0, 40) || 'Image', pinned: false, messages: [], created_at: ts(), updated_at: ts() }
       cvs = [c, ...convos]; cid = c.id; setActiveId(cid)
     }
 
@@ -961,8 +972,8 @@ function ChatPage({ user }) {
       : c)
     cvs = [cvs.find(c => c.id === cid), ...cvs.filter(c => c.id !== cid)]
     persist(cvs); setSending(true)
+    abortRef.current = false
 
-    // Build history for AI — strip images for non-Anthropic providers (include text note)
     const provider = getAIProvider()
     const history = (cvs.find(c => c.id === cid)?.messages || []).map(m => ({
       role: m.role,
@@ -972,9 +983,40 @@ function ChatPage({ user }) {
     }))
 
     const reply = await ai(history, CHAT_SYS, 2000)
+    if (abortRef.current) { setSending(false); return }
     const aiMsg = { id: uid(), role: 'assistant', content: reply, ts: ts() }
     const final = cvs.map(c => c.id === cid ? { ...c, messages: [...c.messages, aiMsg], updated_at: ts() } : c)
     persist(final); setSending(false)
+  }
+
+  async function regenerate(msgId) {
+    if (!active || sending) return
+    const idx = active.messages.findIndex(m => m.id === msgId)
+    if (idx < 1) return
+    const upToUser = active.messages.slice(0, idx)
+    const trimmed = convos.map(c => c.id === activeId ? { ...c, messages: upToUser, updated_at: ts() } : c)
+    persist(trimmed); setSending(true); abortRef.current = false
+    const provider = getAIProvider()
+    const history = upToUser.map(m => ({ role: m.role, content: m.content, ...(m.image && provider === 'anthropic' ? { image: m.image } : {}) }))
+    const reply = await ai(history, CHAT_SYS, 2000)
+    if (abortRef.current) { setSending(false); return }
+    const aiMsg = { id: uid(), role: 'assistant', content: reply, ts: ts() }
+    persist(trimmed.map(c => c.id === activeId ? { ...c, messages: [...c.messages, aiMsg], updated_at: ts() } : c))
+    setSending(false)
+  }
+
+  async function saveToNotes(msg) {
+    const notes = await load('fl_notes', [])
+    const n = { id: uid(), title: (msg.content.slice(0,50) || 'Chat note'), content: msg.content, tags: ['from-chat'], created_at: ts(), updated_at: ts() }
+    await save('fl_notes', [n, ...(Array.isArray(notes)?notes:[])])
+    toast('Saved to Notes', 'success')
+  }
+
+  async function createTaskFromMsg(msg) {
+    const tasks = await load('fl_tasks', [])
+    const task = { id: uid(), title: msg.content.slice(0,80), status:'todo', priority:'medium', description: msg.content, due_date:'', created_at: ts(), updated_at: ts() }
+    await save('fl_tasks', [task, ...(Array.isArray(tasks)?tasks:[])])
+    toast('Task created', 'success')
   }
 
   function handleMic() {
@@ -1001,27 +1043,52 @@ function ChatPage({ user }) {
     toast('Chat deleted', 'success')
   }
 
+  function delMsg(msgId) {
+    if (!active) return
+    persist(convos.map(c => c.id === activeId ? { ...c, messages: c.messages.filter(m => m.id !== msgId) } : c))
+  }
+
   function startRename(c, e) { e.stopPropagation(); setRenaming(c.id); setRenameVal(c.title) }
   function commitRename(id) {
     if (!renameVal.trim()) { setRenaming(null); return }
     persist(convos.map(c => c.id === id ? { ...c, title: renameVal } : c)); setRenaming(null)
   }
 
+  const filteredConvos = convos
+    .filter(c => !search || (c.title||'').toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b) => (b.pinned?1:0) - (a.pinned?1:0) || new Date(b.updated_at) - new Date(a.updated_at))
+
+  function actionBtn(label, onClick, extra) {
+    return (
+      <button onClick={onClick} title={label}
+        style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:'2px 6px', fontFamily:'inherit', borderRadius:5, transition:'all .15s', ...extra }}
+        onMouseEnter={e=>{ e.currentTarget.style.color=C.t1; e.currentTarget.style.background=C.surfHigh }}
+        onMouseLeave={e=>{ e.currentTarget.style.color=extra?.color||C.t3; e.currentTarget.style.background='none' }}>
+        {label}
+      </button>
+    )
+  }
+
   return (
     <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
       {/* ── Sidebar ── */}
-      <div style={{ width:240, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', flexShrink:0 }}>
-        <div style={{ padding:12, borderBottom:`1px solid ${C.border}` }}>
+      <div style={{ width:250, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', flexShrink:0 }}>
+        <div style={{ padding:12, borderBottom:`1px solid ${C.border}`, display:'flex', flexDirection:'column', gap:8 }}>
           <Button onClick={newConvo} full size="sm" icon="+">New Chat</Button>
+          {convos.length > 4 && (
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search chats…"
+              style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'6px 10px', fontFamily:'inherit', outline:'none' }} />
+          )}
         </div>
         <div style={{ flex:1, overflowY:'auto', padding:8 }}>
           {loadingData
             ? <div style={{ display:'flex', justifyContent:'center', padding:20 }}><Spinner /></div>
-            : convos.length === 0
-              ? <div style={{ textAlign:'center', padding:'24px 12px', color:C.t3, fontSize:13 }}>No chats yet</div>
-              : convos.map(c => (
+            : filteredConvos.length === 0
+              ? <div style={{ textAlign:'center', padding:'24px 12px', color:C.t3, fontSize:13 }}>{search?'No matches':'No chats yet'}</div>
+              : filteredConvos.map(c => (
                 <div key={c.id} onClick={() => setActiveId(c.id)}
                   style={{ padding:'8px 10px', borderRadius:8, cursor:'pointer', marginBottom:2, background:activeId===c.id?C.accentM:'transparent', border:`1px solid ${activeId===c.id?C.borderFocus:'transparent'}`, display:'flex', alignItems:'center', gap:4, transition:'all .15s' }}>
+                  {c.pinned && <span style={{ fontSize:10, color:C.accent, flexShrink:0 }}>📌</span>}
                   {renaming === c.id
                     ? <input autoFocus value={renameVal} onChange={e => setRenameVal(e.target.value)}
                         onBlur={() => commitRename(c.id)}
@@ -1030,6 +1097,7 @@ function ChatPage({ user }) {
                         style={{ flex:1, background:C.bg, border:`1px solid ${C.accent}`, borderRadius:5, padding:'2px 6px', color:C.t1, fontSize:13, outline:'none', fontFamily:'inherit' }} />
                     : <span style={{ flex:1, fontSize:13, color:activeId===c.id?C.t1:C.t2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.title||'Untitled'}</span>
                   }
+                  <button onClick={e => togglePin(c.id, e)} style={{ background:'none', border:'none', color:c.pinned?C.accent:C.t3, cursor:'pointer', fontSize:11, padding:2, fontFamily:'inherit' }} title={c.pinned?'Unpin':'Pin'}>📌</button>
                   <button onClick={e => startRename(c, e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:2, fontFamily:'inherit' }} title="Rename">✎</button>
                   <button onClick={e => del(c.id, e)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16, padding:'0 2px', lineHeight:1 }} title="Delete">×</button>
                 </div>
@@ -1064,54 +1132,56 @@ function ChatPage({ user }) {
             <div style={{ flex:1, overflowY:'auto', padding:'24px 28px' }}>
               {messages.length === 0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
               {messages.map((m, i) => (
-                <div key={m.id||i} style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18, animation:'flSlide .2s ease' }}>
+                <div key={m.id||i}
+                  onMouseEnter={()=>setHoverId(m.id)} onMouseLeave={()=>setHoverId(h=>h===m.id?null:h)}
+                  style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18, animation:'flSlide .2s ease' }}>
                   {m.role === 'assistant' && <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff', flexShrink:0, marginRight:10, marginTop:2 }}>✦</div>}
                   <div style={{ maxWidth:'78%' }}>
-                    {/* Image preview if attached */}
                     {m.image && <img src={m.image} alt="attachment" style={{ maxWidth:220, maxHeight:160, borderRadius:10, marginBottom:6, display:'block', objectFit:'cover', border:`1px solid ${C.border}` }} />}
                     <div style={{ background:m.role==='user'?C.accent:C.surf, color:'#fff', borderRadius:m.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px', padding:'11px 15px', border:m.role==='assistant'?`1px solid ${C.border}`:'none', fontSize:14, lineHeight:1.55 }}>
                       {m.role === 'assistant' ? renderMsg(m.content) : <span style={{ whiteSpace:'pre-wrap', color:'#fff' }}>{m.content}</span>}
                     </div>
-                    <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:4, flexWrap:'wrap' }}>
-                      {m.role === 'assistant' && <>
-                        <button onClick={() => copyText(m.content)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:0, fontFamily:'inherit', transition:'color .15s' }}>📋 Copy</button>
-                        <button onClick={() => handleTTS(m)}
-                          style={{ background: activeTTS===m.id ? C.accentM : 'none', border: activeTTS===m.id ? `1px solid ${C.borderFocus}` : '1px solid transparent', borderRadius:6, color: activeTTS===m.id ? C.accent : C.t3, cursor:'pointer', fontSize:11, padding:'2px 8px', fontFamily:'inherit', transition:'all .15s' }}>
-                          {activeTTS===m.id ? '⏹ Stop' : '🔊 Read'}
-                        </button>
-                        {activeTTS === m.id && (
-                          <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 8px', background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
-                            {/* Speed */}
-                            <span style={{ fontSize:10, color:C.t3, marginRight:2 }}>Speed</span>
-                            {[0.75, 1, 1.25, 1.5, 2].map(r => (
-                              <button key={r}
-                                onClick={() => setRate(r)}
-                                style={{ background: rate===r ? C.accent : 'none', border: `1px solid ${rate===r ? C.accent : C.border}`, borderRadius:4, color: rate===r ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit', transition:'all .1s' }}>
-                                {r}×
-                              </button>
-                            ))}
-                            {/* Voice */}
-                            <span style={{ fontSize:10, color:C.t3, marginLeft:4, marginRight:2 }}>Voice</span>
-                            {PREFS.map((p, i) => (
-                              <button key={p}
-                                onClick={() => { setVoiceIdx(i); stopTTS(); setActiveTTS(null) }}
-                                style={{ background: voiceIdx===i ? C.accent : 'none', border: `1px solid ${voiceIdx===i ? C.accent : C.border}`, borderRadius:4, color: voiceIdx===i ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 6px', fontFamily:'inherit', textTransform:'capitalize', transition:'all .1s' }}>
-                                {p}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </>}
-                      {m.ts && <span style={{ fontSize:10, color:C.t3 }}>{new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
+
+                    {/* Hover-only action row */}
+                    <div style={{ display:'flex', alignItems:'center', gap:2, marginTop:4, flexWrap:'wrap', minHeight:18, opacity: hoverId===m.id || activeTTS===m.id ? 1 : 0, transition:'opacity .12s' }}>
+                      {actionBtn('📋', () => { copyText(m.content); toast('Copied','success') })}
+                      {m.role === 'assistant' && actionBtn(activeTTS===m.id?'⏹':'🔊', () => handleTTS(m), activeTTS===m.id?{color:C.accent}:{})}
+                      {m.role === 'assistant' && !sending && actionBtn('↻', () => regenerate(m.id))}
+                      {m.role === 'assistant' && actionBtn('📝', () => saveToNotes(m))}
+                      {m.role === 'assistant' && actionBtn('✅', () => createTaskFromMsg(m))}
+                      {actionBtn('🗑', () => delMsg(m.id))}
+                      {m.ts && <span style={{ fontSize:10, color:C.t3, marginLeft:4 }}>{new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
                     </div>
+
+                    {activeTTS === m.id && (
+                      <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 8px', marginTop:4, background:C.surf, borderRadius:8, border:`1px solid ${C.border}`, width:'fit-content' }}>
+                        <span style={{ fontSize:10, color:C.t3, marginRight:2 }}>Speed</span>
+                        {[0.75, 1, 1.25, 1.5, 2].map(r => (
+                          <button key={r} onClick={() => setRate(r)}
+                            style={{ background: rate===r ? C.accent : 'none', border: `1px solid ${rate===r ? C.accent : C.border}`, borderRadius:4, color: rate===r ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit' }}>
+                            {r}×
+                          </button>
+                        ))}
+                        <span style={{ fontSize:10, color:C.t3, marginLeft:4, marginRight:2 }}>Voice</span>
+                        {PREFS.map((p, i) => (
+                          <button key={p} onClick={() => { setVoiceIdx(i); stopTTS(); setActiveTTS(null) }}
+                            style={{ background: voiceIdx===i ? C.accent : 'none', border: `1px solid ${voiceIdx===i ? C.accent : C.border}`, borderRadius:4, color: voiceIdx===i ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 6px', fontFamily:'inherit', textTransform:'capitalize' }}>
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
               {sending && (
                 <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:18 }}>
                   <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff' }}>✦</div>
-                  <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:'16px 16px 16px 4px', padding:'12px 16px', display:'flex', gap:5, alignItems:'center' }}>
-                    {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:'50%', background:C.t2, animation:`flPulse 1.4s ease-in-out ${i*.2}s infinite` }} />)}
+                  <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:'16px 16px 16px 4px', padding:'12px 16px', display:'flex', gap:10, alignItems:'center' }}>
+                    <div style={{ display:'flex', gap:5 }}>
+                      {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:'50%', background:C.t2, animation:`flPulse 1.4s ease-in-out ${i*.2}s infinite` }} />)}
+                    </div>
+                    <button onClick={stopGenerating} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t2, cursor:'pointer', fontSize:11, padding:'2px 8px', fontFamily:'inherit' }}>■ Stop</button>
                   </div>
                 </div>
               )}
@@ -1120,7 +1190,6 @@ function ChatPage({ user }) {
 
             {/* Input area */}
             <div style={{ padding:'12px 28px 20px', borderTop:`1px solid ${C.border}` }}>
-              {/* Pending image preview */}
               {pendingImage && (
                 <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10, padding:'8px 12px', background:C.surf, borderRadius:10, border:`1px solid ${C.border}` }}>
                   <img src={pendingImage.base64} alt="" style={{ width:40, height:40, borderRadius:6, objectFit:'cover' }} />
@@ -1128,32 +1197,42 @@ function ChatPage({ user }) {
                   <button onClick={() => setPendingImage(null)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16 }}>×</button>
                 </div>
               )}
-              <div style={{ display:'flex', gap:8, alignItems:'flex-end' }}>
-                {/* Image upload */}
+              <div style={{ display:'flex', gap:8, alignItems:'flex-end' }}
+                onDragOver={e=>e.preventDefault()}
+                onDrop={async e=>{ e.preventDefault(); const f=e.dataTransfer.files?.[0]; if(f&&f.type.startsWith('image/')){ if(f.size>5*1024*1024){toast('Image must be under 5MB','error');return} setPendingImage({base64:await fileToBase64(f),name:f.name}) } }}>
                 <input ref={fileRef} type="file" accept={ACCEPTED_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
-                <button onClick={() => fileRef.current?.click()}
-                  title="Attach image"
+                <button onClick={() => fileRef.current?.click()} title="Attach image (or drag & drop)"
                   style={{ background:pendingImage?C.accentM:C.surf, border:`1px solid ${pendingImage?C.accent:C.border}`, borderRadius:10, color:pendingImage?C.accent:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s' }}>
                   🖼
                 </button>
-                {/* Mic */}
-                <button onClick={handleMic}
-                  title={listening ? 'Stop recording' : 'Voice input (en-GB)'}
+                <button onClick={handleMic} title={listening ? 'Stop recording' : 'Voice input (en-GB)'}
                   style={{ background:listening?'rgba(239,68,68,.15)':C.surf, border:`1px solid ${listening?C.red:C.border}`, borderRadius:10, color:listening?C.red:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s', animation:listening?'flPulse 1s infinite':'' }}>
                   {listening ? '⏹' : '🎤'}
                 </button>
                 <textarea
+                  ref={textRef}
                   value={input}
                   onChange={e => setInput(e.target.value)}
+                  onPaste={async e => {
+                    const item = Array.from(e.clipboardData?.items||[]).find(i=>i.type.startsWith('image/'))
+                    if (item) { const f=item.getAsFile(); if(f){ e.preventDefault(); setPendingImage({base64:await fileToBase64(f),name:'pasted-image.png'}) } }
+                  }}
                   placeholder={listening ? '🎤 Listening…' : 'Message FounderLab AI…'}
                   rows={1}
-                  onKeyDown={e => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+                  onKeyDown={e => {
+                    if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send() }
+                    if (e.key==='Escape' && sending) { stopGenerating() }
+                  }}
                   style={{ flex:1, background:C.surf, border:`1px solid ${C.border}`, borderRadius:10, color:C.t1, fontSize:14, padding:'10px 14px', fontFamily:'inherit', outline:'none', resize:'none', lineHeight:1.5, minHeight:42, maxHeight:160, overflowY:'auto' }}
                 />
-                <button onClick={() => send()} disabled={sending || (!input.trim() && !pendingImage)}
-                  style={{ background:C.accent, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:18, padding:'9px 14px', flexShrink:0, opacity:(sending||(!input.trim()&&!pendingImage))?0.5:1, transition:'all .15s' }}>↑</button>
+                {sending
+                  ? <button onClick={stopGenerating} title="Stop generating"
+                      style={{ background:C.red, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:14, padding:'9px 14px', flexShrink:0 }}>■</button>
+                  : <button onClick={() => send()} disabled={!input.trim() && !pendingImage}
+                      style={{ background:C.accent, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:18, padding:'9px 14px', flexShrink:0, opacity:(!input.trim()&&!pendingImage)?0.5:1, transition:'all .15s' }}>↑</button>
+                }
               </div>
-              <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>Enter to send · Shift+Enter new line · 🎤 voice · 🖼 image</p>
+              <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>Enter to send · Shift+Enter new line · 🎤 voice · 🖼 image · paste/drag screenshots · Esc to stop</p>
             </div>
           </>
         )}
