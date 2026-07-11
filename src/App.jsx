@@ -10,6 +10,8 @@ import { getMicrophoneStream } from '@/lib/microphone'
 import { zipSupported, createZip, readZip, downloadBlob } from '@/lib/zip'
 import { detectLanguage, detectFromDescription } from '@/lib/langDetect'
 import { parseFiles, isPreviewable, buildPreviewDoc } from '@/lib/codeFiles'
+import { downloadProjectZip, pushToGithub as pushToGithubShared, openVercelDeploy } from '@/lib/deploy'
+import { classifyEdit, extractSection, replaceSection, KNOWN_SECTIONS } from '@/lib/htmlSections'
 
 // ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
 const LS_VOICE = 'fl_voice_config'
@@ -2150,6 +2152,12 @@ function CodeAIPage({ user }) {
   const [loading, setL]     = useState(false)
   const [act, setAct]       = useState(null)
 
+  useEffect(() => {
+    const h = flConsumeHandoff('code')
+    if (h?.code) { setCode(h.code); toast('Loaded from Builder', 'success') }
+    if (h?.desc) setDesc(h.desc)
+  }, [])
+
   // ── Language auto-detection (new) ────────────────────────────
   const [manualLang, setManualLang] = useState(null)     // user override, null = auto
   const [advancedOpen, setAdvOpen]  = useState(false)
@@ -2352,15 +2360,10 @@ ${bundle}`
   // ── One-click actions ──────────────────────────────────────────
   async function downloadZip() {
     const list = codebase?.files?.length ? codebase.files : files
-    if (!list.length) return toast('Nothing to download yet', 'error')
-    if (!zipSupported) {
-      list.forEach(f => downloadBlob(new Blob([f.content], { type:'text/plain' }), f.path.split('/').pop()))
-      toast('Downloaded files individually (ZIP not supported in this browser)', 'success')
-      return
-    }
-    const blob = await createZip(list)
-    downloadBlob(blob, `${(codebase?.label || 'founderlab-code').replace(/[^\w.-]/g,'-')}.zip`)
-    toast('ZIP downloaded', 'success')
+    try {
+      const r = await downloadProjectZip(list, codebase?.label || 'founderlab-code')
+      toast(r.fallback ? 'Downloaded files individually (ZIP not supported in this browser)' : 'ZIP downloaded', 'success')
+    } catch (e) { toast(e.message, 'error') }
   }
 
   async function pushToGithub() {
@@ -2369,28 +2372,7 @@ ${bundle}`
     if (!ghPat || !ghRepoName.trim()) { setShowGhForm(true); return }
     setPushing(true)
     try {
-      const userRes = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${ghPat}` } })
-      if (!userRes.ok) throw new Error('Invalid GitHub token — check it has "repo" scope')
-      const ghUser = await userRes.json()
-
-      const createRes = await fetch('https://api.github.com/user/repos', {
-        method: 'POST',
-        headers: { Authorization: `token ${ghPat}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: ghRepoName.trim(), private: false, auto_init: true }),
-      })
-      if (!createRes.ok && createRes.status !== 422) throw new Error('Could not create repository')
-      const repoFullName = `${ghUser.login}/${ghRepoName.trim()}`
-
-      for (const f of list) {
-        const content = typeof f.content === 'string' ? f.content : new TextDecoder().decode(f.content)
-        const b64 = btoa(unescape(encodeURIComponent(content)))
-        await fetch(`https://api.github.com/repos/${repoFullName}/contents/${f.path}`, {
-          method: 'PUT',
-          headers: { Authorization: `token ${ghPat}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: `Add ${f.path} via FounderLab AI`, content: b64 }),
-        })
-      }
-      const repoUrl = `https://github.com/${repoFullName}`
+      const { repoUrl } = await pushToGithubShared({ files: list, repoName: ghRepoName, token: ghPat })
       setGhRepoUrl(repoUrl)
       setShowGhForm(false)
       toast('Pushed to GitHub', 'success')
@@ -2401,8 +2383,7 @@ ${bundle}`
   }
 
   function deployToVercel() {
-    if (!ghRepoUrl) { toast('Push to GitHub first, then deploy', 'error'); return }
-    window.open(`https://vercel.com/new/clone?repository-url=${encodeURIComponent(ghRepoUrl)}`, '_blank', 'noopener,noreferrer')
+    try { openVercelDeploy(ghRepoUrl) } catch (e) { toast(e.message, 'error') }
   }
 
   async function saveAsProject() {
@@ -2671,93 +2652,484 @@ const BGUIDES={
   'Bold Startup':'vibrant gradient background purple-to-pink, bold large white typography, energetic design with high contrast',
   'Luxury Premium':'deep black background, gold #d4af37 accents, elegant serif fonts, premium sophisticated layout',
 }
+const SECTION_SPEC = `Tag the top-level element of every major section with a matching data-section attribute, using exactly these values where the section exists: data-section="navbar", data-section="hero", data-section="social-proof", data-section="features", data-section="how-it-works", data-section="testimonial", data-section="pricing", data-section="cta", data-section="footer". This is required for the visual editor to work.`
+
+// ── Persistent project storage (shared fl_projects key with Code AI) ─────
+async function loadAllProjects() {
+  const p = await load('fl_projects', [])
+  return Array.isArray(p) ? p : []
+}
+async function persistProject(project) {
+  const all = await loadAllProjects()
+  const idx = all.findIndex(p => p.id === project.id)
+  const updated = idx === -1 ? [project, ...all] : all.map(p => p.id === project.id ? project : p)
+  await save('fl_projects', updated)
+  return updated
+}
 
 function BuilderPage({ user }) {
-  const [desc,setDesc]   = useState('')
-  const [style,setStyle] = useState('Dark Modern')
-  const [html,setHtml]   = useState('')
-  const [loading,setL]   = useState(false)
-  const [view,setView]   = useState('preview')
+  // ── Describe & plan ───────────────────────────────────────────
+  const [desc,setDesc]       = useState('')
+  const [style,setStyle]     = useState('Dark Modern')
+  const [overview,setOverview] = useState(null)   // { projectType, audience, goals, pages, features, techStack, designSystem, database, api, missingInfo, progressEstimate }
+  const [missingAnswers,setMissingAnswers] = useState({})
+  const [stage,setStage]     = useState(null)      // null | 'planning' | 'generating' | 'editing'
 
+  // ── Project (persistent memory) ─────────────────────────────────
+  const [projects,setProjects]   = useState([])
+  const [projectId,setProjectId] = useState(null)
+  const saveTimer = useRef(null)
+
+  // ── Output / versions ───────────────────────────────────────────
+  const [html,setHtml]         = useState('')
+  const [versions,setVersions] = useState([])      // [{id,label,html,ts}]
+  const [activeIdx,setActiveIdx] = useState(-1)
+  const [compareIdx,setCompareIdx] = useState(null)
+  const [view,setView]         = useState('preview')
+  const [editIn,setEditIn]     = useState('')
+
+  // ── Export / GitHub ──────────────────────────────────────────────
+  const [ghPat,setGhPat]         = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghRepoName,setGhRepoName] = useState('')
+  const [ghRepoUrl,setGhRepoUrl] = useState('')
+  const [showGhForm,setShowGhForm] = useState(false)
+  const [pushing,setPushing]     = useState(false)
+
+  const loading = stage !== null
+
+  // ── Load projects + handle Code AI handoff ─────────────────────
   useEffect(() => {
-    const h = flConsumeHandoff('builder')
-    if (h?.desc) setDesc(h.desc)
-    if (h?.html) { setHtml(h.html); setView('preview'); toast('Loaded from Code AI', 'success') }
+    async function init() {
+      const all = await loadAllProjects()
+      setProjects(all.filter(p => p.type === 'builder'))
+      const h = flConsumeHandoff('builder')
+      if (h?.desc) setDesc(h.desc)
+      if (h?.html) {
+        setHtml(h.html); setView('preview')
+        setVersions([{ id: uid(), label: 'From Code AI', html: h.html, ts: ts() }])
+        setActiveIdx(0)
+        toast('Loaded from Code AI', 'success')
+      }
+    }
+    init()
   }, [])
 
-  async function build() {
-    if(!desc.trim()) return toast('Describe your product first','error')
-    sb.logEvent('builder','builder'); setL(true)
-    const prompt = `Create a stunning, complete, production-ready single-page landing page HTML file.
+  function saveGhPat(v) { setGhPat(v); try { localStorage.setItem('fl_github_pat', v) } catch {} }
+
+  function persistNow(overrides = {}) {
+    const project = {
+      id: projectId || uid(),
+      type: 'builder',
+      name: overview?.projectType || desc.slice(0,40) || 'Untitled project',
+      desc, style, overview, html, versions, activeIdx,
+      created_at: ts(), updated_at: ts(),
+      ...overrides,
+    }
+    if (!projectId) setProjectId(project.id)
+    clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(async () => {
+      await persistProject(project)
+      const all = await loadAllProjects()
+      setProjects(all.filter(p => p.type === 'builder'))
+    }, 500)
+  }
+
+  function loadProject(p) {
+    setProjectId(p.id); setDesc(p.desc||''); setStyle(p.style||'Dark Modern')
+    setOverview(p.overview||null); setHtml(p.html||''); setVersions(p.versions||[])
+    setActiveIdx(typeof p.activeIdx === 'number' ? p.activeIdx : ((p.versions && p.versions.length) ? p.versions.length - 1 : -1))
+    setView('preview'); setGhRepoUrl(''); toast(`Loaded "${p.name}"`, 'success')
+  }
+
+  function newProject() {
+    setProjectId(null); setDesc(''); setOverview(null); setHtml('')
+    setVersions([]); setActiveIdx(-1); setGhRepoUrl('')
+  }
+
+  // ── Step 1: Plan (auto-detects everything, asks only for gaps) ──
+  async function planOverview() {
+    if (!desc.trim()) return toast('Describe your idea first', 'error')
+    setStage('planning')
+    const prompt = `A founder wants to build: "${desc}"
+
+Analyse this idea and produce a complete project plan. Infer everything you reasonably can — only flag something as missing if it's truly essential and can't be inferred.
+
+Return ONLY valid JSON, no markdown fences, no prose, in exactly this shape:
+{
+  "projectType": "short label e.g. SaaS landing page / Portfolio / E-commerce store",
+  "audience": "who this is for",
+  "goals": ["primary goal", "secondary goal"],
+  "pages": ["Home", "..."],
+  "features": ["feature 1", "feature 2", "..."],
+  "techStack": "e.g. Static HTML/CSS/JS — no build step needed",
+  "designSystem": "1-2 sentence description of the visual style",
+  "database": { "needed": false, "schema": "" },
+  "api": { "needed": false, "routes": [] },
+  "auth": { "needed": false },
+  "missingInfo": [],
+  "progressEstimate": 0
+}`
+    const r = await ai([{ role:'user', content: prompt }], 'You are a senior product architect who plans software projects with zero wasted questions.', 1600)
+    try {
+      const m = r.match(/\{[\s\S]*\}/)
+      const parsed = JSON.parse(m ? m[0] : r)
+      setOverview(parsed)
+      if (parsed.missingInfo?.length) setMissingAnswers(Object.fromEntries(parsed.missingInfo.map(k => [k,''])))
+      else setMissingAnswers({})
+    } catch {
+      setOverview({ raw: r, projectType: 'Project', pages: [], features: [], missingInfo: [], progressEstimate: 0 })
+    }
+    setStage(null)
+  }
+
+  function confirmMissingInfo() {
+    const extra = Object.entries(missingAnswers).filter(([,v]) => v.trim()).map(([k,v]) => `${k}: ${v}`).join('. ')
+    if (extra) setDesc(d => `${d}\n\n${extra}`)
+    setOverview(o => ({ ...o, missingInfo: [] }))
+    setMissingAnswers({})
+  }
+
+  // ── Step 2: Generate ──────────────────────────────────────────
+  async function generate() {
+    if (!desc.trim()) return toast('Describe your product first', 'error')
+    sb.logEvent('builder','builder'); setStage('generating')
+    const ov = overview
+    const pagesLine = ov?.pages?.length ? `Pages: ${ov.pages.join(', ')}.` : ''
+    const featuresLine = ov?.features?.length ? `Must include these features: ${ov.features.join(', ')}.` : ''
+    const designLine = ov?.designSystem ? `Design direction: ${ov.designSystem}.` : ''
+
+    const prompt = `Create a stunning, complete, production-ready single-page ${ov?.projectType || 'landing page'} HTML file.
 
 Product/Business: ${desc}
 Style: ${style} — ${BGUIDES[style]}
+${pagesLine} ${featuresLine} ${designLine}
 
-REQUIRED SECTIONS (all must be present):
+REQUIRED SECTIONS (all must be present unless clearly irrelevant to this product):
 1. Navigation bar — logo (use first word of product name), 3-4 nav links, CTA button
 2. Hero — powerful headline (8 words max), sub-headline (1-2 sentences), primary + secondary CTA buttons, hero visual (CSS-only: geometric shapes, gradient orbs, or grid pattern)
 3. Social proof bar — 3 logos (text-based), or "Trusted by X+ users" metric
-4. Features — 3 cards with icon (emoji), title, and 2-sentence description
-5. How it works — 3 numbered steps with brief description
+4. Features — cards with icon (emoji), title, and 2-sentence description, covering the feature list above
+5. How it works — numbered steps with brief description
 6. Testimonial — one compelling quote with name and role
 7. Pricing or CTA section — one clear call-to-action with button
 8. Footer — logo, tagline, 3 column links, copyright
 
 TECHNICAL REQUIREMENTS:
 - All CSS in <style> tag — zero external dependencies
+- ${SECTION_SPEC}
 - Smooth scroll: html { scroll-behavior: smooth }
 - Fade-in on load: @keyframes fadeUp { from { opacity:0; transform:translateY(24px) } to { opacity:1; transform:translateY(0) } }
 - Apply animation to hero and section headings
 - Hover effects on all buttons (transform: translateY(-2px), box-shadow)
 - Hover effects on feature cards (border color change, subtle lift)
 - Mobile responsive: @media (max-width: 768px) { flex to column, font sizes reduced }
+- Semantic HTML, proper heading hierarchy, alt text on any SVG icons via <title>, for SEO/accessibility
 - Smooth gradient backgrounds where appropriate
-- No placeholder images — use CSS shapes, gradients, or emoji as visuals
+- No placeholder images, no lorem ipsum — use CSS shapes, gradients, or emoji as visuals, and write real, specific copy about this product
 
 Return ONLY valid HTML starting with <!DOCTYPE html>. No explanation, no markdown fences.`
 
-    const r = await ai([{role:'user',content:prompt}], 'You are a world-class web designer who creates stunning, conversion-optimised landing pages that look like they cost $10,000 to build. Every element is polished, every section purposeful. Never use placeholder images. Use CSS art for visuals.', 4000)
+    const r = await ai([{role:'user',content:prompt}], 'You are a world-class web designer and front-end engineer who creates stunning, conversion-optimised, accessible, SEO-ready pages that look like they cost $10,000 to build. Every element is polished and purposeful. Never use placeholder images or lorem ipsum.', 4500)
     const m = r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
-    setHtml(m ? m[1] : r); setView('preview'); setL(false)
+    const newHtml = m ? m[1] : r
+    const snap = { id: uid(), label: 'Generated', html: newHtml, ts: ts() }
+    const newVersions = [snap]
+    setHtml(newHtml); setVersions(newVersions); setActiveIdx(0); setView('preview'); setStage(null)
+    persistNow({ html: newHtml, versions: newVersions, activeIdx: 0 })
   }
 
-  function dl() {
-    const a=Object.assign(document.createElement('a'),{ href:URL.createObjectURL(new Blob([html],{type:'text/html'})), download:'landing-page.html' })
-    a.click(); URL.revokeObjectURL(a.href)
+  // ── Step 3: Smart section editing ────────────────────────────
+  async function applyEdit() {
+    const instruction = editIn.trim()
+    if (!instruction) return
+    if (!html) return toast('Generate a site first', 'error')
+    setStage('editing')
+    const classification = classifyEdit(instruction)
+    let newHtml = html
+
+    if (classification.type === 'section') {
+      const fragment = extractSection(html, classification.section)
+      if (fragment) {
+        const prompt = `Here is the "${classification.section}" section of a website (HTML fragment):
+
+${fragment}
+
+Instruction: ${instruction}
+
+Return ONLY the replacement HTML for this section — same root tag and data-section attribute, no explanation, no markdown fences.`
+        const r = await ai([{ role:'user', content: prompt }], 'You are an expert front-end engineer making precise, surgical edits. Only change what was asked. Keep everything else about the section identical.', 1600)
+        const cleaned = r.replace(/```html?/gi,'').replace(/```/g,'').trim()
+        newHtml = replaceSection(html, classification.section, cleaned)
+      }
+    }
+
+    if (classification.type === 'global' || newHtml === html) {
+      const prompt = `Here is a complete website HTML file:
+
+${html}
+
+Instruction: ${instruction}
+
+Apply this change across the page as needed. Keep everything else the same. ${SECTION_SPEC}
+
+Return ONLY the full updated HTML starting with <!DOCTYPE html>. No explanation, no markdown fences.`
+      const r = await ai([{ role:'user', content: prompt }], 'You are a world-class web designer making a precise, well-executed revision to an existing page.', 4500)
+      const m = r.match(/(<!DOCTYPE html>[\s\S]*<\/html>)/i)
+      if (m) newHtml = m[1]
+    }
+
+    const snap = { id: uid(), label: instruction.slice(0,50), html: newHtml, ts: ts() }
+    const newVersions = [...versions, snap]
+    setHtml(newHtml); setVersions(newVersions); setActiveIdx(newVersions.length-1); setEditIn(''); setStage(null)
+    persistNow({ html: newHtml, versions: newVersions, activeIdx: newVersions.length-1 })
+    toast('Applied', 'success')
   }
+
+  // ── Version history ───────────────────────────────────────────
+  function goToVersion(i) {
+    if (i < 0 || i >= versions.length) return
+    setActiveIdx(i); setHtml(versions[i].html)
+    persistNow({ html: versions[i].html, activeIdx: i })
+  }
+  function undo() { goToVersion(activeIdx - 1) }
+  function redo() { goToVersion(activeIdx + 1) }
+  function duplicateVersion(i) {
+    const snap = { id: uid(), label: `${versions[i].label} (copy)`, html: versions[i].html, ts: ts() }
+    const newVersions = [...versions, snap]
+    setVersions(newVersions); setActiveIdx(newVersions.length-1); setHtml(snap.html)
+    persistNow({ versions: newVersions, activeIdx: newVersions.length-1, html: snap.html })
+  }
+
+  // ── Export ──────────────────────────────────────────────────────
+  function exportFiles() {
+    const readme = `# ${overview?.projectType || desc.slice(0,60) || 'FounderLab Project'}
+
+${desc}
+
+## Pages
+${(overview?.pages||['Home']).map(p=>`- ${p}`).join('\n')}
+
+## Features
+${(overview?.features||[]).map(f=>`- ${f}`).join('\n') || '- See index.html'}
+
+## Tech stack
+${overview?.techStack || 'Static HTML, CSS, and JavaScript — no build step required.'}
+
+## Run locally
+Open \`index.html\` directly in a browser, or deploy the folder to any static host (Vercel, Netlify, GitHub Pages).
+
+---
+Generated with FounderLab AI Builder.
+`
+    return [{ path:'index.html', content: html }, { path:'README.md', content: readme }]
+  }
+
+  async function dl() {
+    try {
+      const r = await downloadProjectZip(exportFiles(), overview?.projectType || 'founderlab-site')
+      toast(r.fallback ? 'Downloaded files individually' : 'ZIP downloaded', 'success')
+    } catch (e) { toast(e.message, 'error') }
+  }
+
+  async function pushGithub() {
+    if (!html) return toast('Generate a site first', 'error')
+    if (!ghPat || !ghRepoName.trim()) { setShowGhForm(true); return }
+    setPushing(true)
+    try {
+      const { repoUrl } = await pushToGithubShared({ files: exportFiles(), repoName: ghRepoName, token: ghPat })
+      setGhRepoUrl(repoUrl); setShowGhForm(false)
+      toast('Pushed to GitHub', 'success')
+    } catch (e) { toast(e.message, 'error') }
+    setPushing(false)
+  }
+
+  function deployVercel() {
+    try { openVercelDeploy(ghRepoUrl) } catch (e) { toast(e.message, 'error') }
+  }
+
+  // ── Cross-module integration ────────────────────────────────────
+  function continueInChat() {
+    const summary = overview ? `Project: ${overview.projectType}\nAudience: ${overview.audience}\nPages: ${(overview.pages||[]).join(', ')}\nFeatures: ${(overview.features||[]).join(', ')}` : desc
+    flNavigate('chat', { message: `I'm building this with FounderLab Builder:\n\n${summary}\n\nLet's keep working on it — what should we improve next?` })
+    toast('Opening in AI Chat…', 'success')
+  }
+
+  async function saveOverviewToNotes() {
+    if (!overview) return toast('Plan the project first', 'error')
+    const notes = await load('fl_notes', [])
+    const content = `# ${overview.projectType}\n\n**Audience:** ${overview.audience}\n\n**Goals:** ${(overview.goals||[]).join(', ')}\n\n**Pages:** ${(overview.pages||[]).join(', ')}\n\n**Features:**\n${(overview.features||[]).map(f=>`- ${f}`).join('\n')}\n\n**Tech stack:** ${overview.techStack}\n\n**Design:** ${overview.designSystem}`
+    const n = { id: uid(), title: overview.projectType || 'Project overview', content, tags: ['builder','project-plan'], created_at: ts(), updated_at: ts() }
+    await save('fl_notes', [n, ...(Array.isArray(notes)?notes:[])])
+    toast('Overview saved to Notes', 'success')
+  }
+
+  async function createTasksFromPlan() {
+    if (!overview?.features?.length) return toast('Plan the project first', 'error')
+    const tasks = await load('fl_tasks', [])
+    const newTasks = overview.features.map(f => ({ id: uid(), title: f, status:'todo', priority:'medium', description:`From ${overview.projectType} plan`, due_date:'', created_at: ts(), updated_at: ts() }))
+    await save('fl_tasks', [...newTasks, ...(Array.isArray(tasks)?tasks:[])])
+    toast(`Created ${newTasks.length} tasks`, 'success')
+  }
+
+  function debugInCodeAI() {
+    if (!html) return toast('Generate a site first', 'error')
+    flNavigate('code', { code: html, desc: `Debug and improve this ${overview?.projectType || 'website'}` })
+    toast('Opening in Code AI…', 'success')
+  }
+
+  const stageLabel = { planning:'🧠 Planning your project…', generating:'⚡ Generating your site — sections, animations, responsive styles…', editing:'✨ Applying your edit…' }[stage]
 
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100%', overflow:'hidden' }}>
-      <div style={{ padding:'20px 24px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-        <h2 style={{ margin:'0 0 16px', fontSize:22, fontWeight:700, color:C.t1 }}>Website Builder</h2>
+      {/* ── Header ── */}
+      <div style={{ padding:'16px 24px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:10, marginBottom:12 }}>
+          <h2 style={{ margin:0, fontSize:20, fontWeight:700, color:C.t1 }}>AI Product Studio</h2>
+          <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+            <button onClick={newProject} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.t2, cursor:'pointer', fontSize:12, padding:'5px 10px', fontFamily:'inherit' }}>+ New</button>
+            {projects.slice(0,5).map(p => (
+              <button key={p.id} onClick={()=>loadProject(p)}
+                style={{ padding:'5px 12px', borderRadius:999, border:`1px solid ${projectId===p.id?C.accent:C.border}`, background:projectId===p.id?C.accentM:'transparent', color:projectId===p.id?C.accent:C.t2, cursor:'pointer', fontSize:12, fontFamily:'inherit', maxWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
         <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
-          <Input value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Describe your product or business…" style={{ flex:1, minWidth:200 }} onKeyDown={e=>e.key==='Enter'&&build()} />
+          <Input value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Describe your product or business idea…" style={{ flex:1, minWidth:220 }} onKeyDown={e=>e.key==='Enter'&&(overview?generate():planOverview())} />
           <select value={style} onChange={e=>setStyle(e.target.value)} style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:14, padding:'9px 12px', fontFamily:'inherit', cursor:'pointer' }}>
             {BSTYLES.map(s=><option key={s}>{s}</option>)}
           </select>
-          <Button onClick={build} disabled={loading}>{loading?<Spinner size={14} color="#fff"/>:'⬡'} Build Site</Button>
+          <Button onClick={planOverview} disabled={loading} variant="secondary">{stage==='planning'?<Spinner size={14} color={C.accent}/>:'🧠'} Plan</Button>
+          <Button onClick={generate} disabled={loading}>{stage==='generating'?<Spinner size={14} color="#fff"/>:'⬡'} Generate</Button>
         </div>
-        {loading && <p style={{ margin:'10px 0 0', fontSize:13, color:C.accent }}>⚡ Building your landing page with all sections, animations, and responsive styles… (~30 seconds)</p>}
+        {stageLabel && <p style={{ margin:'10px 0 0', fontSize:13, color:C.accent }}>{stageLabel}</p>}
       </div>
+
+      {/* ── Project Overview ── */}
+      {overview && !overview.raw && (
+        <div style={{ padding:'14px 24px', borderBottom:`1px solid ${C.border}`, flexShrink:0, maxHeight:220, overflowY:'auto' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:C.t1 }}>📋 {overview.projectType}</span>
+            {typeof overview.progressEstimate === 'number' && (
+              <div style={{ flex:1, maxWidth:200, height:6, background:C.surf, borderRadius:99, overflow:'hidden' }}>
+                <div style={{ width:`${overview.progressEstimate}%`, height:'100%', background:C.accent, transition:'width .3s' }} />
+              </div>
+            )}
+            <span style={{ fontSize:11, color:C.t3 }}>{overview.progressEstimate||0}% planned</span>
+          </div>
+          {overview.missingInfo?.length > 0 ? (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              <p style={{ margin:0, fontSize:12, color:C.yellow }}>A few details would help — everything else was inferred automatically:</p>
+              {overview.missingInfo.map(k => (
+                <Input key={k} value={missingAnswers[k]||''} onChange={e=>setMissingAnswers(m=>({...m,[k]:e.target.value}))} placeholder={k} style={{ fontSize:13 }} />
+              ))}
+              <Button onClick={confirmMissingInfo} size="sm" style={{ alignSelf:'flex-start' }}>Continue →</Button>
+            </div>
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, fontSize:12, color:C.t2 }}>
+              <div><strong style={{color:C.t1}}>Pages</strong><br/>{(overview.pages||[]).join(', ')||'—'}</div>
+              <div><strong style={{color:C.t1}}>Features</strong><br/>{(overview.features||[]).join(', ')||'—'}</div>
+              <div><strong style={{color:C.t1}}>Tech stack</strong><br/>{overview.techStack||'—'}</div>
+              <div><strong style={{color:C.t1}}>Design</strong><br/>{overview.designSystem||'—'}</div>
+              {overview.database?.needed && <div><strong style={{color:C.t1}}>Database</strong><br/>{overview.database.schema||'Needed'}</div>}
+              {overview.api?.needed && <div><strong style={{color:C.t1}}>API routes</strong><br/>{(overview.api.routes||[]).join(', ')}</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Main: rail + dominant preview ── */}
       {html ? (
-        <>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'8px 24px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
-            <div style={{ display:'flex', gap:3, background:C.bg, borderRadius:8, padding:3 }}>
-              {['preview','code'].map(v=><button key={v} onClick={()=>setView(v)} style={{ padding:'5px 14px', borderRadius:6, border:'none', background:view===v?C.surf:'transparent', color:view===v?C.t1:C.t3, cursor:'pointer', fontSize:13, fontFamily:'inherit', transition:'all .15s' }}>{v==='preview'?'👁 Preview':'< > Code'}</button>)}
+        <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
+          {/* Left rail */}
+          <div style={{ width:260, borderRight:`1px solid ${C.border}`, overflowY:'auto', padding:14, display:'flex', flexDirection:'column', gap:16, flexShrink:0 }}>
+            {/* Version history */}
+            <div>
+              <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Version History</p>
+              <div style={{ display:'flex', gap:6, marginBottom:8 }}>
+                <Button onClick={undo} disabled={activeIdx<=0} variant="secondary" size="sm">↶ Undo</Button>
+                <Button onClick={redo} disabled={activeIdx>=versions.length-1} variant="secondary" size="sm">↷ Redo</Button>
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                {versions.slice().reverse().map((v, ri) => {
+                  const i = versions.length - 1 - ri
+                  return (
+                    <div key={v.id} onClick={()=>goToVersion(i)}
+                      style={{ padding:'7px 9px', borderRadius:7, cursor:'pointer', background:activeIdx===i?C.accentM:'transparent', border:`1px solid ${activeIdx===i?C.borderFocus:'transparent'}`, fontSize:12 }}>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:6 }}>
+                        <span style={{ color:activeIdx===i?C.t1:C.t2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{v.label}</span>
+                        <button onClick={e=>{e.stopPropagation();duplicateVersion(i)}} title="Duplicate" style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, fontFamily:'inherit', flexShrink:0 }}>⎘</button>
+                      </div>
+                      <span style={{ fontSize:10, color:C.t3 }}>{new Date(v.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
-            <div style={{ display:'flex', gap:8 }}>
-              <Button onClick={()=>copyText(html)} variant="secondary" size="sm">📋 Copy HTML</Button>
-              <Button onClick={dl} size="sm">⬇ Download</Button>
+
+            {/* Export */}
+            <div>
+              <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Export</p>
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                <Button onClick={dl} variant="secondary" size="sm" full>⬇ Download ZIP</Button>
+                <Button onClick={()=>copyText(html)} variant="secondary" size="sm" full>📋 Copy code</Button>
+                {showGhForm && (
+                  <div style={{ display:'flex', flexDirection:'column', gap:6, padding:8, background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
+                    <Input value={ghRepoName} onChange={e=>setGhRepoName(e.target.value)} placeholder="repo-name" style={{ fontSize:12 }} />
+                    <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (repo scope)"
+                      style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'8px 10px', fontFamily:'inherit', outline:'none' }} />
+                    <Button onClick={pushGithub} disabled={pushing} size="sm">{pushing?<Spinner size={12} color="#fff"/>:'🚀'} Push</Button>
+                  </div>
+                )}
+                <Button onClick={pushGithub} disabled={pushing} variant="secondary" size="sm" full>{pushing?<Spinner size={12} color={C.accent}/>:'🐙'} Push to GitHub</Button>
+                {ghRepoUrl && <a href={ghRepoUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize:11, color:C.accent }}>Open repository →</a>}
+                <Button onClick={deployVercel} variant="secondary" size="sm" full>▲ Deploy to Vercel</Button>
+              </div>
+            </div>
+
+            {/* Cross-module */}
+            <div>
+              <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em' }}>Continue working</p>
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                <Button onClick={continueInChat} variant="secondary" size="sm" full>💬 Continue in AI Chat</Button>
+                <Button onClick={debugInCodeAI} variant="secondary" size="sm" full>🐛 Debug in Code AI</Button>
+                <Button onClick={saveOverviewToNotes} variant="secondary" size="sm" full>📝 Save plan to Notes</Button>
+                <Button onClick={createTasksFromPlan} variant="secondary" size="sm" full>✅ Create tasks from plan</Button>
+              </div>
             </div>
           </div>
-          <div style={{ flex:1, overflow:'hidden' }}>
-            {view==='preview' ? <iframe srcDoc={html} style={{ width:'100%', height:'100%', border:'none' }} title="Preview" sandbox="allow-scripts" />
-             : <pre style={{ margin:0, padding:20, fontFamily:'monospace', fontSize:12, color:C.t1, whiteSpace:'pre-wrap', overflowY:'auto', height:'100%', background:'#050508', boxSizing:'border-box' }}>{html}</pre>}
+
+          {/* Dominant preview */}
+          <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'8px 20px', borderBottom:`1px solid ${C.border}`, flexShrink:0 }}>
+              <div style={{ display:'flex', gap:3, background:C.bg, borderRadius:8, padding:3 }}>
+                {['preview','code'].map(v=><button key={v} onClick={()=>setView(v)} style={{ padding:'5px 14px', borderRadius:6, border:'none', background:view===v?C.surf:'transparent', color:view===v?C.t1:C.t3, cursor:'pointer', fontSize:13, fontFamily:'inherit', transition:'all .15s' }}>{v==='preview'?'👁 Preview':'< > Code'}</button>)}
+              </div>
+              <span style={{ fontSize:12, color:C.t3 }}>{versions[activeIdx]?.label}</span>
+            </div>
+            <div style={{ flex:1, overflow:'hidden', position:'relative' }}>
+              {stage==='editing' && (
+                <div style={{ position:'absolute', inset:0, background:'rgba(9,9,15,.55)', backdropFilter:'blur(2px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:5 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:10, background:C.surf, border:`1px solid ${C.border}`, borderRadius:12, padding:'12px 20px' }}>
+                    <Spinner size={16} /><span style={{ fontSize:13, color:C.t1 }}>Applying your edit…</span>
+                  </div>
+                </div>
+              )}
+              {view==='preview'
+                ? <iframe srcDoc={html} style={{ width:'100%', height:'100%', border:'none' }} title="Preview" sandbox="allow-scripts" />
+                : <pre style={{ margin:0, padding:20, fontFamily:'monospace', fontSize:12, color:C.t1, whiteSpace:'pre-wrap', overflowY:'auto', height:'100%', background:'#050508', boxSizing:'border-box' }}>{html}</pre>}
+            </div>
+            {/* Smart edit bar */}
+            <div style={{ padding:'10px 20px', borderTop:`1px solid ${C.border}`, flexShrink:0, display:'flex', gap:8 }}>
+              <Input value={editIn} onChange={e=>setEditIn(e.target.value)} placeholder='Tell AI what to change — "add pricing", "more premium", "use glass style"…' style={{ flex:1, fontSize:13 }} onKeyDown={e=>e.key==='Enter'&&applyEdit()} />
+              <Button onClick={applyEdit} disabled={loading||!editIn.trim()} size="sm">✨ Apply</Button>
+            </div>
           </div>
-        </>
+        </div>
       ) : !loading ? (
         <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <EmptyState icon="⬡" title="Describe your product above" description="AI generates a complete, downloadable landing page — hero, features, CTA, footer — ready to deploy." />
+          <EmptyState icon="⬡" title="Describe your product above" description="AI plans the architecture, pages, and features, then generates a complete, editable, deployable site." />
         </div>
       ) : <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}><Spinner size={36} /></div>}
     </div>
