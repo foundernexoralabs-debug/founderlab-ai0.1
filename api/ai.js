@@ -113,7 +113,7 @@ async function handleGemini(req, res, { model, messages, system, max_tokens }) {
   const body = {
     contents,
     generationConfig: { maxOutputTokens: max_tokens || 1200 },
-    ...(system && { systemInstruction: { parts: [{ text: system }] } }),
+    ...(system && { system_instruction: { parts: [{ text: system }] } }),
   }
 
   async function callGemini(apiVersion) {
