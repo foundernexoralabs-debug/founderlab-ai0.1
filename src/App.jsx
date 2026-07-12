@@ -853,12 +853,14 @@ function Dashboard({ user, profile, setPage }) {
 // ── AI CHAT ──────────────────────────────────────────────────
 const CHAT_SYS = `You are FounderLab AI — a sharp, practical assistant built for founders, developers, and creators.
 
-Rules:
-- Always give complete, actionable answers. Never cut off mid-response.
-- Use **bold** for key terms, \`code\` for technical terms, and fenced code blocks for all code.
-- Use bullet lists or numbered lists for multi-step answers.
-- Include specific details, examples, and real numbers when relevant.
-- If asked about a business, product, or location, include concrete details (pricing, contacts, hours) when implied.
+Response style — keep this front of mind:
+- **Be concise.** Default to short, direct answers. Match your length to the question — a quick question gets a quick answer, not an essay.
+- Skip filler ("Great question!", "I'd be happy to help", "As an AI…"). Answer immediately.
+- Structure only when it aids scanning: short paragraphs, or a bulleted list when there are ≥3 items, or a fenced code block for code. Don't force headings and bullets into short answers.
+- Give complete, actionable answers within that concise frame — depth over length.
+- Use **bold** for key terms, \`code\` for inline technical terms.
+- Include specific numbers, examples, and real details rather than generic advice.
+- Only give a long response when the question genuinely needs one (multi-step guide, detailed comparison, complex explanation the user asked for).
 - Never say "I can't help with that" unless it involves genuinely harmful content.`
 const STARTERS = [
   'Help me brainstorm a content strategy for my startup',
@@ -933,24 +935,30 @@ function inlineRender(text) {
 }
 
 function ChatPage({ user }) {
-  const [convos, setConvos]       = useState([])
-  const [activeId, setActiveId]   = useState(null)
-  const [input, setInput]         = useState('')
-  const [sending, setSending]     = useState(false)
-  const [loadingData, setLD]      = useState(true)
-  const [renaming, setRenaming]   = useState(null)
-  const [renameVal, setRenameVal] = useState('')
+  const [convos, setConvos]         = useState([])
+  const [activeId, setActiveId]     = useState(null)
+  const [input, setInput]           = useState('')
+  const [sending, setSending]       = useState(false)
+  const [loadingData, setLD]        = useState(true)
+  const [renaming, setRenaming]     = useState(null)
+  const [renameVal, setRenameVal]   = useState('')
   const [pendingImage, setPendingImage] = useState(null)
-  const [search, setSearch]       = useState('')
-  const [hoverId, setHoverId]     = useState(null)
-  const msgEnd    = useRef(null)
-  const saveTimer = useRef(null)
-  const fileRef   = useRef(null)
-  const abortRef  = useRef(null)
-  const textRef   = useRef(null)
+  const [search, setSearch]         = useState('')
+  const [hoverId, setHoverId]       = useState(null)
+  const [reactions, setReactions]   = useState({})   // msgId -> 'up' | 'down'
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [voiceCfg, setVoiceCfg]     = useState(getVoiceConfig())
+  const [showTTSMenu, setShowTTSMenu] = useState(null) // msgId currently showing voice/speed picker
+  const [errorMsg, setErrorMsg]     = useState(null)   // last real error, shown as recoverable banner
+
+  const msgEnd     = useRef(null)
+  const saveTimer  = useRef(null)
+  const fileRef    = useRef(null)
+  const abortRef   = useRef(null)
+  const textRef    = useRef(null)
 
   const { listening, transcript, setTranscript, start: startReco, stop: stopReco } = useSpeechRecognition()
-  const { speaking, speak, stop: stopTTS, rate, setRate, voiceIdx, setVoiceIdx, PREFS } = useTTS()
+  const { speaking, speak, stop: stopTTS, elAvailable } = useTTS(voiceCfg)
   const [activeTTS, setActiveTTS] = useState(null)
 
   const active   = convos.find(c => c.id === activeId)
@@ -979,6 +987,17 @@ function ChatPage({ user }) {
   useEffect(() => { msgEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, sending])
   useEffect(() => { if (transcript) setInput(transcript) }, [transcript])
 
+  // Persist voice config on change
+  useEffect(() => { persistVoiceConfig(voiceCfg) }, [voiceCfg])
+
+  // Auto-grow textarea
+  useEffect(() => {
+    if (textRef.current) {
+      textRef.current.style.height = 'auto'
+      textRef.current.style.height = Math.min(200, textRef.current.scrollHeight) + 'px'
+    }
+  }, [input])
+
   function persist(updated) {
     setConvos(updated)
     clearTimeout(saveTimer.current)
@@ -987,7 +1006,7 @@ function ChatPage({ user }) {
 
   function newConvo() {
     const c = { id: uid(), title: 'New Chat', pinned: false, messages: [], created_at: ts(), updated_at: ts() }
-    persist([c, ...convos]); setActiveId(c.id)
+    persist([c, ...convos]); setActiveId(c.id); setErrorMsg(null)
   }
 
   function togglePin(id, e) {
@@ -1012,7 +1031,7 @@ function ChatPage({ user }) {
   async function send(textOverride) {
     const t = (textOverride || input).trim()
     if ((!t && !pendingImage) || sending) return
-    setInput(''); setTranscript(''); stopReco()
+    setInput(''); setTranscript(''); stopReco(); setErrorMsg(null)
 
     let cid = activeId
     let cvs = convos
@@ -1044,8 +1063,18 @@ function ChatPage({ user }) {
       ...(m.image && provider !== 'anthropic' ? { content: (m.content || '') + '\n[User attached an image — describe what you would expect in response]' } : {}),
     }))
 
-    const reply = await ai(history, CHAT_SYS, 2000)
-    if (abortRef.current) { setSending(false); return }
+    let reply
+    try {
+      reply = await ai(history, CHAT_SYS, 2000)
+      if (abortRef.current) { setSending(false); return }
+      if (typeof reply === 'string' && reply.startsWith('⚠')) {
+        setErrorMsg(reply.replace(/^⚠\s*/, ''))
+        setSending(false); return
+      }
+    } catch (e) {
+      setErrorMsg(e.message || 'Something went wrong. Try again.')
+      setSending(false); return
+    }
     const aiMsg = { id: uid(), role: 'assistant', content: reply, ts: ts() }
     const final = cvs.map(c => c.id === cid ? { ...c, messages: [...c.messages, aiMsg], updated_at: ts() } : c)
     persist(final); setSending(false)
@@ -1057,11 +1086,21 @@ function ChatPage({ user }) {
     if (idx < 1) return
     const upToUser = active.messages.slice(0, idx)
     const trimmed = convos.map(c => c.id === activeId ? { ...c, messages: upToUser, updated_at: ts() } : c)
-    persist(trimmed); setSending(true); abortRef.current = false
+    persist(trimmed); setSending(true); abortRef.current = false; setErrorMsg(null)
     const provider = getAIProvider()
     const history = upToUser.map(m => ({ role: m.role, content: m.content, ...(m.image && provider === 'anthropic' ? { image: m.image } : {}) }))
-    const reply = await ai(history, CHAT_SYS, 2000)
-    if (abortRef.current) { setSending(false); return }
+    let reply
+    try {
+      reply = await ai(history, CHAT_SYS, 2000)
+      if (abortRef.current) { setSending(false); return }
+      if (typeof reply === 'string' && reply.startsWith('⚠')) {
+        setErrorMsg(reply.replace(/^⚠\s*/, ''))
+        setSending(false); return
+      }
+    } catch (e) {
+      setErrorMsg(e.message || 'Something went wrong. Try again.')
+      setSending(false); return
+    }
     const aiMsg = { id: uid(), role: 'assistant', content: reply, ts: ts() }
     persist(trimmed.map(c => c.id === activeId ? { ...c, messages: [...c.messages, aiMsg], updated_at: ts() } : c))
     setSending(false)
@@ -1081,13 +1120,16 @@ function ChatPage({ user }) {
     toast('Task created', 'success')
   }
 
-  function handleMic() {
+  async function handleMic() {
     if (listening) { stopReco(); return }
+    // useSpeechRecognition.start() already runs getMicrophoneStream() internally
+    // with the improved error-name mapping from src/lib/microphone.ts, so any
+    // permission/hardware issue surfaces as a clear toast — no duplicate probe needed.
     startReco((finalText) => { setInput(finalText) })
   }
 
   function handleTTS(msg) {
-    if (activeTTS === msg.id) { stopTTS(); setActiveTTS(null); return }
+    if (activeTTS === msg.id) { stopTTS(); setActiveTTS(null); setShowTTSMenu(null); return }
     setActiveTTS(msg.id)
     speak(msg.content)
     const check = setInterval(() => {
@@ -1095,6 +1137,10 @@ function ChatPage({ user }) {
         setActiveTTS(null); clearInterval(check)
       }
     }, 400)
+  }
+
+  function reactToMsg(msgId, r) {
+    setReactions(prev => ({ ...prev, [msgId]: prev[msgId] === r ? null : r }))
   }
 
   function del(id, e) {
@@ -1120,26 +1166,74 @@ function ChatPage({ user }) {
     .filter(c => !search || (c.title||'').toLowerCase().includes(search.toLowerCase()))
     .sort((a,b) => (b.pinned?1:0) - (a.pinned?1:0) || new Date(b.updated_at) - new Date(a.updated_at))
 
-  function actionBtn(label, onClick, extra) {
+  // ── Message action button (hover-revealed, uniform styling) ──
+  function ActionBtn({ label, icon, onClick, active, danger }) {
     return (
-      <button onClick={onClick} title={label}
-        style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:11, padding:'2px 6px', fontFamily:'inherit', borderRadius:5, transition:'all .15s', ...extra }}
-        onMouseEnter={e=>{ e.currentTarget.style.color=C.t1; e.currentTarget.style.background=C.surfHigh }}
-        onMouseLeave={e=>{ e.currentTarget.style.color=extra?.color||C.t3; e.currentTarget.style.background='none' }}>
-        {label}
+      <button onClick={onClick} title={label} aria-label={label}
+        style={{
+          background: active ? C.accentM : 'transparent',
+          border: `1px solid ${active ? C.borderFocus : 'transparent'}`,
+          color: active ? C.accent : (danger ? C.t3 : C.t2),
+          cursor: 'pointer',
+          fontSize: 13,
+          padding: '5px 8px',
+          borderRadius: 6,
+          fontFamily: 'inherit',
+          transition: 'all .12s',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+        }}
+        onMouseEnter={e => { if (!active) { e.currentTarget.style.background = C.surfHigh; e.currentTarget.style.color = C.t1 } }}
+        onMouseLeave={e => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = danger ? C.t3 : C.t2 } }}>
+        {icon}
       </button>
     )
   }
 
+  // ── Waveform bars for the live-listening mic state ──
+  const WaveformBars = () => (
+    <div style={{ display:'flex', alignItems:'center', gap:2, height:14 }}>
+      {[0,1,2,3,4].map(i => (
+        <div key={i} style={{
+          width:2, background:C.red, borderRadius:1,
+          animation:`flWave 0.9s ease-in-out ${i*0.1}s infinite`,
+        }} />
+      ))}
+    </div>
+  )
+
   return (
-    <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
-      {/* ── Sidebar ── */}
-      <div style={{ width:250, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', flexShrink:0 }}>
-        <div style={{ padding:12, borderBottom:`1px solid ${C.border}`, display:'flex', flexDirection:'column', gap:8 }}>
-          <Button onClick={newConvo} full size="sm" icon="+">New Chat</Button>
+    <div style={{ display:'flex', height:'100%', overflow:'hidden', background:C.bg }}>
+      {/* ═══ Sidebar (collapsible) ═══ */}
+      <div style={{
+        width: sidebarOpen ? 260 : 0,
+        borderRight: sidebarOpen ? `1px solid ${C.border}` : 'none',
+        display:'flex', flexDirection:'column', flexShrink:0,
+        overflow:'hidden',
+        transition: 'width .22s ease',
+        background: C.surf,
+      }}>
+        <div style={{ padding:14, borderBottom:`1px solid ${C.border}`, display:'flex', flexDirection:'column', gap:8 }}>
+          <button onClick={newConvo}
+            style={{
+              display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+              padding:'10px 12px', borderRadius:10,
+              background: `linear-gradient(135deg, ${C.accent}, #8b5cf6)`,
+              border:'none', color:'#fff', cursor:'pointer',
+              fontSize:13, fontWeight:600, fontFamily:'inherit',
+              boxShadow:'0 4px 14px rgba(99,102,241,.25)',
+              transition:'transform .15s, box-shadow .15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 20px rgba(99,102,241,.35)' }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(99,102,241,.25)' }}>
+            <span style={{ fontSize:16 }}>+</span> New Chat
+          </button>
           {convos.length > 4 && (
             <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search chats…"
-              style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'6px 10px', fontFamily:'inherit', outline:'none' }} />
+              style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, color:C.t1, fontSize:12, padding:'8px 12px', fontFamily:'inherit', outline:'none', transition:'border-color .15s' }}
+              onFocus={e => e.currentTarget.style.borderColor = C.borderFocus}
+              onBlur={e => e.currentTarget.style.borderColor = C.border} />
           )}
         </div>
         <div style={{ flex:1, overflowY:'auto', padding:8 }}>
@@ -1148,15 +1242,23 @@ function ChatPage({ user }) {
             : filteredConvos.length === 0
               ? <div style={{ textAlign:'center', padding:'24px 12px', color:C.t3, fontSize:13 }}>{search?'No matches':'No chats yet'}</div>
               : filteredConvos.map(c => (
-                <div key={c.id} onClick={() => setActiveId(c.id)}
-                  style={{ padding:'8px 10px', borderRadius:8, cursor:'pointer', marginBottom:2, background:activeId===c.id?C.accentM:'transparent', border:`1px solid ${activeId===c.id?C.borderFocus:'transparent'}`, display:'flex', alignItems:'center', gap:4, transition:'all .15s' }}>
+                <div key={c.id} onClick={() => { setActiveId(c.id); setErrorMsg(null) }}
+                  style={{
+                    padding:'9px 10px', borderRadius:10, cursor:'pointer', marginBottom:3,
+                    background: activeId===c.id ? C.accentM : 'transparent',
+                    border: `1px solid ${activeId===c.id?C.borderFocus:'transparent'}`,
+                    display:'flex', alignItems:'center', gap:5,
+                    transition:'all .12s',
+                  }}
+                  onMouseEnter={e => { if (activeId !== c.id) e.currentTarget.style.background = C.surfHigh }}
+                  onMouseLeave={e => { if (activeId !== c.id) e.currentTarget.style.background = 'transparent' }}>
                   {c.pinned && <span style={{ fontSize:10, color:C.accent, flexShrink:0 }}>📌</span>}
                   {renaming === c.id
                     ? <input autoFocus value={renameVal} onChange={e => setRenameVal(e.target.value)}
                         onBlur={() => commitRename(c.id)}
                         onKeyDown={e => { if (e.key==='Enter') commitRename(c.id); if (e.key==='Escape') setRenaming(null) }}
                         onClick={e => e.stopPropagation()}
-                        style={{ flex:1, background:C.bg, border:`1px solid ${C.accent}`, borderRadius:5, padding:'2px 6px', color:C.t1, fontSize:13, outline:'none', fontFamily:'inherit' }} />
+                        style={{ flex:1, background:C.bg, border:`1px solid ${C.accent}`, borderRadius:6, padding:'3px 7px', color:C.t1, fontSize:13, outline:'none', fontFamily:'inherit' }} />
                     : <span style={{ flex:1, fontSize:13, color:activeId===c.id?C.t1:C.t2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.title||'Untitled'}</span>
                   }
                   <button onClick={e => togglePin(c.id, e)} style={{ background:'none', border:'none', color:c.pinned?C.accent:C.t3, cursor:'pointer', fontSize:11, padding:2, fontFamily:'inherit' }} title={c.pinned?'Unpin':'Pin'}>📌</button>
@@ -1168,21 +1270,80 @@ function ChatPage({ user }) {
         </div>
       </div>
 
-      {/* ── Main ── */}
-      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+      {/* ═══ Main: immersive chat surface ═══ */}
+      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden', position:'relative' }}>
+        {/* Slim top bar */}
+        <div style={{
+          display:'flex', alignItems:'center', gap:10,
+          padding:'12px 20px',
+          borderBottom:`1px solid ${C.border}`,
+          background: `${C.bg}dd`,
+          backdropFilter:'blur(12px)',
+          WebkitBackdropFilter:'blur(12px)',
+          flexShrink:0,
+          zIndex:2,
+        }}>
+          <button onClick={() => setSidebarOpen(v => !v)}
+            title={sidebarOpen ? 'Hide chats' : 'Show chats'}
+            style={{ background:'none', border:'none', color:C.t2, cursor:'pointer', fontSize:18, padding:4, fontFamily:'inherit' }}>
+            ☰
+          </button>
+          <span style={{ fontSize:14, fontWeight:600, color:C.t1, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+            {active?.title || 'FounderLab AI'}
+          </span>
+          {elAvailable === true && (
+            <span title="Premium voice available (ElevenLabs)"
+              style={{ fontSize:10, color:C.green, background:'rgba(16,185,129,.1)', border:`1px solid rgba(16,185,129,.25)`, borderRadius:99, padding:'2px 8px', fontWeight:600, display:'flex', alignItems:'center', gap:4 }}>
+              ● Premium Voice
+            </span>
+          )}
+        </div>
+
         {!activeId ? (
-          <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:32 }}>
-            <div style={{ textAlign:'center', marginBottom:32 }}>
-              <div style={{ fontSize:40, marginBottom:12, color:C.accent }}>✦</div>
-              <h2 style={{ margin:'0 0 8px', fontSize:20, fontWeight:700, color:C.t1 }}>FounderLab AI</h2>
-              <p style={{ margin:0, color:C.t2, fontSize:14 }}>Start a conversation or pick a prompt below</p>
+          /* ═══ Empty landing ═══ */
+          <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:32, overflow:'auto' }}>
+            <div style={{ textAlign:'center', marginBottom:36 }}>
+              <div style={{
+                width:56, height:56, margin:'0 auto 20px',
+                background:`linear-gradient(135deg, ${C.accent}, #a855f7)`,
+                borderRadius:'50%',
+                display:'flex', alignItems:'center', justifyContent:'center',
+                fontSize:24, color:'#fff',
+                boxShadow:'0 8px 32px rgba(99,102,241,.35)',
+                animation:'flFadeIn .5s ease',
+              }}>✦</div>
+              <h1 style={{
+                margin:'0 0 8px', fontSize:28, fontWeight:700, letterSpacing:'-.02em',
+                background: `linear-gradient(135deg, ${C.t1}, ${C.t2})`,
+                WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent', backgroundClip:'text',
+              }}>How can I help today?</h1>
+              <p style={{ margin:0, color:C.t3, fontSize:14 }}>Ask anything. I'll keep it short and useful.</p>
             </div>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:10, maxWidth:560, width:'100%' }}>
-              {STARTERS.map(s => (
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,minmax(0,1fr))', gap:10, maxWidth:600, width:'100%' }}>
+              {STARTERS.map((s, i) => (
                 <button key={s} onClick={() => { newConvo(); setTimeout(() => send(s), 80) }}
-                  style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:10, padding:'12px 14px', color:C.t2, fontSize:13, cursor:'pointer', textAlign:'left', lineHeight:1.5, fontFamily:'inherit', transition:'all .15s' }}
-                  onMouseEnter={e => { e.currentTarget.style.borderColor=C.borderHov; e.currentTarget.style.color=C.t1 }}
-                  onMouseLeave={e => { e.currentTarget.style.borderColor=C.border; e.currentTarget.style.color=C.t2 }}>
+                  style={{
+                    background: `${C.surf}b3`,
+                    backdropFilter:'blur(10px)', WebkitBackdropFilter:'blur(10px)',
+                    border:`1px solid ${C.border}`, borderRadius:14,
+                    padding:'14px 16px', color:C.t2, fontSize:13,
+                    cursor:'pointer', textAlign:'left', lineHeight:1.5,
+                    fontFamily:'inherit',
+                    transition:'all .18s',
+                    animation:`flFadeIn .4s ease ${i * 0.05}s both`,
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.borderColor = C.borderFocus
+                    e.currentTarget.style.background = C.surfHigh
+                    e.currentTarget.style.color = C.t1
+                    e.currentTarget.style.transform = 'translateY(-1px)'
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.borderColor = C.border
+                    e.currentTarget.style.background = `${C.surf}b3`
+                    e.currentTarget.style.color = C.t2
+                    e.currentTarget.style.transform = 'none'
+                  }}>
                   {s}
                 </button>
               ))}
@@ -1190,115 +1351,340 @@ function ChatPage({ user }) {
           </div>
         ) : (
           <>
-            {/* Messages */}
-            <div style={{ flex:1, overflowY:'auto', padding:'24px 28px' }}>
-              {messages.length === 0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
-              {messages.map((m, i) => (
-                <div key={m.id||i}
-                  onMouseEnter={()=>setHoverId(m.id)} onMouseLeave={()=>setHoverId(h=>h===m.id?null:h)}
-                  style={{ display:'flex', justifyContent:m.role==='user'?'flex-end':'flex-start', marginBottom:18, animation:'flSlide .2s ease' }}>
-                  {m.role === 'assistant' && <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff', flexShrink:0, marginRight:10, marginTop:2 }}>✦</div>}
-                  <div style={{ maxWidth:'78%' }}>
-                    {m.image && <img src={m.image} alt="attachment" style={{ maxWidth:220, maxHeight:160, borderRadius:10, marginBottom:6, display:'block', objectFit:'cover', border:`1px solid ${C.border}` }} />}
-                    <div style={{ background:m.role==='user'?C.accent:C.surf, color:'#fff', borderRadius:m.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px', padding:'11px 15px', border:m.role==='assistant'?`1px solid ${C.border}`:'none', fontSize:14, lineHeight:1.55 }}>
-                      {m.role === 'assistant' ? renderMsg(m.content) : <span style={{ whiteSpace:'pre-wrap', color:'#fff' }}>{m.content}</span>}
+            {/* ═══ Messages (immersive, centred 800px reading column) ═══ */}
+            <div style={{ flex:1, overflowY:'auto', padding:'32px 24px 24px' }}>
+              <div style={{ maxWidth:800, margin:'0 auto', display:'flex', flexDirection:'column', gap:20 }}>
+                {messages.length === 0 && <div style={{ textAlign:'center', color:C.t3, padding:40, fontSize:14 }}>Send a message to start</div>}
+                {messages.map((m, i) => (
+                  <div key={m.id||i}
+                    onMouseEnter={()=>setHoverId(m.id)} onMouseLeave={()=>setHoverId(h=>h===m.id?null:h)}
+                    style={{ display:'flex', gap:14, alignItems:'flex-start', animation:'flFadeIn .3s ease' }}>
+                    {/* Avatar */}
+                    <div style={{
+                      width:32, height:32, flexShrink:0,
+                      borderRadius:'50%',
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                      fontSize: m.role==='user' ? 13 : 12,
+                      fontWeight: m.role==='user' ? 600 : 400,
+                      color:'#fff',
+                      background: m.role === 'user'
+                        ? `linear-gradient(135deg, #64748b, #475569)`
+                        : `linear-gradient(135deg, ${C.accent}, #a855f7)`,
+                      boxShadow: m.role === 'assistant' ? '0 2px 10px rgba(99,102,241,.35)' : 'none',
+                    }}>
+                      {m.role === 'user' ? (user?.email?.[0]?.toUpperCase() || 'U') : '✦'}
                     </div>
 
-                    {/* Hover-only action row */}
-                    <div style={{ display:'flex', alignItems:'center', gap:2, marginTop:4, flexWrap:'wrap', minHeight:18, opacity: hoverId===m.id || activeTTS===m.id ? 1 : 0, transition:'opacity .12s' }}>
-                      {actionBtn('📋', () => { copyText(m.content); toast('Copied','success') })}
-                      {m.role === 'assistant' && actionBtn(activeTTS===m.id?'⏹':'🔊', () => handleTTS(m), activeTTS===m.id?{color:C.accent}:{})}
-                      {m.role === 'assistant' && !sending && actionBtn('↻', () => regenerate(m.id))}
-                      {m.role === 'assistant' && actionBtn('📝', () => saveToNotes(m))}
-                      {m.role === 'assistant' && actionBtn('✅', () => createTaskFromMsg(m))}
-                      {actionBtn('🗑', () => delMsg(m.id))}
-                      {m.ts && <span style={{ fontSize:10, color:C.t3, marginLeft:4 }}>{new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
-                    </div>
-
-                    {activeTTS === m.id && (
-                      <div style={{ display:'flex', alignItems:'center', gap:4, padding:'3px 8px', marginTop:4, background:C.surf, borderRadius:8, border:`1px solid ${C.border}`, width:'fit-content' }}>
-                        <span style={{ fontSize:10, color:C.t3, marginRight:2 }}>Speed</span>
-                        {[0.75, 1, 1.25, 1.5, 2].map(r => (
-                          <button key={r} onClick={() => setRate(r)}
-                            style={{ background: rate===r ? C.accent : 'none', border: `1px solid ${rate===r ? C.accent : C.border}`, borderRadius:4, color: rate===r ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 5px', fontFamily:'inherit' }}>
-                            {r}×
-                          </button>
-                        ))}
-                        <span style={{ fontSize:10, color:C.t3, marginLeft:4, marginRight:2 }}>Voice</span>
-                        {PREFS.map((p, i) => (
-                          <button key={p} onClick={() => { setVoiceIdx(i); stopTTS(); setActiveTTS(null) }}
-                            style={{ background: voiceIdx===i ? C.accent : 'none', border: `1px solid ${voiceIdx===i ? C.accent : C.border}`, borderRadius:4, color: voiceIdx===i ? '#fff' : C.t3, cursor:'pointer', fontSize:10, padding:'1px 6px', fontFamily:'inherit', textTransform:'capitalize' }}>
-                            {p}
-                          </button>
-                        ))}
+                    {/* Message column */}
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:11, fontWeight:600, color:C.t3, marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>
+                        {m.role === 'user' ? 'You' : 'FounderLab'}
                       </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {sending && (
-                <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:18 }}>
-                  <div style={{ width:28, height:28, background:C.accent, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:'#fff' }}>✦</div>
-                  <div style={{ background:C.surf, border:`1px solid ${C.border}`, borderRadius:'16px 16px 16px 4px', padding:'12px 16px', display:'flex', gap:10, alignItems:'center' }}>
-                    <div style={{ display:'flex', gap:5 }}>
-                      {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:'50%', background:C.t2, animation:`flPulse 1.4s ease-in-out ${i*.2}s infinite` }} />)}
+                      {m.image && (
+                        <img src={m.image} alt="attachment"
+                          style={{ maxWidth:280, maxHeight:200, borderRadius:12, marginBottom:8, display:'block', objectFit:'cover', border:`1px solid ${C.border}` }} />
+                      )}
+                      <div style={{ fontSize:15, lineHeight:1.65, color:C.t1 }}>
+                        {m.role === 'assistant'
+                          ? renderMsg(m.content)
+                          : <div style={{ whiteSpace:'pre-wrap' }}>{m.content}</div>}
+                      </div>
+
+                      {/* Hover-revealed action row */}
+                      <div style={{
+                        display:'flex', alignItems:'center', gap:2, marginTop:8, flexWrap:'wrap',
+                        opacity: (hoverId === m.id || activeTTS === m.id || showTTSMenu === m.id || reactions[m.id]) ? 1 : 0,
+                        transition:'opacity .15s',
+                      }}>
+                        <ActionBtn label="Copy" icon="📋" onClick={() => { copyText(m.content); toast('Copied','success') }} />
+                        {m.role === 'assistant' && (
+                          <ActionBtn
+                            label={activeTTS===m.id ? 'Stop' : 'Read aloud'}
+                            icon={activeTTS===m.id ? '⏹' : '🔊'}
+                            onClick={() => handleTTS(m)}
+                            active={activeTTS===m.id}
+                          />
+                        )}
+                        {m.role === 'assistant' && (
+                          <ActionBtn label="Voice settings" icon="⚙" onClick={() => setShowTTSMenu(v => v === m.id ? null : m.id)} active={showTTSMenu === m.id} />
+                        )}
+                        {m.role === 'assistant' && !sending && (
+                          <ActionBtn label="Regenerate" icon="↻" onClick={() => regenerate(m.id)} />
+                        )}
+                        {m.role === 'assistant' && (
+                          <ActionBtn label="Good response" icon="👍" onClick={() => reactToMsg(m.id, 'up')} active={reactions[m.id]==='up'} />
+                        )}
+                        {m.role === 'assistant' && (
+                          <ActionBtn label="Poor response" icon="👎" onClick={() => reactToMsg(m.id, 'down')} active={reactions[m.id]==='down'} />
+                        )}
+                        {m.role === 'assistant' && (
+                          <ActionBtn label="Save to Notes" icon="📝" onClick={() => saveToNotes(m)} />
+                        )}
+                        {m.role === 'assistant' && (
+                          <ActionBtn label="Create task" icon="✅" onClick={() => createTaskFromMsg(m)} />
+                        )}
+                        <ActionBtn label="Delete" icon="🗑" onClick={() => delMsg(m.id)} danger />
+                        {m.ts && <span style={{ fontSize:10, color:C.t3, marginLeft:6 }}>
+                          {new Date(m.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+                        </span>}
+                      </div>
+
+                      {/* Voice/speed picker (glass card) */}
+                      {showTTSMenu === m.id && (
+                        <div style={{
+                          marginTop:8, padding:'12px 14px',
+                          background: `${C.surf}e6`,
+                          backdropFilter:'blur(12px)', WebkitBackdropFilter:'blur(12px)',
+                          borderRadius:12, border:`1px solid ${C.border}`,
+                          display:'flex', flexDirection:'column', gap:10, maxWidth:520,
+                        }}>
+                          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                            <span style={{ fontSize:11, color:C.t3, fontWeight:600, textTransform:'uppercase', letterSpacing:'.05em' }}>Voice</span>
+                            {[
+                              { id:'elevenlabs', label:'⚡ ElevenLabs', avail: elAvailable !== false },
+                              { id:'browser',    label:'🌐 Browser',    avail: true },
+                            ].map(p => (
+                              <button key={p.id}
+                                disabled={!p.avail}
+                                onClick={() => setVoiceCfg(v => ({ ...v, provider: p.id }))}
+                                style={{
+                                  padding:'4px 10px', borderRadius:99,
+                                  border:`1px solid ${voiceCfg.provider === p.id ? C.accent : C.border}`,
+                                  background: voiceCfg.provider === p.id ? C.accentM : 'transparent',
+                                  color: voiceCfg.provider === p.id ? C.accent : (p.avail ? C.t2 : C.t3),
+                                  cursor: p.avail ? 'pointer' : 'not-allowed',
+                                  opacity: p.avail ? 1 : 0.5,
+                                  fontSize:11, fontFamily:'inherit',
+                                }}>
+                                {p.label}
+                              </button>
+                            ))}
+                            {['male','female'].map(g => (
+                              <button key={g} onClick={() => setVoiceCfg(v => ({ ...v, gender: g }))}
+                                style={{
+                                  padding:'4px 10px', borderRadius:99,
+                                  border:`1px solid ${voiceCfg.gender === g ? C.accent : C.border}`,
+                                  background: voiceCfg.gender === g ? C.accentM : 'transparent',
+                                  color: voiceCfg.gender === g ? C.accent : C.t2,
+                                  cursor:'pointer', fontSize:11, fontFamily:'inherit', textTransform:'capitalize',
+                                }}>
+                                {g === 'male' ? '♂' : '♀'} {g}
+                              </button>
+                            ))}
+                          </div>
+                          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                            <span style={{ fontSize:11, color:C.t3, fontWeight:600, textTransform:'uppercase', letterSpacing:'.05em' }}>Speed</span>
+                            <input type="range" min={-50} max={50} value={voiceCfg.speed}
+                              onChange={e => setVoiceCfg(v => ({ ...v, speed: parseInt(e.target.value, 10) }))}
+                              style={{ flex:1, minWidth:120, accentColor:C.accent, cursor:'pointer' }} />
+                            <span style={{ fontSize:11, color:C.t2, minWidth:50, textAlign:'right' }}>
+                              {voiceCfg.speed === 0 ? 'Normal' : `${voiceCfg.speed > 0 ? '+' : ''}${voiceCfg.speed}%`}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <button onClick={stopGenerating} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t2, cursor:'pointer', fontSize:11, padding:'2px 8px', fontFamily:'inherit' }}>■ Stop</button>
                   </div>
-                </div>
-              )}
-              <div ref={msgEnd} />
+                ))}
+
+                {/* Typing indicator */}
+                {sending && (
+                  <div style={{ display:'flex', gap:14, alignItems:'flex-start', animation:'flFadeIn .3s' }}>
+                    <div style={{
+                      width:32, height:32, flexShrink:0, borderRadius:'50%',
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                      fontSize:12, color:'#fff',
+                      background:`linear-gradient(135deg, ${C.accent}, #a855f7)`,
+                      boxShadow:'0 2px 10px rgba(99,102,241,.35)',
+                    }}>✦</div>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:11, fontWeight:600, color:C.t3, marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>FounderLab</div>
+                      <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                        <div style={{ display:'flex', gap:5 }}>
+                          {[0,1,2].map(i => (
+                            <div key={i} style={{
+                              width:7, height:7, borderRadius:'50%',
+                              background:C.accent,
+                              opacity:0.4,
+                              animation:`flTyping 1.3s ease-in-out ${i*0.15}s infinite`,
+                            }} />
+                          ))}
+                        </div>
+                        <button onClick={stopGenerating}
+                          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.t2, cursor:'pointer', fontSize:11, padding:'4px 10px', fontFamily:'inherit', display:'flex', alignItems:'center', gap:4 }}>
+                          ■ Stop
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Recoverable error banner */}
+                {errorMsg && (
+                  <div style={{
+                    display:'flex', gap:12, alignItems:'flex-start',
+                    padding:'12px 14px',
+                    background:'rgba(239,68,68,.08)',
+                    border:`1px solid rgba(239,68,68,.25)`,
+                    borderRadius:12,
+                    animation:'flFadeIn .25s',
+                  }}>
+                    <span style={{ fontSize:16 }}>⚠</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, color:C.t1, marginBottom:6 }}>{errorMsg}</div>
+                      <div style={{ display:'flex', gap:6 }}>
+                        {messages.filter(m => m.role === 'user').slice(-1).map(userM => (
+                          <button key={userM.id} onClick={() => { setErrorMsg(null); send(userM.content) }}
+                            style={{ background:C.accentM, border:`1px solid ${C.borderFocus}`, borderRadius:6, color:C.accent, cursor:'pointer', fontSize:12, padding:'4px 10px', fontFamily:'inherit' }}>
+                            ↻ Retry
+                          </button>
+                        ))}
+                        <button onClick={() => setErrorMsg(null)}
+                          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.t2, cursor:'pointer', fontSize:12, padding:'4px 10px', fontFamily:'inherit' }}>
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div ref={msgEnd} />
+              </div>
             </div>
 
-            {/* Input area */}
-            <div style={{ padding:'12px 28px 20px', borderTop:`1px solid ${C.border}` }}>
-              {pendingImage && (
-                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10, padding:'8px 12px', background:C.surf, borderRadius:10, border:`1px solid ${C.border}` }}>
-                  <img src={pendingImage.base64} alt="" style={{ width:40, height:40, borderRadius:6, objectFit:'cover' }} />
-                  <span style={{ fontSize:12, color:C.t2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{pendingImage.name}</span>
-                  <button onClick={() => setPendingImage(null)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:16 }}>×</button>
+            {/* ═══ Composer (glassmorphism, centred) ═══ */}
+            <div style={{ padding:'0 24px 24px', flexShrink:0 }}>
+              <div style={{ maxWidth:800, margin:'0 auto' }}>
+                {pendingImage && (
+                  <div style={{
+                    display:'flex', alignItems:'center', gap:10, marginBottom:10,
+                    padding:'8px 12px',
+                    background:C.surf, borderRadius:10,
+                    border:`1px solid ${C.border}`,
+                  }}>
+                    <img src={pendingImage.base64} alt="" style={{ width:36, height:36, borderRadius:6, objectFit:'cover' }} />
+                    <span style={{ fontSize:12, color:C.t2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{pendingImage.name}</span>
+                    <button onClick={() => setPendingImage(null)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:18 }}>×</button>
+                  </div>
+                )}
+
+                <div
+                  onDragOver={e=>e.preventDefault()}
+                  onDrop={async e=>{ e.preventDefault(); const f=e.dataTransfer.files?.[0]; if(f&&f.type.startsWith('image/')){ if(f.size>5*1024*1024){toast('Image must be under 5MB','error');return} setPendingImage({base64:await fileToBase64(f),name:f.name}) } }}
+                  style={{
+                    display:'flex', alignItems:'flex-end', gap:8,
+                    padding:'10px 12px',
+                    background: `${C.surf}cc`,
+                    backdropFilter:'blur(16px)', WebkitBackdropFilter:'blur(16px)',
+                    border:`1px solid ${listening ? C.red : C.border}`,
+                    borderRadius:20,
+                    boxShadow:'0 8px 32px rgba(0,0,0,.35)',
+                    transition:'border-color .18s',
+                  }}>
+                  <input ref={fileRef} type="file" accept={ACCEPTED_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
+
+                  {/* Attach */}
+                  <button onClick={() => fileRef.current?.click()} title="Attach image (or drag & drop, or paste)"
+                    style={{
+                      background: pendingImage ? C.accentM : 'transparent',
+                      border: `1px solid ${pendingImage ? C.borderFocus : 'transparent'}`,
+                      borderRadius:12, color: pendingImage ? C.accent : C.t2,
+                      cursor:'pointer', fontSize:18, padding:'8px 10px',
+                      flexShrink:0, transition:'all .15s',
+                    }}
+                    onMouseEnter={e => { if (!pendingImage) { e.currentTarget.style.background = C.surfHigh; e.currentTarget.style.color = C.t1 } }}
+                    onMouseLeave={e => { if (!pendingImage) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.t2 } }}>
+                    📎
+                  </button>
+
+                  {/* Textarea */}
+                  <textarea
+                    ref={textRef}
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    onPaste={async e => {
+                      const item = Array.from(e.clipboardData?.items||[]).find(i=>i.type.startsWith('image/'))
+                      if (item) { const f=item.getAsFile(); if(f){ e.preventDefault(); setPendingImage({base64:await fileToBase64(f),name:'pasted-image.png'}) } }
+                    }}
+                    placeholder={listening ? 'Listening… speak now' : 'Message FounderLab AI…'}
+                    rows={1}
+                    onKeyDown={e => {
+                      if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send() }
+                      if (e.key==='Escape' && sending) { stopGenerating() }
+                    }}
+                    style={{
+                      flex:1, background:'transparent', border:'none',
+                      color:C.t1, fontSize:15, padding:'10px 4px',
+                      fontFamily:'inherit', outline:'none', resize:'none',
+                      lineHeight:1.55, minHeight:24, maxHeight:200, overflowY:'auto',
+                    }}
+                  />
+
+                  {/* Mic — sleek, larger, highlighted when active */}
+                  <button onClick={handleMic} title={listening ? 'Stop recording' : 'Voice input'} aria-label="Voice input"
+                    style={{
+                      background: listening
+                        ? 'rgba(239,68,68,.15)'
+                        : 'transparent',
+                      border: `1px solid ${listening ? C.red : 'transparent'}`,
+                      borderRadius:14,
+                      color: listening ? C.red : C.t2,
+                      cursor:'pointer', fontSize:18,
+                      padding:'8px 12px',
+                      flexShrink:0,
+                      transition:'all .15s',
+                      display:'flex', alignItems:'center', gap:6,
+                    }}
+                    onMouseEnter={e => { if (!listening) { e.currentTarget.style.background = C.surfHigh; e.currentTarget.style.color = C.t1 } }}
+                    onMouseLeave={e => { if (!listening) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = C.t2 } }}>
+                    {listening ? <><WaveformBars /></> : '🎤'}
+                  </button>
+
+                  {/* Send / Stop */}
+                  {sending
+                    ? <button onClick={stopGenerating} title="Stop generating" aria-label="Stop"
+                        style={{
+                          background: C.red, border:'none', borderRadius:14,
+                          color:'#fff', cursor:'pointer', fontSize:14,
+                          padding:'8px 14px', flexShrink:0,
+                          boxShadow:'0 2px 10px rgba(239,68,68,.35)',
+                        }}>■</button>
+                    : <button onClick={() => send()} disabled={!input.trim() && !pendingImage} title="Send" aria-label="Send"
+                        style={{
+                          background: (!input.trim() && !pendingImage) ? C.surfHigh : `linear-gradient(135deg, ${C.accent}, #8b5cf6)`,
+                          border:'none', borderRadius:14,
+                          color:'#fff', cursor: (!input.trim() && !pendingImage) ? 'not-allowed' : 'pointer',
+                          fontSize:18, padding:'8px 14px', flexShrink:0,
+                          opacity:(!input.trim()&&!pendingImage)?0.5:1,
+                          transition:'all .15s',
+                          boxShadow: (!input.trim() && !pendingImage) ? 'none' : '0 4px 14px rgba(99,102,241,.35)',
+                        }}
+                        onMouseEnter={e => { if (input.trim() || pendingImage) e.currentTarget.style.transform = 'translateY(-1px)' }}
+                        onMouseLeave={e => { e.currentTarget.style.transform = 'none' }}>↑</button>
+                  }
                 </div>
-              )}
-              <div style={{ display:'flex', gap:8, alignItems:'flex-end' }}
-                onDragOver={e=>e.preventDefault()}
-                onDrop={async e=>{ e.preventDefault(); const f=e.dataTransfer.files?.[0]; if(f&&f.type.startsWith('image/')){ if(f.size>5*1024*1024){toast('Image must be under 5MB','error');return} setPendingImage({base64:await fileToBase64(f),name:f.name}) } }}>
-                <input ref={fileRef} type="file" accept={ACCEPTED_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
-                <button onClick={() => fileRef.current?.click()} title="Attach image (or drag & drop)"
-                  style={{ background:pendingImage?C.accentM:C.surf, border:`1px solid ${pendingImage?C.accent:C.border}`, borderRadius:10, color:pendingImage?C.accent:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s' }}>
-                  🖼
-                </button>
-                <button onClick={handleMic} title={listening ? 'Stop recording' : 'Voice input (en-GB)'}
-                  style={{ background:listening?'rgba(239,68,68,.15)':C.surf, border:`1px solid ${listening?C.red:C.border}`, borderRadius:10, color:listening?C.red:C.t3, cursor:'pointer', fontSize:16, padding:'9px 11px', flexShrink:0, transition:'all .15s', animation:listening?'flPulse 1s infinite':'' }}>
-                  {listening ? '⏹' : '🎤'}
-                </button>
-                <textarea
-                  ref={textRef}
-                  value={input}
-                  onChange={e => setInput(e.target.value)}
-                  onPaste={async e => {
-                    const item = Array.from(e.clipboardData?.items||[]).find(i=>i.type.startsWith('image/'))
-                    if (item) { const f=item.getAsFile(); if(f){ e.preventDefault(); setPendingImage({base64:await fileToBase64(f),name:'pasted-image.png'}) } }
-                  }}
-                  placeholder={listening ? '🎤 Listening…' : 'Message FounderLab AI…'}
-                  rows={1}
-                  onKeyDown={e => {
-                    if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send() }
-                    if (e.key==='Escape' && sending) { stopGenerating() }
-                  }}
-                  style={{ flex:1, background:C.surf, border:`1px solid ${C.border}`, borderRadius:10, color:C.t1, fontSize:14, padding:'10px 14px', fontFamily:'inherit', outline:'none', resize:'none', lineHeight:1.5, minHeight:42, maxHeight:160, overflowY:'auto' }}
-                />
-                {sending
-                  ? <button onClick={stopGenerating} title="Stop generating"
-                      style={{ background:C.red, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:14, padding:'9px 14px', flexShrink:0 }}>■</button>
-                  : <button onClick={() => send()} disabled={!input.trim() && !pendingImage}
-                      style={{ background:C.accent, border:'none', borderRadius:10, color:'#fff', cursor:'pointer', fontSize:18, padding:'9px 14px', flexShrink:0, opacity:(!input.trim()&&!pendingImage)?0.5:1, transition:'all .15s' }}>↑</button>
-                }
+
+                <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>
+                  Enter to send · Shift+Enter for a new line · 🎤 voice · 📎 image · Esc to stop
+                </p>
               </div>
-              <p style={{ margin:'6px 0 0', fontSize:11, color:C.t3, textAlign:'center' }}>Enter to send · Shift+Enter new line · 🎤 voice · 🖼 image · paste/drag screenshots · Esc to stop</p>
             </div>
           </>
         )}
       </div>
+
+      {/* Animations */}
+      <style>{`
+        @keyframes flFadeIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: translateY(0) } }
+        @keyframes flTyping {
+          0%, 60%, 100% { transform: scale(1); opacity: .4 }
+          30% { transform: scale(1.2); opacity: 1 }
+        }
+        @keyframes flWave {
+          0%, 100% { height: 4px }
+          50% { height: 14px }
+        }
+      `}</style>
     </div>
   )
 }
