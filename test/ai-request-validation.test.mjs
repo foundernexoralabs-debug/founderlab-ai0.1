@@ -16,11 +16,14 @@ import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
+import { getProviderConnectionState } from '../src/ai/providerConnectionState.js'
 import {
   getProviderConfigurationState,
   normalizeProviderAvailability,
   resolveConfiguredProvider,
 } from '../src/ai/providerAvailability.js'
+import { refreshProviderAvailability, requestAIResult } from '../src/services/aiProviderService.js'
+import { workspaceStore } from '../src/services/workspaceStore.js'
 import {
   getAIProviderPreference,
   getProviderModelPreference,
@@ -235,6 +238,89 @@ test('browser provider router preserves the stable API contract and sends the su
   assert.equal(requestBody.max_tokens, 200)
   assert.equal(result.ok, true)
   assert.equal(result.text, 'Consistent result')
+})
+
+test('an active workspace session is used by both Chat and provider-status requests', async () => {
+  const previousSession = workspaceStore.session
+  workspaceStore.session = {
+    access_token: 'active-workspace-access-token',
+    refresh_token: 'refresh-token',
+    user_id: 'user-id',
+  }
+
+  try {
+    const chatResult = await requestAIResult({
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      messages: [message('Hello from Chat')],
+    }, {
+      fetchImpl: async (_, options) => {
+        assert.equal(options.headers.Authorization, 'Bearer active-workspace-access-token')
+        return jsonResponse({ body: {
+          ok: true,
+          provider: 'groq',
+          model: 'openai/gpt-oss-120b',
+          text: 'Chat is authenticated.',
+        } })
+      },
+    })
+    assert.equal(chatResult.ok, true)
+
+    const status = await refreshProviderAvailability({
+      fetchImpl: async (_, options) => {
+        assert.equal(options.headers.Authorization, 'Bearer active-workspace-access-token')
+        return jsonResponse({ body: {
+          ok: true,
+          providers: {
+            anthropic: { configured: false },
+            groq: { configured: true },
+            gemini: { configured: true },
+            ollama: { configured: true, local: true },
+          },
+        } })
+      },
+    })
+    assert.equal(status.providers.groq.configured, true)
+    assert.equal(status.providers.gemini.configured, true)
+    assert.equal(status.providers.anthropic.configured, false)
+  } finally {
+    workspaceStore.session = previousSession
+  }
+})
+
+test('a genuinely signed-out browser request has no token and receives the normalized authentication error', async () => {
+  const previousSession = workspaceStore.session
+  workspaceStore.session = null
+  try {
+    const result = await requestAIResult({
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      messages: [message()],
+    }, {
+      fetchImpl: async (_, options) => {
+        assert.equal(options.headers.Authorization, undefined)
+        return jsonResponse({ status: 401, body: {
+          ok: false,
+          provider: 'groq',
+          model: 'openai/gpt-oss-120b',
+          error: { code: 'AUTHENTICATION_REQUIRED', status: 401 },
+        } })
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error.code, 'AUTHENTICATION_REQUIRED')
+  } finally {
+    workspaceStore.session = previousSession
+  }
+})
+
+test('provider connection labels distinguish configured, testing, connected, failed, and local providers', () => {
+  assert.deepEqual(getProviderConnectionState('not_configured'), { state: 'not_configured', label: 'Not configured' })
+  assert.deepEqual(getProviderConnectionState('ready'), { state: 'ready', label: 'Ready to test' })
+  assert.deepEqual(getProviderConnectionState('ready', 'testing'), { state: 'testing', label: 'Testing' })
+  assert.deepEqual(getProviderConnectionState('ready', 'connected'), { state: 'connected', label: 'Connected' })
+  assert.deepEqual(getProviderConnectionState('ready', 'failed'), { state: 'failed', label: 'Failed' })
+  assert.deepEqual(getProviderConnectionState('local'), { state: 'local', label: 'Local only — test connection' })
 })
 
 test('missing and invalid Supabase credentials are rejected before provider execution', async () => {

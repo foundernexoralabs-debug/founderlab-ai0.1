@@ -11,6 +11,11 @@ import {
   GENERATED_PREVIEW_SANDBOX,
   isRestrictivePreviewSandbox,
 } from '../src/lib/previewSecurity.js'
+import {
+  MOBILE_NAVIGATION_MAX_WIDTH,
+  getMobileNavigationMode,
+  isMobileNavigationViewport,
+} from '../src/features/navigation/navigationMode.js'
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -66,6 +71,22 @@ test('GitHub tokens remain session-memory only', () => {
 
   const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
   assert.match(appSource, /await sb\.signOut\(\)\s*\n\s*clearGithubToken\(\)/)
+})
+
+test('desktop and laptop widths use the sidebar while only phone-width screens use bottom navigation', () => {
+  assert.equal(MOBILE_NAVIGATION_MAX_WIDTH, 767)
+  assert.equal(isMobileNavigationViewport(1440), false)
+  assert.equal(isMobileNavigationViewport(1024), false)
+  assert.equal(isMobileNavigationViewport(768), false)
+  assert.equal(isMobileNavigationViewport(767), true)
+  assert.equal(isMobileNavigationViewport(390), true)
+  assert.equal(getMobileNavigationMode({ matchMedia: () => ({ matches: false }), innerWidth: 390 }), false)
+  assert.equal(getMobileNavigationMode({ matchMedia: () => ({ matches: true }), innerWidth: 1440 }), true)
+
+  const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
+  assert.match(appSource, /\{mobile \? \(/)
+  assert.equal((appSource.match(/<Sidebar /g) || []).length, 1)
+  assert.equal((appSource.match(/<MobileBottomNav /g) || []).length, 1)
 })
 
 test('generated previews use the minimal sandbox policy', () => {

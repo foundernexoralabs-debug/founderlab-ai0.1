@@ -1,8 +1,8 @@
-import { PROVIDERS, getDefaultModel, resolveModel } from '@/ai/providerRegistry'
+import { PROVIDERS, getDefaultModel, resolveModel } from '../ai/providerRegistry.js'
 import {
   normalizeProviderAvailability,
   resolveConfiguredProvider,
-} from '@/ai/providerAvailability'
+} from '../ai/providerAvailability.js'
 import {
   getAIProviderPreference,
   getOllamaModelPreference,
@@ -12,11 +12,11 @@ import {
   OLLAMA_URL_STORAGE_KEY,
   setAIProviderPreference,
   setProviderModelPreference,
-} from '@/ai/providerPreferences'
-import { toLegacyAIText } from '@/ai/normalizeResponse'
-import { routeAIRequest } from '@/ai/providerRouter'
-import { isElectronOllamaAvailable, probeOllama, requestOllama } from '@/ai/providers/ollama'
-import { workspaceStore } from '@/services/workspaceStore'
+} from '../ai/providerPreferences.js'
+import { createAIErrorResult, toLegacyAIText } from '../ai/normalizeResponse.js'
+import { routeAIRequest } from '../ai/providerRouter.js'
+import { isElectronOllamaAvailable, probeOllama, requestOllama } from '../ai/providers/ollama.js'
+import { workspaceStore } from './workspaceStore.js'
 
 export {
   PROVIDERS,
@@ -32,22 +32,36 @@ export function getProviderAvailability() {
 
 export async function refreshProviderAvailability({
   fetchImpl = globalThis.fetch,
-  accessToken = workspaceStore.session?.access_token,
+  accessToken,
 } = {}) {
   const preferredProvider = getAIProviderPreference()
-  if (!accessToken || typeof fetchImpl !== 'function') {
+  let activeAccessToken
+  try {
+    activeAccessToken = accessToken ?? await workspaceStore.getActiveAccessToken()
+  } catch {
+    return { provider: preferredProvider, providers: providerAvailability }
+  }
+  if (!activeAccessToken || typeof fetchImpl !== 'function') {
     return { provider: preferredProvider, providers: providerAvailability }
   }
 
   try {
-    const response = await fetchImpl('/api/ai', {
+    const requestStatus = (token) => fetchImpl('/api/ai', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + accessToken,
+        Authorization: 'Bearer ' + token,
       },
       body: JSON.stringify({ action: 'provider-status' }),
     })
+    let response = await requestStatus(activeAccessToken)
+    if (response.status === 401 && accessToken === undefined) {
+      const refreshedAccessToken = await workspaceStore.getActiveAccessToken({ forceRefresh: true })
+      if (refreshedAccessToken && refreshedAccessToken !== activeAccessToken) {
+        activeAccessToken = refreshedAccessToken
+        response = await requestStatus(activeAccessToken)
+      }
+    }
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.ok || !payload.providers || typeof payload.providers !== 'object') {
       return { provider: preferredProvider, providers: providerAvailability }
@@ -105,21 +119,62 @@ export async function ollamaChat(messages, system, maxTokens) {
   return result.text
 }
 
-export async function ai(messages, system = '', maxTokens = 1200) {
-  const provider = getAIProvider()
-  if (!provider) return '⚠ No AI provider is configured. Add one optional provider key in the server environment, then try again.'
-  const model = provider === 'ollama'
-    ? getOllamaModel() || resolveModel('ollama', '')
-    : getProviderModel(provider)
+export async function requestAIResult({
+  provider = getAIProvider(),
+  model,
+  messages,
+  system = '',
+  maxTokens = 1200,
+  ollamaUrl,
+} = {}, {
+  fetchImpl = globalThis.fetch,
+  electronBridge,
+  accessToken,
+} = {}) {
+  if (!provider) {
+    return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
+  }
 
-  const result = await routeAIRequest({
+  const resolvedModel = model || (provider === 'ollama'
+    ? getOllamaModel() || resolveModel('ollama', '')
+    : getProviderModel(provider))
+  let activeAccessToken = ''
+  if (provider !== 'ollama') {
+    try {
+      activeAccessToken = accessToken ?? await workspaceStore.getActiveAccessToken()
+    } catch {
+      return createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' })
+    }
+  }
+  const request = (token) => routeAIRequest({
     provider,
-    model,
+    model: resolvedModel,
     messages,
     system,
     maxTokens,
-    ollamaUrl: provider === 'ollama' ? getOllamaURL() : undefined,
-    accessToken: workspaceStore.session?.access_token,
+    ollamaUrl: provider === 'ollama' ? ollamaUrl || getOllamaURL() : undefined,
+  }, {
+    fetchImpl,
+    electronBridge,
+    accessToken: token,
   })
+  let result = await request(activeAccessToken)
+  if (provider !== 'ollama' && result.error?.code === 'AUTHENTICATION_INVALID' && accessToken === undefined) {
+    let refreshedAccessToken = ''
+    try {
+      refreshedAccessToken = await workspaceStore.getActiveAccessToken({ forceRefresh: true })
+    } catch {
+      return createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' })
+    }
+    if (refreshedAccessToken && refreshedAccessToken !== activeAccessToken) {
+      activeAccessToken = refreshedAccessToken
+      result = await request(activeAccessToken)
+    }
+  }
+  return result
+}
+
+export async function ai(messages, system = '', maxTokens = 1200) {
+  const result = await requestAIResult({ messages, system, maxTokens })
   return toLegacyAIText(result)
 }

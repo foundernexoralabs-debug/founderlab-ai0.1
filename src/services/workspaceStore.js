@@ -13,6 +13,7 @@ const PENDING_PROFILE_PREFIX = 'fl_pending_profile_'
 const PENDING_ONBOARDING_PREFIX = 'fl_pending_onboarding_'
 const ONBOARDING_DATA_KEY = 'fl_onboarding_profile'
 const DEFAULT_ONBOARDING_RETRY_DELAYS = [250, 750]
+const ACCESS_TOKEN_REFRESH_MARGIN_MS = 60 * 1000
 
 export const isWorkspaceConfigured = supabaseConfig.valid
 
@@ -100,6 +101,38 @@ function defaultSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+function decodeAccessTokenExpiry(accessToken) {
+  if (typeof accessToken !== 'string') return 0
+  try {
+    const payload = accessToken.split('.')[1]
+    if (!payload) return 0
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+    if (typeof globalThis.atob !== 'function') return 0
+    const parsed = JSON.parse(globalThis.atob(base64))
+    const expiry = Number(parsed?.exp)
+    return Number.isFinite(expiry) && expiry > 0 ? expiry * 1000 : 0
+  } catch {
+    return 0
+  }
+}
+
+function normalizeExpiryMilliseconds(value) {
+  const expiry = Number(value)
+  if (!Number.isFinite(expiry) || expiry <= 0) return 0
+  return expiry < 100000000000 ? expiry * 1000 : expiry
+}
+
+function getSessionExpiry(data) {
+  return normalizeExpiryMilliseconds(data?.expires_at)
+    || (Number.isFinite(Number(data?.expires_in)) ? Date.now() + Number(data.expires_in) * 1000 : 0)
+    || decodeAccessTokenExpiry(data?.access_token)
+}
+
+function isAccessTokenExpiring(session, now = Date.now()) {
+  const expiry = normalizeExpiryMilliseconds(session?.expires_at) || decodeAccessTokenExpiry(session?.access_token)
+  return expiry > 0 && expiry - now <= ACCESS_TOKEN_REFRESH_MARGIN_MS
+}
+
 async function retryWorkspaceOperation(operation, retryDelays, sleep) {
   let attempts = 0
   for (let index = 0; index <= retryDelays.length; index += 1) {
@@ -135,6 +168,8 @@ export function createWorkspaceStore({
   sleep = defaultSleep,
   onboardingRetryDelays = DEFAULT_ONBOARDING_RETRY_DELAYS,
 } = {}) {
+  let sessionRefreshPromise = null
+  let authEpoch = 0
   const requestUrl = (path) => getSupabaseRequestUrl(config, path)
   const headers = (token) => {
     const activeConfig = requireSupabaseConfig(config)
@@ -153,8 +188,7 @@ export function createWorkspaceStore({
       try {
         const saved = readPersistedSession(storage, SESSION_STORAGE_KEY)
         if (!saved) return false
-        const data = await store.requestAuth('/auth/v1/token?grant_type=refresh_token', { refresh_token: saved.refresh_token })
-        store.saveSession(data, true)
+        await store.refreshSession(saved.refresh_token, true)
         return true
       } catch {
         try {
@@ -167,13 +201,37 @@ export function createWorkspaceStore({
     },
 
     saveSession(data, remember = store.rememberSession) {
+      authEpoch += 1
       store.session = {
         access_token: data.access_token,
         refresh_token: data.refresh_token,
         user_id: data.user?.id,
         email: data.user?.email,
+        expires_at: getSessionExpiry(data) || undefined,
       }
       persistSession(storage, SESSION_STORAGE_KEY, store.session, remember)
+    },
+
+    async refreshSession(refreshToken = store.session?.refresh_token, remember = store.rememberSession) {
+      if (!refreshToken) throw new Error('Authentication session is unavailable.')
+      const epoch = authEpoch
+      const data = await store.requestAuth('/auth/v1/token?grant_type=refresh_token', { refresh_token: refreshToken })
+      if (authEpoch !== epoch) return ''
+      store.saveSession(data, remember)
+      return store.session?.access_token || ''
+    },
+
+    async getActiveAccessToken({ forceRefresh = false } = {}) {
+      const session = store.session
+      if (!session) return ''
+      if (!forceRefresh && session.access_token && !isAccessTokenExpiring(session)) return session.access_token
+      if (!session.refresh_token) return ''
+
+      if (!sessionRefreshPromise) {
+        sessionRefreshPromise = store.refreshSession(session.refresh_token, store.rememberSession)
+          .finally(() => { sessionRefreshPromise = null })
+      }
+      return sessionRefreshPromise
     },
 
     async requestAuth(path, body, token) {
@@ -207,6 +265,7 @@ export function createWorkspaceStore({
     },
 
     async signOut() {
+      authEpoch += 1
       try {
         await store.requestAuth('/auth/v1/logout', {}, store.session?.access_token)
       } catch {

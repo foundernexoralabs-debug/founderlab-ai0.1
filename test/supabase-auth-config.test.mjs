@@ -30,6 +30,11 @@ function successfulResponse(body = {}) {
   return { ok: true, json: async () => body }
 }
 
+function accessTokenWithExpiry(expiry) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return encode({ alg: 'none' }) + '.' + encode({ exp: expiry }) + '.signature'
+}
+
 test('Supabase configuration rejects missing, malformed, endpoint, and whitespace values', () => {
   assert.equal(getSupabaseConfig({ VITE_SUPABASE_ANON_KEY: 'public-anon-key' }).valid, false)
   assert.equal(getSupabaseConfig({ VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co', VITE_SUPABASE_ANON_KEY: '' }).valid, false)
@@ -228,4 +233,57 @@ test('session restoration refreshes and persists a valid remembered session', as
     body: { refresh_token: 'stored-refresh-token' },
   })
   assert.equal(JSON.parse(storage.value).refresh_token, 'new-refresh-token')
+})
+
+test('an expired access token is refreshed before protected browser API calls use it', async () => {
+  const storage = createStorage()
+  const requests = []
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    storage,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) })
+      return successfulResponse({
+        access_token: 'fresh-access-token',
+        refresh_token: 'fresh-refresh-token',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+  })
+  store.saveSession({
+    access_token: accessTokenWithExpiry(1),
+    refresh_token: 'expired-session-refresh-token',
+    user: { id: 'user-id', email: 'founder@example.test' },
+  })
+
+  assert.equal(await store.getActiveAccessToken(), 'fresh-access-token')
+  assert.deepEqual(requests, [{
+    url: 'https://founderlab-test.supabase.co/auth/v1/token?grant_type=refresh_token',
+    body: { refresh_token: 'expired-session-refresh-token' },
+  }])
+  assert.equal(JSON.parse(storage.value).access_token, 'fresh-access-token')
+})
+
+test('a refresh failure preserves the visible workspace session instead of logging the user out', async () => {
+  const storage = createStorage()
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    storage,
+    fetchImpl: async () => ({ ok: false, json: async () => ({ message: 'temporary auth outage' }) }),
+  })
+  store.saveSession({
+    access_token: accessTokenWithExpiry(1),
+    refresh_token: 'still-valid-refresh-token',
+    user: { id: 'user-id', email: 'founder@example.test' },
+  })
+
+  await assert.rejects(() => store.getActiveAccessToken())
+  assert.equal(store.session.user_id, 'user-id')
+  assert.equal(JSON.parse(storage.value).refresh_token, 'still-valid-refresh-token')
+})
+
+test('a genuinely signed-out workspace has no active access token', async () => {
+  const store = createWorkspaceStore({ config: getSupabaseConfig(validEnvironment), storage: createStorage() })
+  assert.equal(await store.getActiveAccessToken(), '')
 })

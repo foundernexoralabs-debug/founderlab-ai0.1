@@ -1,13 +1,13 @@
 import { workspaceStore } from '@/services/workspaceStore'
 
-export function getAuthenticatedHeaders(headers = {}) {
-  const token = workspaceStore.session?.access_token
+export async function getAuthenticatedHeaders(headers = {}) {
+  const token = await workspaceStore.getActiveAccessToken()
   return token ? { ...headers, Authorization: 'Bearer ' + token } : headers
 }
 
-export function authenticatedFetch(url, options = {}) {
+export async function authenticatedFetch(url, options = {}) {
   return fetch(url, {
     ...options,
-    headers: getAuthenticatedHeaders(options.headers),
+    headers: await getAuthenticatedHeaders(options.headers),
   })
 }

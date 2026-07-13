@@ -18,6 +18,7 @@ import { ToastContainer, toast } from '@/app/toast'
 import { renderMsg } from '@/components/content/MessageContent'
 import { Badge, Button, Card, EmptyState, Input, Spinner } from '@/components/ui/Primitives'
 import { MobileBottomNav, MobileTopBar, Sidebar } from '@/features/navigation/Navigation'
+import { getMobileNavigationMode } from '@/features/navigation/navigationMode'
 import { AuthScreen, OnboardingModal, SetupScreen } from '@/features/auth/AuthScreens'
 import { Dashboard } from '@/features/dashboard/Dashboard'
 import { FeedbackModal } from '@/features/feedback/FeedbackModal'
@@ -30,6 +31,7 @@ import { clearGithubToken, getGithubToken, setGithubToken } from '@/services/git
 import { authenticatedFetch } from '@/services/authenticatedFetch'
 import { getProvider } from '@/ai/providerRegistry'
 import { getProviderConfigurationState } from '@/ai/providerAvailability'
+import { getProviderConnectionState } from '@/ai/providerConnectionState'
 import {
   ai,
   getAIProvider,
@@ -43,6 +45,7 @@ import {
   OLLAMA_MODEL_STORAGE_KEY,
   OLLAMA_URL_STORAGE_KEY,
   PROVIDERS,
+  requestAIResult,
   refreshProviderAvailability,
   setAIProvider as setAIProviderLS,
   setProviderModel,
@@ -2824,7 +2827,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [ollamaDetecting, setOllamaDetecting] = useState(false)
   const [ollamaDetectErr, setOllamaDetectErr] = useState('')
   // Shared test state
-  const [testStatus, setTestStatus]   = useState(null) // { state, message } | null
+  const [testStatus, setTestStatus]   = useState(null) // { provider, state, message } | null
 
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
@@ -2955,25 +2958,42 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   async function testConnection() {
     if (!aiProv) {
-      setTestStatus({ state:'not_configured', message:'No AI provider is configured. Add one optional provider key or use Local Ollama.' })
+      setTestStatus({ provider:null, state:'not_configured', message:'No AI provider is configured. Add one optional provider key or use Local Ollama.' })
       return
     }
-    setTestStatus({ state:'testing', message:'' })
+    const refreshed = await refreshProviderAvailability()
+    setProviderAvailability(refreshed.providers)
+    if (aiProv !== 'ollama' && getProviderConfigurationState(aiProv, refreshed.providers) === 'not_configured') {
+      setTestStatus({ provider:aiProv, state:'not_configured', message:`${PROVIDERS[aiProv]?.name || 'This provider'} is not configured on the server.` })
+      return
+    }
+
+    setTestStatus({ provider:aiProv, state:'testing', message:'' })
     try {
       if (aiProv === 'ollama') {
         const { corsOk, running } = await ollamaProbe(ollamaUrl)
-        if (!running) { setTestStatus({ state:'unavailable', message:'Ollama is unavailable. Start Ollama on this machine, then try again.' }); return }
-        if (!corsOk)  { setTestStatus({ state:'unavailable', message:'Ollama is unavailable because browser CORS is blocked. Start it with OLLAMA_ORIGINS=* ollama serve.' }); return }
+        if (!running) { setTestStatus({ provider:aiProv, state:'failed', message:'Ollama is unavailable. Start Ollama on this machine, then try again.' }); return }
+        if (!corsOk)  { setTestStatus({ provider:aiProv, state:'failed', message:'Ollama is unavailable because browser CORS is blocked. Start it with OLLAMA_ORIGINS=* ollama serve.' }); return }
         const reply = await ollamaChat([{role:'user',content:'Say only: CONNECTED'}], '', 10)
-        setTestStatus({ state:'connected', message:`Connected — ${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"` })
+        setTestStatus({ provider:aiProv, state:'connected', message:`${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"` })
       } else {
-        const reply = await ai([{role:'user',content:'Say only: CONNECTED'}], '', 20)
-        if (reply.startsWith('⚠')) {
-          const message = reply.replace(/^⚠\s*/, '')
-          setTestStatus({ state:message.includes('is not configured.') ? 'not_configured' : 'unavailable', message })
-        } else setTestStatus({ state:'connected', message:`Connected — ${PROVIDERS[aiProv]?.name} replied: "${reply.trim().slice(0,60)}"` })
+        const result = await requestAIResult({
+          provider: aiProv,
+          model: modelMap[aiProv] || PROVIDERS[aiProv]?.default,
+          messages: [{ role:'user', content:'Say only: CONNECTED' }],
+          maxTokens: 20,
+        })
+        if (!result.ok) {
+          setTestStatus({
+            provider: aiProv,
+            state: result.error.code === 'MISSING_CONFIGURATION' ? 'not_configured' : 'failed',
+            message: result.error.message,
+          })
+          return
+        }
+        setTestStatus({ provider:aiProv, state:'connected', message:`${PROVIDERS[aiProv]?.name} replied: "${result.text.trim().slice(0,60)}"` })
       }
-    } catch { setTestStatus({ state:'unavailable', message:'The provider is unavailable. Check its configuration and try again.' }) }
+    } catch { setTestStatus({ provider:aiProv, state:'failed', message:'The provider could not be tested. Check its configuration and try again.' }) }
   }
 
   return (
@@ -3016,8 +3036,12 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             {Object.values(PROVIDERS).map(p => {
               const active = aiProv === p.id
               const configuration = getProviderConfigurationState(p.id, providerAvailability)
-              const configurationLabel = configuration === 'not_configured' ? 'Not configured' : configuration === 'local' ? 'Local — test connection' : 'Ready to test'
-              const configurationColor = configuration === 'not_configured' ? C.red : configuration === 'local' ? C.yellow : C.green
+              const connection = getProviderConnectionState(configuration, testStatus?.provider === p.id ? testStatus.state : '')
+              const configurationLabel = connection.label
+              const configurationColor = connection.state === 'connected' ? C.green
+                : connection.state === 'testing' ? C.accent
+                  : connection.state === 'failed' || connection.state === 'not_configured' ? C.red
+                    : connection.state === 'local' ? C.yellow : C.green
               return (
                 <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus(null) }}
                   style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
@@ -3128,7 +3152,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
               </Button>
               {testStatus && testStatus.state !== 'testing' && (
                 <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.state==='connected'?C.green:testStatus.state==='not_configured'?C.yellow:C.red }}>
-                  {testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Unavailable'} — {testStatus.message}
+                  {testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Failed'} — {testStatus.message}
                 </span>
               )}
             </div>
@@ -3285,7 +3309,7 @@ function AppInner() {
   const [profile, setProfile] = useState(null)
   const [collapsed, setCollapsed] = useState(false)
   const [showFb, setShowFb]   = useState(false)
-  const [mobile, setMobile]   = useState(typeof window!=='undefined'&&window.innerWidth<768)
+  const [mobile, setMobile]   = useState(() => getMobileNavigationMode())
 
   useEffect(() => {
     async function boot() {
@@ -3300,7 +3324,7 @@ function AppInner() {
       } else { setState('auth') }
     }
     boot()
-    const onResize=()=>setMobile(window.innerWidth<768)
+    const onResize=()=>setMobile(getMobileNavigationMode())
     window.addEventListener('resize',onResize)
     // Cross-module handoff bus: any page can call flNavigate(page, payload) to
     // switch tabs and hand data to the destination page (e.g. Code AI → Builder).
