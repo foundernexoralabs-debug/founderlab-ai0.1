@@ -1,14 +1,16 @@
 // Voice configuration types and constants
+import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
 
 export const BROWSER_VOICES = {
   male:   ['Microsoft Ryan Online (Natural) - English (United Kingdom)', 'Microsoft Ryan - English (United Kingdom)', 'Google UK English Male', 'Daniel', 'Arthur'],
   female: ['Microsoft Sonia Online (Natural) - English (United Kingdom)', 'Microsoft Sonia - English (United Kingdom)', 'Google UK English Female', 'Karen', 'Moira'],
 } as const
 
-// ElevenLabs voice IDs — proxied server-side via /api/tts (key never exposed)
+// Voice identifiers are registry-owned; requests remain proxied server-side.
+const ELEVENLABS_PROVIDER = getVoiceProvider('elevenlabs')!
 export const ELEVENLABS_VOICES = {
-  male:   { name: 'Brian',          id: 'nPczCjzI2devNBz1zQrb' },
-  female: { name: 'Custom Female',  id: 'EST9Ui6982FZPSi7gCHi' },
+  male:   { name: ELEVENLABS_PROVIDER.voiceLabels.male,   id: ELEVENLABS_PROVIDER.voices.male },
+  female: { name: ELEVENLABS_PROVIDER.voiceLabels.female, id: ELEVENLABS_PROVIDER.voices.female },
 } as const
 
 export type VoiceProvider = 'browser' | 'elevenlabs'

@@ -1,195 +1,98 @@
-/**
- * FounderLab AI — Unified AI Provider Handler
- * Serverless function (Vercel). Reads all API keys from process.env.
- * Normalises every provider response to { content: [{ type:'text', text:string }] }
- * so the frontend never needs to know which provider is active.
- *
- * Supported providers:
- *   anthropic | groq | gemini | ollama
- *
- * Request body:
- *   { provider, model, messages, system?, max_tokens? }
- *   For Ollama: add { ollamaUrl }
- */
+const { runProvider } = require('./ai/providerRunner')
+const {
+  handleCors,
+  requireAuthenticatedUser,
+  requireRateLimit,
+  sendNormalizedError,
+} = require('./_lib/apiSecurity')
 
-// ── CORS ─────────────────────────────────────────────────────
-function setCORS(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-}
+let enginePromise = null
 
-// ── Response normaliser — every provider returns this shape ──
-function ok(res, text) {
-  return res.status(200).json({ content: [{ type: 'text', text: text || '' }] })
-}
-function err(res, status, message) {
-  return res.status(status).json({ error: message })
-}
-
-// ── ANTHROPIC ─────────────────────────────────────────────────
-async function handleAnthropic(req, res, { model, messages, system, max_tokens }) {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) return err(res, 500, 'ANTHROPIC_API_KEY is not configured on the server.')
-
-  // Normalise messages: convert { role, content, image? } to Anthropic content blocks
-  const normMessages = messages.map(m => {
-    if (m.image && m.image.startsWith('data:')) {
-      const [meta, data] = m.image.split(',')
-      const mediaType = meta.match(/data:([^;]+)/)?.[1] || 'image/jpeg'
-      return {
-        role: m.role,
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mediaType, data } },
-          { type: 'text', text: m.content || 'What do you see in this image?' },
-        ],
-      }
-    }
-    return { role: m.role, content: m.content }
-  })
-
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: model || 'claude-sonnet-4-6',
-      max_tokens: max_tokens || 1200,
-      ...(system && { system }),
-      messages: normMessages,
-    }),
-  })
-  const d = await r.json()
-  if (!r.ok) return err(res, r.status, d?.error?.message || `Anthropic error ${r.status}`)
-  const text = d.content?.map(c => c.text || '').join('') || ''
-  return ok(res, text)
-}
-
-// ── GROQ (OpenAI-compatible) ───────────────────────────────────
-async function handleGroq(req, res, { model, messages, system, max_tokens }) {
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) return err(res, 500, 'GROQ_API_KEY is not configured on the server.')
-
-  // Groq uses OpenAI message format — prepend system as a system role message
-  const fullMessages = system
-    ? [{ role: 'system', content: system }, ...messages]
-    : messages
-
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || 'openai/gpt-oss-120b',
-      messages: fullMessages,
-      max_tokens: max_tokens || 1200,
-    }),
-  })
-  const d = await r.json()
-  if (!r.ok) return err(res, r.status, d?.error?.message || `Groq error ${r.status}`)
-  const text = d.choices?.[0]?.message?.content || ''
-  return ok(res, text)
-}
-
-// ── GEMINI ────────────────────────────────────────────────────
-async function handleGemini(req, res, { model, messages, system, max_tokens }) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) return err(res, 500, 'GEMINI_API_KEY is not configured on the server.')
-
-  const geminiModel = model || 'gemini-3.5-flash'
-
-  // Convert OpenAI-style messages to Gemini contents format
-  // Gemini uses "user"/"model" (not "assistant"), and each message is { role, parts:[{text}] }
-  const contents = messages.map(m => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
-  }))
-
-  const body = {
-    contents,
-    generationConfig: { maxOutputTokens: max_tokens || 1200 },
-    ...(system && { system_instruction: { parts: [{ text: system }] } }),
+function getEngine() {
+  if (!enginePromise) {
+    enginePromise = Promise.all([
+      import('../src/ai/normalizeRequest.js'),
+      import('../src/ai/normalizeResponse.js'),
+    ]).then(([request, response]) => ({
+      normalizeServerAIRequest: request.normalizeServerAIRequest,
+      createAIErrorResult: response.createAIErrorResult,
+      createAIResult: response.createAIResult,
+    }))
   }
-
-  async function callGemini(apiVersion) {
-    return fetch(
-      `https://generativelanguage.googleapis.com/${apiVersion}/models/${geminiModel}:generateContent?key=${apiKey}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    )
-  }
-
-  let r = await callGemini('v1')
-  let d = await r.json()
-
-  // If the model isn't found on the stable v1 endpoint, some models (new
-  // previews, or ones mid-migration) are only reachable on v1beta — retry
-  // there automatically instead of failing outright.
-  if (!r.ok && r.status === 404) {
-    const retry = await callGemini('v1beta')
-    const retryData = await retry.json()
-    if (retry.ok) { r = retry; d = retryData }
-  }
-
-  if (!r.ok) return err(res, r.status, d?.error?.message || `Gemini error ${r.status}`)
-  const text = d.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  return ok(res, text)
+  return enginePromise
 }
 
-// ── OLLAMA (server-side path — used when not browser-direct) ──
-async function handleOllama(req, res, { model, messages, system, max_tokens, ollamaUrl }) {
-  const base = (ollamaUrl || 'http://localhost:11434').replace(/\/$/, '')
-  const fullMessages = system
-    ? [{ role: 'system', content: system }, ...messages]
-    : messages
+async function handler(req, res, dependencies = {}) {
+  const env = dependencies.env || process.env
+  const fetchImpl = dependencies.fetchImpl || globalThis.fetch
+  const provider = req.body?.provider
+  const model = req.body?.model
+  const cors = await handleCors(req, res, { env, provider, model })
+  if (cors.handled) return
 
+  let engine
   try {
-    const r = await fetch(`${base}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: model || 'llama3.2',
-        messages: fullMessages,
-        stream: false,
-        options: { num_predict: max_tokens || 1200 },
-      }),
+    engine = await getEngine()
+  } catch {
+    return sendNormalizedError(res, { provider, model, status: 503, code: 'PROVIDER_UNAVAILABLE' })
+  }
+
+  if (req.method !== 'POST') {
+    const result = engine.createAIErrorResult({ code: 'REQUEST_INVALID', message: 'Method not allowed', status: 405 })
+    return res.status(result.error.status).json(result)
+  }
+
+  const user = await requireAuthenticatedUser(req, res, { provider, model, env, fetchImpl })
+  if (!user) return
+
+  const normalized = engine.normalizeServerAIRequest(req.body || {})
+  if (!normalized.ok) {
+    const result = engine.createAIErrorResult({
+      provider: req.body?.provider,
+      model: req.body?.model,
+      status: normalized.error.status,
+      code: normalized.error.code,
+      message: normalized.error.message,
     })
-    const d = await r.json()
-    if (!r.ok) return err(res, r.status, d?.error || `Ollama error ${r.status}`)
-    return ok(res, d.message?.content || '')
-  } catch (e) {
-    return err(res, 500, `Cannot reach Ollama at ${base}: ${e.message}`)
-  }
-}
-
-// ── MAIN HANDLER ─────────────────────────────────────────────
-async function handler(req, res) {
-  setCORS(res)
-  if (req.method === 'OPTIONS') return res.status(200).end()
-  if (req.method !== 'POST')   return err(res, 405, 'Method not allowed')
-
-  const { provider = 'anthropic', model, messages, system, max_tokens, ollamaUrl } = req.body || {}
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return err(res, 400, 'messages array is required')
+    return res.status(result.error.status).json(result)
   }
 
-  const params = { model, messages, system, max_tokens, ollamaUrl }
+  const request = normalized.value
+  const allowed = await requireRateLimit(req, res, {
+    user,
+    scope: 'ai',
+    provider: request.provider,
+    model: request.model,
+    env,
+    fetchImpl,
+    limiter: dependencies.rateLimiter,
+  })
+  if (!allowed) return
 
   try {
-    switch (provider) {
-      case 'anthropic': return await handleAnthropic(req, res, params)
-      case 'groq':      return await handleGroq(req, res, params)
-      case 'gemini':    return await handleGemini(req, res, params)
-      case 'ollama':    return await handleOllama(req, res, params)
-      default:          return err(res, 400, `Unknown provider: "${provider}". Supported: anthropic, groq, gemini, ollama`)
-    }
-  } catch (e) {
-    console.error('[ai handler]', e)
-    return err(res, 500, `Internal error: ${e.message}`)
+    const output = await runProvider(request, { env, fetchImpl })
+    const result = engine.createAIResult({
+      provider: request.provider,
+      model: request.model,
+      text: output.text,
+      usage: output.usage,
+      finishReason: output.finishReason,
+    })
+    return res.status(result.ok ? 200 : result.error.status).json(result)
+  } catch (error) {
+    const result = engine.createAIErrorResult({
+      provider: request.provider,
+      model: request.model,
+      status: error?.status,
+      code: error?.code,
+      message: error?.message,
+    })
+    console.error('[ai handler]', {
+      provider: request.provider,
+      code: result.error.code,
+      status: result.error.status,
+    })
+    return res.status(result.error.status).json(result)
   }
 }
 
