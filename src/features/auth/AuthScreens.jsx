@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { C } from '@/app/theme'
 import { Button, Card, Input, Spinner, Tip } from '@/components/ui/Primitives'
+import { getSafeAuthErrorMessage, SUPABASE_CONFIGURATION_ERROR } from '@/lib/supabaseConfig'
 import { workspaceStore as sb } from '@/services/workspaceStore'
 
 // ── SETUP SCREEN ─────────────────────────────────────────────
@@ -10,6 +11,7 @@ export function SetupScreen() {
       <Card style={{ maxWidth:520, width:'100%', padding:40, borderRadius:16 }}>
         <div style={{ width:48, height:48, background:C.accent, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:'#fff', marginBottom:20 }}>✦</div>
         <h2 style={{ margin:'0 0 8px', fontSize:22, fontWeight:700, color:C.t1 }}>Setup Required</h2>
+        <p style={{ margin:'0 0 12px', color:C.red, fontSize:14, lineHeight:1.6 }}>{SUPABASE_CONFIGURATION_ERROR}</p>
         <p style={{ margin:'0 0 24px', color:C.t2, fontSize:14, lineHeight:1.6 }}>Create a <code style={{ background:C.surfHigh, padding:'1px 6px', borderRadius:4, color:C.accent }}>.env.local</code> file in your project root:</p>
         <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:2, marginBottom:24 }}>
           <div style={{ color:C.green }}>VITE_SUPABASE_URL=https://xxxx.supabase.co</div>
@@ -40,13 +42,13 @@ export function AuthScreen({ onAuth }) {
     if (tab === 'reset') {
       setLoading(true)
       try { await sb.resetPassword(email.trim()); setMsg({ t:'Reset email sent! Check your inbox.' }) }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
+      catch (e) { setMsg({ e:true, t:getSafeAuthErrorMessage(e) }) } finally { setLoading(false) }
       return
     }
     if (tab === 'verify') {
       setLoading(true)
       try { await sb.resendVerification(email.trim()); setMsg({ t:'Verification email resent!' }) }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
+      catch (e) { setMsg({ e:true, t:getSafeAuthErrorMessage(e) }) } finally { setLoading(false) }
       return
     }
     if (!pass) return setMsg({ e:true, t:'Password required.' })
@@ -55,12 +57,12 @@ export function AuthScreen({ onAuth }) {
       if (pass !== pass2) return setMsg({ e:true, t:'Passwords do not match.' })
       setLoading(true)
       try { await sb.signUp(email.trim(), pass); sw('signin'); setMsg({ t:'Account created! Check your email to verify, then sign in.' }) }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
+      catch (e) { setMsg({ e:true, t:getSafeAuthErrorMessage(e) }) } finally { setLoading(false) }
       return
     }
     setLoading(true)
     try { await sb.signIn(email.trim(), pass, rem); onAuth() }
-    catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
+    catch (e) { setMsg({ e:true, t:getSafeAuthErrorMessage(e) }) } finally { setLoading(false) }
   }
 
   const TABS = [{ id:'signin',l:'Sign In' },{ id:'signup',l:'Sign Up' },{ id:'reset',l:'Reset' },{ id:'verify',l:'Verify' }]
