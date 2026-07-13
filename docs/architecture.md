@@ -38,9 +38,11 @@ only from that verified response. Request bodies never supply an identity.
 
 The shared helper also applies CORS and per-user request protection. Production
 origins are configured with `FOUNDERLAB_ALLOWED_ORIGINS` (comma-separated exact
-origins) or `FOUNDERLAB_PRODUCTION_ORIGIN`. Vercel preview support is opt-in:
-configure either `FOUNDERLAB_VERCEL_PREVIEW_HOST_SUFFIXES` or
-`FOUNDERLAB_VERCEL_PREVIEW_HOST_PREFIXES` for domains controlled by the team.
+origins) or `FOUNDERLAB_PRODUCTION_ORIGIN`. Vercel Preview support is opt-in:
+configure `FOUNDERLAB_VERCEL_PREVIEW_HOST_SUFFIXES` for the owning Vercel team
+and `FOUNDERLAB_VERCEL_PREVIEW_HOST_PREFIXES` for the FounderLab project. When
+both are present, a request must match both values; this is the recommended
+configuration for branch Previews. Never allow all `*.vercel.app` origins.
 Localhost is accepted only when `NODE_ENV=development`.
 
 Production and Vercel preview traffic requires a durable rate limiter through

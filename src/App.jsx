@@ -3275,6 +3275,10 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
 // ── FEEDBACK MODAL ────────────────────────────────────────────
 // ── APP ROOT ──────────────────────────────────────────────────
+function hasCompletedOnboarding(profile) {
+  return profile?.onboarded === true
+}
+
 function AppInner() {
   const [state, setState]     = useState('booting') // booting|setup|auth|onboarding|app
   const [page, setPage]       = useState('dashboard')
@@ -3292,7 +3296,7 @@ function AppInner() {
         const p=await sb.getProfile().catch(()=>null)
         setProfile(p)
         await migrateLocalToCloud()
-        setState(p?.onboarded?'app':'onboarding')
+        setState(hasCompletedOnboarding(p)?'app':'onboarding')
       } else { setState('auth') }
     }
     boot()
@@ -3310,13 +3314,17 @@ function AppInner() {
     const p=await sb.getProfile().catch(()=>null)
     setProfile(p)
     await migrateLocalToCloud()
-    setState(p?.onboarded?'app':'onboarding')
+    setState(hasCompletedOnboarding(p)?'app':'onboarding')
   }
 
-  function afterOnboarding(completedProfile, saved) {
+  function afterOnboarding(completedProfile, completion = {}) {
     setProfile(completedProfile)
     setState('app')
-    if (!saved) toast('Your workspace is ready. We will retry saving your onboarding choices when the connection returns.', 'error')
+    if (!completion.saved) {
+      toast('Onboarding is stored only on this device until a later sync succeeds.', 'error')
+    } else if (!completion.metadataSaved) {
+      toast('Workspace setup is saved. Your role and goal will sync when the connection returns.', 'error')
+    }
   }
 
   async function signOut() {

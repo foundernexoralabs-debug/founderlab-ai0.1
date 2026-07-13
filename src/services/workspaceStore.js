@@ -10,6 +10,9 @@ import { normalizeWorkspaceValue } from './workspaceData.js'
 const supabaseConfig = getSupabaseConfig(import.meta.env || {})
 const SESSION_STORAGE_KEY = 'fl_session'
 const PENDING_PROFILE_PREFIX = 'fl_pending_profile_'
+const PENDING_ONBOARDING_PREFIX = 'fl_pending_onboarding_'
+const ONBOARDING_DATA_KEY = 'fl_onboarding_profile'
+const DEFAULT_ONBOARDING_RETRY_DELAYS = [250, 750]
 
 export const isWorkspaceConfigured = supabaseConfig.valid
 
@@ -24,6 +27,10 @@ function getFetch(fetchImpl) {
 
 function getPendingProfileKey(userId) {
   return PENDING_PROFILE_PREFIX + userId
+}
+
+function getPendingOnboardingKey(userId) {
+  return PENDING_ONBOARDING_PREFIX + userId
 }
 
 function normalizeProfile(profile, userId) {
@@ -54,6 +61,59 @@ function clearPendingProfile(storage, userId) {
   try { storage?.removeItem(getPendingProfileKey(userId)) } catch {}
 }
 
+function normalizeOnboardingDetails(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const role = typeof value.role === 'string' ? value.role.trim() : ''
+  const goal = typeof value.goal === 'string' ? value.goal.trim() : ''
+  if (!role || !goal) return null
+  return {
+    role,
+    goal,
+    onboarding_completed: true,
+    onboarding_completed_at: typeof value.onboarding_completed_at === 'string'
+      ? value.onboarding_completed_at
+      : new Date().toISOString(),
+  }
+}
+
+function readPendingOnboarding(storage, userId) {
+  if (!userId) return null
+  try {
+    return normalizeOnboardingDetails(JSON.parse(storage?.getItem(getPendingOnboardingKey(userId)) || ''))
+  } catch {
+    try { storage?.removeItem(getPendingOnboardingKey(userId)) } catch {}
+    return null
+  }
+}
+
+function writePendingOnboarding(storage, userId, details) {
+  const normalized = normalizeOnboardingDetails(details)
+  if (!userId || !normalized) return
+  try { storage?.setItem(getPendingOnboardingKey(userId), JSON.stringify(normalized)) } catch {}
+}
+
+function clearPendingOnboarding(storage, userId) {
+  try { storage?.removeItem(getPendingOnboardingKey(userId)) } catch {}
+}
+
+function defaultSleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+async function retryWorkspaceOperation(operation, retryDelays, sleep) {
+  let attempts = 0
+  for (let index = 0; index <= retryDelays.length; index += 1) {
+    attempts += 1
+    try {
+      if (await operation()) return { saved: true, attempts }
+    } catch {
+      // The caller decides which small, recoverable value to retain locally.
+    }
+    if (index < retryDelays.length) await sleep(retryDelays[index])
+  }
+  return { saved: false, attempts }
+}
+
 function readLocalWorkspaceValue(storage, key, fallback) {
   try {
     const raw = storage?.getItem(key)
@@ -72,6 +132,8 @@ export function createWorkspaceStore({
   fetchImpl = globalThis.fetch,
   storage = getBrowserStorage(),
   location = globalThis.location,
+  sleep = defaultSleep,
+  onboardingRetryDelays = DEFAULT_ONBOARDING_RETRY_DELAYS,
 } = {}) {
   const requestUrl = (path) => getSupabaseRequestUrl(config, path)
   const headers = (token) => {
@@ -210,17 +272,29 @@ export function createWorkspaceStore({
     async getProfile() {
       const data = await store.get('profiles?id=eq.' + store.session.user_id + '&select=*')
       const profile = Array.isArray(data) ? normalizeProfile(data[0], store.session?.user_id) : null
-      if (profile) {
-        clearPendingProfile(storage, store.session?.user_id)
+      const pendingProfile = readPendingProfile(storage, store.session?.user_id)
+      if (profile && (profile.onboarded || !pendingProfile?.onboarded)) {
+        if (profile.onboarded) {
+          clearPendingProfile(storage, store.session?.user_id)
+        }
+        await store.syncPendingOnboardingDetails()
         return profile
       }
 
-      const pendingProfile = readPendingProfile(storage, store.session?.user_id)
-      if (!pendingProfile) return null
-      if (await store.post('profiles', pendingProfile, 'resolution=merge-duplicates,return=minimal')) {
-        clearPendingProfile(storage, pendingProfile.id)
+      if (!pendingProfile) return profile
+      const coreProfile = { id: pendingProfile.id, onboarded: pendingProfile.onboarded === true }
+      const legacyDetails = normalizeOnboardingDetails(pendingProfile)
+      if (legacyDetails) writePendingOnboarding(storage, coreProfile.id, legacyDetails)
+      const retry = await retryWorkspaceOperation(
+        () => store.post('profiles?on_conflict=id', coreProfile, 'resolution=merge-duplicates,return=minimal'),
+        onboardingRetryDelays,
+        sleep,
+      )
+      if (retry.saved) {
+        clearPendingProfile(storage, store.session?.user_id)
+        await store.syncPendingOnboardingDetails()
       }
-      return pendingProfile
+      return profile ? { ...profile, onboarded: coreProfile.onboarded } : coreProfile
     },
 
     async updateProfile(data) {
@@ -230,6 +304,48 @@ export function createWorkspaceStore({
       if (saved) clearPendingProfile(storage, profile.id)
       else writePendingProfile(storage, profile)
       return saved
+    },
+
+    async syncPendingOnboardingDetails() {
+      const userId = store.session?.user_id
+      const details = readPendingOnboarding(storage, userId)
+      if (!details) return { saved: true, attempts: 0 }
+      const retry = await retryWorkspaceOperation(
+        () => store.setData(ONBOARDING_DATA_KEY, details),
+        onboardingRetryDelays,
+        sleep,
+      )
+      if (retry.saved) clearPendingOnboarding(storage, userId)
+      return retry
+    },
+
+    async completeOnboarding({ role, goal } = {}) {
+      const userId = store.session?.user_id
+      const details = normalizeOnboardingDetails({ role, goal })
+      if (!userId || !details) return { saved: false, metadataSaved: false, attempts: 0, profile: null }
+
+      const profile = { id: userId, onboarded: true }
+      const profileRetry = await retryWorkspaceOperation(
+        () => store.post('profiles?on_conflict=id', profile, 'resolution=merge-duplicates,return=minimal'),
+        onboardingRetryDelays,
+        sleep,
+      )
+
+      if (!profileRetry.saved) {
+        writePendingProfile(storage, profile)
+        writePendingOnboarding(storage, userId, details)
+        return { saved: false, metadataSaved: false, attempts: profileRetry.attempts, profile: { ...profile, ...details } }
+      }
+
+      clearPendingProfile(storage, userId)
+      writePendingOnboarding(storage, userId, details)
+      const detailsRetry = await store.syncPendingOnboardingDetails()
+      return {
+        saved: true,
+        metadataSaved: detailsRetry.saved,
+        attempts: profileRetry.attempts + detailsRetry.attempts,
+        profile: { ...profile, ...details },
+      }
     },
 
     async getData(key) {

@@ -64,8 +64,16 @@ function isAllowedCorsOrigin(origin, env = process.env) {
   if (url.protocol !== 'https:') return false
   const previewSuffixes = splitList(env.FOUNDERLAB_VERCEL_PREVIEW_HOST_SUFFIXES)
   const previewPrefixes = splitList(env.FOUNDERLAB_VERCEL_PREVIEW_HOST_PREFIXES)
-  return previewSuffixes.some((suffix) => url.hostname.endsWith(suffix))
-    || previewPrefixes.some((prefix) => url.hostname.startsWith(prefix) && url.hostname.endsWith('.vercel.app'))
+  if (!previewSuffixes.length && !previewPrefixes.length) return false
+
+  // A suffix scopes a Vercel team and a prefix scopes this project. When both
+  // are configured, require both so a project-like hostname on another team
+  // (or another project in the team) cannot call the expensive endpoints.
+  const suffixMatches = !previewSuffixes.length || previewSuffixes.some((suffix) => url.hostname.endsWith(suffix))
+  const prefixMatches = !previewPrefixes.length || previewPrefixes.some((prefix) => (
+    url.hostname.startsWith(prefix) && url.hostname.endsWith('.vercel.app')
+  ))
+  return suffixMatches && prefixMatches
 }
 
 function applyCorsHeaders(req, res, env = process.env) {

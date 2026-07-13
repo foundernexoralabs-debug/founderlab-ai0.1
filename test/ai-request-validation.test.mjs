@@ -289,16 +289,27 @@ test('the explicit local auth bypass cannot activate outside development', async
   assert.deepEqual(productionBypass, { ok: false, status: 401, code: 'AUTHENTICATION_REQUIRED' })
 })
 
-test('CORS only permits configured production origins or localhost in development', () => {
+test('CORS permits the production origin and only Preview hosts matching the configured project and team', () => {
   assert.equal(isAllowedCorsOrigin('https://app.founderlab.test', TEST_ENV), true)
   assert.equal(isAllowedCorsOrigin('https://evil.example', TEST_ENV), false)
   assert.equal(isAllowedCorsOrigin('http://localhost:5173', TEST_ENV), true)
   assert.equal(isAllowedCorsOrigin('http://localhost:5173', { ...TEST_ENV, NODE_ENV: 'production' }), false)
-  assert.equal(isAllowedCorsOrigin('https://founderlab-ai0-1-git-main-team.vercel.app', {
+  const previewEnv = {
     ...TEST_ENV,
     NODE_ENV: 'production',
-    FOUNDERLAB_VERCEL_PREVIEW_HOST_PREFIXES: 'founderlab-ai0-1-git-',
-  }), true)
+    FOUNDERLAB_VERCEL_PREVIEW_HOST_PREFIXES: 'founderlab-ai01-',
+    FOUNDERLAB_VERCEL_PREVIEW_HOST_SUFFIXES: '-fouderlab-ai-s-projects.vercel.app',
+  }
+  assert.equal(isAllowedCorsOrigin('https://founderlab-ai01-git-phase-2-abc-fouderlab-ai-s-projects.vercel.app', previewEnv), true)
+  assert.equal(isAllowedCorsOrigin('https://another-project-fouderlab-ai-s-projects.vercel.app', previewEnv), false)
+  assert.equal(isAllowedCorsOrigin('https://founderlab-ai01-git-phase-2-abc-other-team.vercel.app', previewEnv), false)
+  assert.equal(isAllowedCorsOrigin('https://founderlab-ai01-git-phase-2-abc-fouderlab-ai-s-projects.vercel.app', {
+    ...TEST_ENV,
+    NODE_ENV: 'production',
+  }), false)
+
+  const securitySource = fs.readFileSync(path.join(repositoryRoot, 'api/_lib/apiSecurity.js'), 'utf8')
+  assert.equal(securitySource.includes("Access-Control-Allow-Origin', '*"), false)
 })
 
 test('rate protection uses verified user identity, returns retry data, and fails closed outside development without a durable backend', async () => {
