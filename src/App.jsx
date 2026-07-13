@@ -3288,13 +3288,11 @@ function AppInner() {
       if (!CONFIGURED) { setState('setup'); return }
       const ok=await sb.boot()
       if (ok) {
-        try {
-          await refreshProviderAvailability()
-          const p=await sb.getProfile()
-          setProfile(p)
-          await migrateLocalToCloud()
-          setState(p?.onboarded?'app':'onboarding')
-        } catch { setState('app') }
+        try { await refreshProviderAvailability() } catch {}
+        const p=await sb.getProfile().catch(()=>null)
+        setProfile(p)
+        await migrateLocalToCloud()
+        setState(p?.onboarded?'app':'onboarding')
       } else { setState('auth') }
     }
     boot()
@@ -3308,21 +3306,17 @@ function AppInner() {
   }, [])
 
   async function afterAuth() {
-    try {
-      await refreshProviderAvailability()
-      const p=await sb.getProfile()
-      setProfile(p)
-      await migrateLocalToCloud()
-      setState(p?.onboarded?'app':'onboarding')
-    } catch { setState('app') }
+    try { await refreshProviderAvailability() } catch {}
+    const p=await sb.getProfile().catch(()=>null)
+    setProfile(p)
+    await migrateLocalToCloud()
+    setState(p?.onboarded?'app':'onboarding')
   }
 
-  async function afterOnboarding() {
-    try {
-      const p=await sb.getProfile()
-      setProfile(p)
-    } catch {}
+  function afterOnboarding(completedProfile, saved) {
+    setProfile(completedProfile)
     setState('app')
+    if (!saved) toast('Your workspace is ready. We will retry saving your onboarding choices when the connection returns.', 'error')
   }
 
   async function signOut() {

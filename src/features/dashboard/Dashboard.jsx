@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { C } from '@/app/theme'
-import { Card, Spinner } from '@/components/ui/Primitives'
+import { Button, Card, Spinner } from '@/components/ui/Primitives'
 import { timeg } from '@/lib/appUtils'
+import { buildDashboardState } from '@/services/workspaceData'
 import { loadWorkspaceData as load, workspaceStore as sb } from '@/services/workspaceStore'
 
 export function Dashboard({ user, profile, setPage }) {
@@ -19,10 +20,9 @@ export function Dashboard({ user, profile, setPage }) {
           load('fl_notes', []),
           load('fl_tasks', []),
         ])
-        setCounts(ec)
-        const sorted = Array.isArray(notes) ? [...notes].sort((a,b) => b.updated_at > a.updated_at ? 1 : -1) : []
-        const pending = Array.isArray(tasks) ? tasks.filter(t=>t.status!=='done').length : 0
-        if (sorted[0] || pending > 0) setBanner({ note:sorted[0]||null, pending })
+        const dashboard = buildDashboardState({ eventCounts:ec, notes, tasks })
+        setCounts(dashboard.counts)
+        setBanner(dashboard.banner)
       } catch {} finally { setLoading(false) }
     }
     init()

@@ -5,9 +5,11 @@ import {
   requireSupabaseConfig,
   withAuthRedirect,
 } from '../lib/supabaseConfig.js'
+import { normalizeWorkspaceValue } from './workspaceData.js'
 
 const supabaseConfig = getSupabaseConfig(import.meta.env || {})
 const SESSION_STORAGE_KEY = 'fl_session'
+const PENDING_PROFILE_PREFIX = 'fl_pending_profile_'
 
 export const isWorkspaceConfigured = supabaseConfig.valid
 
@@ -18,6 +20,51 @@ function getBrowserStorage() {
 function getFetch(fetchImpl) {
   if (typeof fetchImpl !== 'function') throw new Error('Authentication service is unavailable. Please try again.')
   return fetchImpl
+}
+
+function getPendingProfileKey(userId) {
+  return PENDING_PROFILE_PREFIX + userId
+}
+
+function normalizeProfile(profile, userId) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null
+  return {
+    ...profile,
+    id: typeof profile.id === 'string' && profile.id ? profile.id : userId,
+    onboarded: profile.onboarded === true,
+  }
+}
+
+function readPendingProfile(storage, userId) {
+  if (!userId) return null
+  try {
+    return normalizeProfile(JSON.parse(storage?.getItem(getPendingProfileKey(userId)) || ''), userId)
+  } catch {
+    try { storage?.removeItem(getPendingProfileKey(userId)) } catch {}
+    return null
+  }
+}
+
+function writePendingProfile(storage, profile) {
+  if (!profile?.id) return
+  try { storage?.setItem(getPendingProfileKey(profile.id), JSON.stringify(profile)) } catch {}
+}
+
+function clearPendingProfile(storage, userId) {
+  try { storage?.removeItem(getPendingProfileKey(userId)) } catch {}
+}
+
+function readLocalWorkspaceValue(storage, key, fallback) {
+  try {
+    const raw = storage?.getItem(key)
+    if (!raw) return { value: fallback, found: false }
+    const normalized = normalizeWorkspaceValue(key, JSON.parse(raw), fallback)
+    if (normalized.repaired) storage?.setItem(key, JSON.stringify(normalized.value))
+    return { value: normalized.value, found: true }
+  } catch {
+    try { storage?.removeItem(key) } catch {}
+    return { value: fallback, found: false }
+  }
 }
 
 export function createWorkspaceStore({
@@ -162,11 +209,27 @@ export function createWorkspaceStore({
 
     async getProfile() {
       const data = await store.get('profiles?id=eq.' + store.session.user_id + '&select=*')
-      return Array.isArray(data) ? data[0] || null : null
+      const profile = Array.isArray(data) ? normalizeProfile(data[0], store.session?.user_id) : null
+      if (profile) {
+        clearPendingProfile(storage, store.session?.user_id)
+        return profile
+      }
+
+      const pendingProfile = readPendingProfile(storage, store.session?.user_id)
+      if (!pendingProfile) return null
+      if (await store.post('profiles', pendingProfile, 'resolution=merge-duplicates,return=minimal')) {
+        clearPendingProfile(storage, pendingProfile.id)
+      }
+      return pendingProfile
     },
 
     async updateProfile(data) {
-      return store.post('profiles', { id: store.session.user_id, ...data }, 'resolution=merge-duplicates,return=minimal')
+      if (!store.session?.user_id) return false
+      const profile = normalizeProfile({ id: store.session.user_id, ...data }, store.session.user_id)
+      const saved = await store.post('profiles', profile, 'resolution=merge-duplicates,return=minimal')
+      if (saved) clearPendingProfile(storage, profile.id)
+      else writePendingProfile(storage, profile)
+      return saved
     },
 
     async getData(key) {
@@ -222,14 +285,17 @@ export function createWorkspaceStore({
 export const workspaceStore = createWorkspaceStore()
 
 export async function saveWorkspaceData(key, value) {
+  const normalized = normalizeWorkspaceValue(key, value)
+  const safeValue = normalized.value
+  const storage = getBrowserStorage()
   try {
-    localStorage.setItem(key, JSON.stringify(value))
+    storage?.setItem(key, JSON.stringify(safeValue))
   } catch {
     // Local persistence is a convenience fallback.
   }
   if (!workspaceStore.session?.user_id) return
   try {
-    await workspaceStore.setData(key, value)
+    await workspaceStore.setData(key, safeValue)
   } catch (error) {
     if (import.meta.env.DEV) {
       console.warn('[workspace:save-failed]', { key, message: error?.message })
@@ -238,33 +304,38 @@ export async function saveWorkspaceData(key, value) {
 }
 
 export async function loadWorkspaceData(key, fallback = null) {
+  const storage = getBrowserStorage()
   if (workspaceStore.session?.user_id) {
     try {
       const cloudValue = await workspaceStore.getData(key)
-      if (cloudValue !== null && cloudValue !== undefined) return cloudValue
+      if (cloudValue !== null && cloudValue !== undefined) {
+        const cloud = normalizeWorkspaceValue(key, cloudValue, fallback)
+        if (!cloud.repaired) return cloud.value
+
+        const local = readLocalWorkspaceValue(storage, key, fallback)
+        const recoveredValue = local.found ? local.value : cloud.value
+        try { await workspaceStore.setData(key, recoveredValue) } catch {}
+        return recoveredValue
+      }
     } catch {
       // Fall through to the device copy.
     }
   }
-  try {
-    const localValue = localStorage.getItem(key)
-    return localValue ? JSON.parse(localValue) : fallback
-  } catch {
-    return fallback
-  }
+  return readLocalWorkspaceValue(storage, key, fallback).value
 }
 
 export async function migrateLocalWorkspaceToCloud() {
-  for (const key of ['fl_convos', 'fl_notes', 'fl_tasks']) {
+  const storage = getBrowserStorage()
+  for (const key of ['fl_convos', 'fl_notes', 'fl_tasks', 'fl_projects']) {
     try {
-      const raw = localStorage.getItem(key)
-      if (!raw) continue
-      const localValue = JSON.parse(raw)
+      const local = readLocalWorkspaceValue(storage, key, [])
+      if (!local.found) continue
+      const localValue = local.value
       if (!localValue || (Array.isArray(localValue) && !localValue.length)) continue
       const cloudValue = await workspaceStore.getData(key)
       if (!cloudValue || (Array.isArray(cloudValue) && !cloudValue.length)) {
         await workspaceStore.setData(key, localValue)
-        localStorage.removeItem(key)
+        storage?.removeItem(key)
       }
     } catch {
       // A corrupt local entry should not block other workspace data.

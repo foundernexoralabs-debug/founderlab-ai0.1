@@ -114,13 +114,17 @@ export function OnboardingModal({ onDone }) {
   const [step, setStep] = useState(0)
   const [role, setRole] = useState('')
   const [goal, setGoal] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const roles = ['Founder','Creator','Freelancer','Developer','Student']
   const goals = ['Grow my business','Save time with AI','Create more content','Build in public','Learn faster']
 
   async function finish() {
-    try { await sb.updateProfile({ onboarded:true, role, goal }) } catch {}
-    onDone()
+    if (saving) return
+    setSaving(true)
+    let saved = false
+    try { saved = await sb.updateProfile({ onboarded:true, role, goal }) } catch {}
+    onDone({ onboarded:true, role, goal }, saved)
   }
 
   const sel = (val, active, onSel) => (
@@ -142,7 +146,7 @@ export function OnboardingModal({ onDone }) {
     <div key={2}>
       <div style={{ textAlign:'center', marginBottom:20 }}><h2 style={{ margin:'0 0 6px', fontSize:20, fontWeight:700, color:C.t1 }}>Your main goal?</h2><p style={{ color:C.t2, fontSize:14, margin:0 }}>We'll tailor suggestions to you</p></div>
       <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:20 }}>{goals.map(g=>sel(g, goal, setGoal))}</div>
-      <div style={{ display:'flex', gap:8 }}><Button onClick={()=>setStep(1)} variant="secondary" full>Back</Button><Button onClick={()=>goal&&finish()} disabled={!goal} full>Enter FounderLab ✦</Button></div>
+      <div style={{ display:'flex', gap:8 }}><Button onClick={()=>setStep(1)} variant="secondary" full disabled={saving}>Back</Button><Button onClick={()=>goal&&finish()} disabled={!goal||saving} full>{saving?<Spinner size={14} color="#fff"/>:'Enter FounderLab ✦'}</Button></div>
     </div>,
   ]
 
