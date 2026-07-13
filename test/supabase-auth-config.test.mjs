@@ -3,7 +3,9 @@ import test from 'node:test'
 import {
   getAuthRedirectUrl,
   getSafeAuthErrorMessage,
+  getSetupScreenView,
   getSupabaseConfig,
+  isSetupDiagnosticsEnabled,
   SUPABASE_CONFIGURATION_ERROR,
   withAuthRedirect,
 } from '../src/lib/supabaseConfig.js'
@@ -46,6 +48,51 @@ test('a valid Supabase configuration normalizes to the HTTPS project origin', ()
     url: 'https://founderlab-test.supabase.co',
     anonKey: 'public-anon-key',
   })
+})
+
+test('a valid Preview Supabase configuration proceeds to normal auth bootstrap', async () => {
+  const previewConfig = getSupabaseConfig({
+    VITE_SUPABASE_URL: 'https://founderlab-preview.supabase.co',
+    VITE_SUPABASE_ANON_KEY: 'public-anon-key',
+  })
+  const store = createWorkspaceStore({ config: previewConfig, storage: createStorage() })
+
+  assert.equal(previewConfig.valid, true)
+  assert.equal(await store.boot(), false)
+})
+
+test('production and preview unavailable states never expose configuration details', () => {
+  const restrictedTerms = [
+    '.env.local',
+    'VITE_SUPABASE_URL',
+    'VITE_SUPABASE_ANON_KEY',
+    'SUPABASE_URL',
+    'ANTHROPIC_API_KEY',
+    'GROQ_API_KEY',
+    'GEMINI_API_KEY',
+    'ELEVENLABS_API_KEY',
+    'RATE_LIMITER',
+  ]
+  for (const environment of [
+    { DEV: false, MODE: 'production' },
+    { DEV: false, MODE: 'production', VERCEL_ENV: 'preview' },
+  ]) {
+    const view = getSetupScreenView(environment)
+    assert.equal(isSetupDiagnosticsEnabled(environment), false)
+    assert.equal(view.title, 'FounderLab is temporarily unavailable')
+    assert.equal(view.message, 'Authentication could not start. Please try again shortly.')
+    assert.deepEqual(view.diagnostics, [])
+    const publicText = JSON.stringify(view)
+    for (const term of restrictedTerms) assert.equal(publicText.includes(term), false, term + ' must not reach public UI')
+  }
+})
+
+test('local development may show setup diagnostics without changing the public unavailable message', () => {
+  const view = getSetupScreenView({ DEV: true, MODE: 'development' })
+  assert.equal(isSetupDiagnosticsEnabled({ DEV: true }), true)
+  assert.equal(view.title, 'FounderLab is temporarily unavailable')
+  assert.equal(view.message, 'Authentication could not start. Please try again shortly.')
+  assert.equal(view.diagnostics.some((item) => item.includes('VITE_SUPABASE_URL')), true)
 })
 
 test('invalid Supabase configuration blocks every browser auth action before fetch', async () => {
@@ -92,6 +139,26 @@ test('a valid configuration sends auth requests to the expected Supabase endpoin
   assert.equal(capturedUrl, 'https://founderlab-test.supabase.co/auth/v1/token?grant_type=password')
   assert.equal(capturedOptions.headers.apikey, 'public-anon-key')
   assert.deepEqual(JSON.parse(capturedOptions.body), { email: 'founder@example.test', password: 'safe-password' })
+  assert.equal(store.session.user_id, 'user-id')
+})
+
+test('optional providers and absent rate-limiter settings never affect browser authentication', async () => {
+  let authRequests = 0
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    fetchImpl: async () => {
+      authRequests += 1
+      return successfulResponse({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+    storage: createStorage(),
+  })
+
+  await store.signIn('founder@example.test', 'safe-password')
+  assert.equal(authRequests, 1)
   assert.equal(store.session.user_id, 'user-id')
 })
 

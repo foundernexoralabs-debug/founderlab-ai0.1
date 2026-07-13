@@ -37,6 +37,7 @@ const groqProvider = require('../api/ai/providers/groq.js')
 const {
   authenticateRequest,
   enforceRequestLimit,
+  getSupabaseConfig: getServerSupabaseConfig,
   isAllowedCorsOrigin,
   resetInMemoryRateLimits,
 } = require('../api/_lib/apiSecurity.js')
@@ -245,6 +246,23 @@ test('missing and invalid Supabase credentials are rejected before provider exec
     fetchImpl: async () => jsonResponse({ ok: false, status: 401 }),
   })
   assert.deepEqual(invalid, { ok: false, status: 401, code: 'AUTHENTICATION_INVALID' })
+})
+
+test('server authentication safely falls back to the browser Supabase values', async () => {
+  const env = {
+    NODE_ENV: 'development',
+    VITE_SUPABASE_URL: TEST_ENV.SUPABASE_URL,
+    VITE_SUPABASE_ANON_KEY: TEST_ENV.SUPABASE_ANON_KEY,
+  }
+  assert.deepEqual(getServerSupabaseConfig(env), {
+    url: TEST_ENV.SUPABASE_URL,
+    anonKey: TEST_ENV.SUPABASE_ANON_KEY,
+  })
+  const authenticated = await authenticateRequest(createRequest({ headers: { authorization: 'Bearer verified-access-token' } }), {
+    env,
+    fetchImpl: authenticatedFetch(),
+  })
+  assert.equal(authenticated.ok, true)
 })
 
 test('accepted authentication derives a verified identity and never uses request body identity', async () => {

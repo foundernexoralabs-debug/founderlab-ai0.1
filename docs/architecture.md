@@ -86,12 +86,16 @@ FounderLab has deliberately independent configuration groups:
 - **Required for the browser app and authentication:** `VITE_SUPABASE_URL` and
   `VITE_SUPABASE_ANON_KEY`. These are Vite browser configuration values and
   must contain the HTTPS Supabase project origin and anon key.
-- **Required for server-side authentication and production security:**
-  `SUPABASE_URL`, `SUPABASE_ANON_KEY`, an allowed-origin configuration
-  (`FOUNDERLAB_ALLOWED_ORIGINS` or `FOUNDERLAB_PRODUCTION_ORIGIN`, plus preview
-  controls where needed), and `FOUNDERLAB_RATE_LIMITER_URL` in Vercel or
-  production. `FOUNDERLAB_RATE_LIMITER_TOKEN` is required when the configured
-  limiter expects authentication.
+- **Server-side authentication:** `SUPABASE_URL` and `SUPABASE_ANON_KEY` are
+  optional aliases. The shared server helper safely falls back to
+  `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, so the two browser values
+  are the only Supabase variables that must be configured for a deployment.
+- **Required only to protect expensive API calls in production:** an
+  allowed-origin configuration (`FOUNDERLAB_ALLOWED_ORIGINS` or
+  `FOUNDERLAB_PRODUCTION_ORIGIN`, plus preview controls where needed) and
+  `FOUNDERLAB_RATE_LIMITER_URL`. `FOUNDERLAB_RATE_LIMITER_TOKEN` is needed only
+  when the configured limiter expects authentication. These controls never
+  block sign-in or the core workspace.
 - **Optional providers:** `ANTHROPIC_API_KEY`, `GROQ_API_KEY`,
   `GEMINI_API_KEY`, and `ELEVENLABS_API_KEY`. Configure only the providers the
   deployment will use. Authentication and the rest of the workspace never

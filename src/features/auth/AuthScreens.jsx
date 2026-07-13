@@ -1,34 +1,31 @@
 import { useState } from 'react'
 import { C } from '@/app/theme'
-import { Button, Card, Input, Spinner, Tip } from '@/components/ui/Primitives'
-import { getSafeAuthErrorMessage, SUPABASE_CONFIGURATION_ERROR } from '@/lib/supabaseConfig'
+import { Button, Card, Input, Spinner } from '@/components/ui/Primitives'
+import { getSafeAuthErrorMessage, getSetupScreenView } from '@/lib/supabaseConfig'
 import { workspaceStore as sb } from '@/services/workspaceStore'
 
 // ── SETUP SCREEN ─────────────────────────────────────────────
 export function SetupScreen() {
+  const view = getSetupScreenView(import.meta.env)
+  const retry = () => globalThis.location?.reload?.()
+
   return (
     <div style={{ minHeight:'100vh', background:C.bg, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <Card style={{ maxWidth:600, width:'100%', padding:40, borderRadius:16 }}>
-        <div style={{ width:48, height:48, background:C.accent, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:'#fff', marginBottom:20 }}>✦</div>
-        <h2 style={{ margin:'0 0 8px', fontSize:22, fontWeight:700, color:C.t1 }}>Setup Required</h2>
-        <p style={{ margin:'0 0 12px', color:C.red, fontSize:14, lineHeight:1.6 }}>{SUPABASE_CONFIGURATION_ERROR}</p>
-        <p style={{ margin:'0 0 20px', color:C.t2, fontSize:14, lineHeight:1.6 }}>Create a <code style={{ background:C.surfHigh, padding:'1px 6px', borderRadius:4, color:C.accent }}>.env.local</code> file in your project root. Authentication only needs the two browser values below.</p>
-        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:14 }}>
-          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Required for FounderLab and authentication</div>
-          <div style={{ color:C.green }}>VITE_SUPABASE_URL=https://xxxx.supabase.co</div>
-          <div style={{ color:C.green }}>VITE_SUPABASE_ANON_KEY=eyJ...</div>
-        </div>
-        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:14 }}>
-          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Server authentication and production security</div>
-          <div style={{ color:C.t3 }}>SUPABASE_URL and SUPABASE_ANON_KEY</div>
-          <div style={{ color:C.t3 }}>FOUNDERLAB_ALLOWED_ORIGINS and FOUNDERLAB_RATE_LIMITER_URL in production</div>
-        </div>
-        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:24 }}>
-          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Optional AI and voice providers</div>
-          <div style={{ color:C.t3 }}>ANTHROPIC_API_KEY · GROQ_API_KEY · GEMINI_API_KEY · ELEVENLABS_API_KEY</div>
-          <div style={{ color:C.t3 }}>Add only the provider keys you plan to use. Local Ollama needs no server key.</div>
-        </div>
-        <Tip>Get Supabase keys: supabase.com → Project → Settings → API. AI provider keys are server-side only — never give them a VITE_ prefix.</Tip>
+      <Card style={{ maxWidth:440, width:'100%', padding:40, borderRadius:16, textAlign:'center' }}>
+        <div style={{ width:48, height:48, background:C.accent, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:'#fff', margin:'0 auto 20px' }}>✦</div>
+        <p style={{ margin:'0 0 8px', color:C.accent, fontSize:13, fontWeight:700, letterSpacing:'.04em' }}>FOUNDERLAB</p>
+        <h1 style={{ margin:'0 0 10px', fontSize:22, fontWeight:700, color:C.t1 }}>{view.title}</h1>
+        <p style={{ margin:'0 0 22px', color:C.t2, fontSize:14, lineHeight:1.6 }}>{view.message}</p>
+        <Button onClick={retry} size="sm">Try again</Button>
+        <p style={{ margin:'16px 0 0', color:C.t3, fontSize:11 }}>Reference: {view.referenceCode}</p>
+        {view.diagnostics.length > 0 && (
+          <details style={{ marginTop:20, textAlign:'left', color:C.t3, fontSize:12, lineHeight:1.6 }}>
+            <summary style={{ cursor:'pointer', color:C.t2 }}>Development diagnostics</summary>
+            <ul style={{ margin:'8px 0 0', paddingLeft:18 }}>
+              {view.diagnostics.map((diagnostic) => <li key={diagnostic}>{diagnostic}</li>)}
+            </ul>
+          </details>
+        )}
       </Card>
     </div>
   )

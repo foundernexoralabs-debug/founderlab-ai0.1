@@ -1,5 +1,16 @@
 export const SUPABASE_CONFIGURATION_ERROR = 'Supabase is not configured correctly for this deployment.'
 
+const PUBLIC_SETUP_SCREEN = Object.freeze({
+  title: 'FounderLab is temporarily unavailable',
+  message: 'Authentication could not start. Please try again shortly.',
+  referenceCode: 'FL-AUTH-INIT',
+})
+
+const DEVELOPMENT_SETUP_DIAGNOSTICS = Object.freeze([
+  'Supabase browser configuration is unavailable or invalid.',
+  'Expected VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in the local development environment.',
+])
+
 function isCleanString(value) {
   if (typeof value !== 'string' || value.length === 0 || value !== value.trim() || /\s/.test(value)) return false
   return !['undefined', 'null'].includes(value.toLowerCase())
@@ -7,6 +18,22 @@ function isCleanString(value) {
 
 function invalidConfig() {
   return { valid: false, url: '', anonKey: '' }
+}
+
+/**
+ * Public deployment screens must not reveal operational configuration. A
+ * diagnostic panel is intentionally limited to local development builds.
+ */
+export function isSetupDiagnosticsEnabled(env = {}) {
+  return env?.DEV === true
+    || (env?.MODE === 'development' && env?.VITE_FOUNDERLAB_SETUP_DIAGNOSTICS === 'true')
+}
+
+export function getSetupScreenView(env = {}) {
+  return {
+    ...PUBLIC_SETUP_SCREEN,
+    diagnostics: isSetupDiagnosticsEnabled(env) ? DEVELOPMENT_SETUP_DIAGNOSTICS : [],
+  }
 }
 
 /**

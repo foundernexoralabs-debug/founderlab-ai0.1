@@ -245,6 +245,7 @@ module.exports = {
   applyCorsHeaders,
   authenticateRequest,
   enforceRequestLimit,
+  getSupabaseConfig,
   getRateLimitPolicy,
   handleCors,
   isAllowedCorsOrigin,
