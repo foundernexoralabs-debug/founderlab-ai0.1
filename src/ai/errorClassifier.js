@@ -6,7 +6,6 @@ const ERROR_MESSAGES = {
   AUTHENTICATION_INVALID: 'could not verify your sign-in session. Please sign in again.',
   AUTHENTICATION_UNAVAILABLE: 'could not verify your sign-in session right now. Please try again.',
   CORS_ORIGIN_DENIED: 'cannot be called from this website origin.',
-  MISSING_CONFIGURATION: 'is not configured yet. Add its server environment variable and try again.',
   INVALID_MODEL: 'cannot use the selected model. Choose another model in Settings.',
   AUTHENTICATION_FAILED: 'could not authenticate with its server configuration. Check the server key and try again.',
   RATE_LIMITED: 'is temporarily busy. Please try again in a moment.',
@@ -17,6 +16,16 @@ const ERROR_MESSAGES = {
   EMPTY_RESPONSE: 'returned an empty response. Please try again.',
   REQUEST_INVALID: 'could not process this request. Check the selected model and input, then try again.',
   UNKNOWN: 'could not complete this request. Please try again.',
+}
+
+function missingConfigurationMessage(provider, providerName) {
+  if (provider === 'anthropic') {
+    return 'Anthropic is not configured. Choose another provider or add ANTHROPIC_API_KEY.'
+  }
+  const keyName = getProvider(provider)?.keyEnv || getVoiceProvider(provider)?.keyEnv
+  return keyName
+    ? providerName + ' is not configured. Choose another provider or add ' + keyName + '.'
+    : providerName + ' is not configured. Please check its local setup and try again.'
 }
 
 export function classifyAIError({ provider, status, code, message } = {}) {
@@ -51,6 +60,8 @@ export function classifyAIError({ provider, status, code, message } = {}) {
     code: resolvedCode,
     message: globalError
       ? (ERROR_MESSAGES[resolvedCode] || ERROR_MESSAGES.UNKNOWN)
+      : resolvedCode === 'MISSING_CONFIGURATION'
+        ? missingConfigurationMessage(provider, providerName)
       : providerName + ' ' + (ERROR_MESSAGES[resolvedCode] || ERROR_MESSAGES.UNKNOWN),
     retryable,
     status: resolvedStatus,

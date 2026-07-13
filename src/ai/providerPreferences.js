@@ -1,5 +1,4 @@
 import {
-  DEFAULT_PROVIDER_ID,
   getDefaultModel,
   isSupportedModel,
   isSupportedProvider,
@@ -19,8 +18,8 @@ function readStorage(key, fallback = '') {
 }
 
 export function getAIProviderPreference() {
-  const stored = readStorage(PROVIDER_STORAGE_KEY, DEFAULT_PROVIDER_ID)
-  return isSupportedProvider(stored) ? stored : DEFAULT_PROVIDER_ID
+  const stored = readStorage(PROVIDER_STORAGE_KEY)
+  return isSupportedProvider(stored) ? stored : ''
 }
 
 export function setAIProviderPreference(providerId) {

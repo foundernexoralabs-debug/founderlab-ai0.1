@@ -29,11 +29,13 @@ import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
 import { clearGithubToken, getGithubToken, setGithubToken } from '@/services/githubTokenSession'
 import { authenticatedFetch } from '@/services/authenticatedFetch'
 import { getProvider } from '@/ai/providerRegistry'
+import { getProviderConfigurationState } from '@/ai/providerAvailability'
 import {
   ai,
   getAIProvider,
   getOllamaModel,
   getOllamaURL,
+  getProviderAvailability,
   getProviderModel,
   isElectron as IS_ELECTRON,
   ollamaChat,
@@ -41,6 +43,7 @@ import {
   OLLAMA_MODEL_STORAGE_KEY,
   OLLAMA_URL_STORAGE_KEY,
   PROVIDERS,
+  refreshProviderAvailability,
   setAIProvider as setAIProviderLS,
   setProviderModel,
 } from '@/services/aiProviderService'
@@ -1376,6 +1379,9 @@ function YouTubeAIPage({ user }) {
   // ── Full Viral Clip Analysis ─────────────────────────────────
   async function runViralAnalysis() {
     if (!trans.trim() && !url.trim()) return toast('Add a YouTube URL or paste a transcript first', 'error')
+    const provider = getAIProvider()
+    if (!provider) return toast('Choose a configured cloud AI provider before running Viral Clip Analysis.', 'error')
+    if (provider === 'ollama') return toast('Viral Clip Analysis runs securely on the server. Choose a configured cloud provider; Local Ollama remains available for browser-executable AI features.', 'error')
     let text = trans
     if (!text && videoId) {
       setL(true)
@@ -1387,7 +1393,7 @@ function YouTubeAIPage({ user }) {
     setL(true)
     const r = await authenticatedFetch('/api/youtube/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transcript: text, duration: videoInfo?.duration || 0, url }),
+      body: JSON.stringify({ transcript: text, duration: videoInfo?.duration || 0, url, provider, model:getProviderModel(provider) }),
     })
     const d = await r.json().catch(() => null)
     if (!r.ok || !d?.ok && d?.error) { toast('Analysis failed: ' + (d?.error?.message || 'Please try again.'), 'error'); setL(false); return }
@@ -2804,6 +2810,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   // ── AI provider state ──────────────────────────────────────
   const [aiProv, setAIProv] = useState(getAIProvider)
+  const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
   // Per-provider model selections (initialised from localStorage)
   const [modelMap, setModelMap] = useState(() => {
     const stored = {}
@@ -2817,7 +2824,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [ollamaDetecting, setOllamaDetecting] = useState(false)
   const [ollamaDetectErr, setOllamaDetectErr] = useState('')
   // Shared test state
-  const [testStatus, setTestStatus]   = useState('') // '' | 'testing' | '✅ …' | '❌ …'
+  const [testStatus, setTestStatus]   = useState(null) // { state, message } | null
 
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
@@ -2835,6 +2842,15 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   useEffect(() => {
     async function init() { setFbL(true); setFB(await sb.getFeedback()||[]); setFbL(false) }
     init()
+  }, [])
+  useEffect(() => {
+    let mounted = true
+    refreshProviderAvailability().then(({ provider, providers }) => {
+      if (!mounted) return
+      setProviderAvailability(providers)
+      setAIProv(provider)
+    })
+    return () => { mounted = false }
   }, [])
 
   async function savePro() {
@@ -2938,20 +2954,26 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   }
 
   async function testConnection() {
-    setTestStatus('testing')
+    if (!aiProv) {
+      setTestStatus({ state:'not_configured', message:'No AI provider is configured. Add one optional provider key or use Local Ollama.' })
+      return
+    }
+    setTestStatus({ state:'testing', message:'' })
     try {
       if (aiProv === 'ollama') {
         const { corsOk, running } = await ollamaProbe(ollamaUrl)
-        if (!running) { setTestStatus('❌ Ollama not running'); return }
-        if (!corsOk)  { setTestStatus('⚠ CORS blocked — start with OLLAMA_ORIGINS=* ollama serve'); return }
+        if (!running) { setTestStatus({ state:'unavailable', message:'Ollama is unavailable. Start Ollama on this machine, then try again.' }); return }
+        if (!corsOk)  { setTestStatus({ state:'unavailable', message:'Ollama is unavailable because browser CORS is blocked. Start it with OLLAMA_ORIGINS=* ollama serve.' }); return }
         const reply = await ollamaChat([{role:'user',content:'Say only: CONNECTED'}], '', 10)
-        setTestStatus(`✅ Connected — ${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"`)
+        setTestStatus({ state:'connected', message:`Connected — ${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"` })
       } else {
         const reply = await ai([{role:'user',content:'Say only: CONNECTED'}], '', 20)
-        if (reply.startsWith('⚠')) setTestStatus('❌ ' + reply.replace('⚠ ',''))
-        else setTestStatus(`✅ Connected — ${PROVIDERS[aiProv]?.name} replied: "${reply.trim().slice(0,60)}"`)
+        if (reply.startsWith('⚠')) {
+          const message = reply.replace(/^⚠\s*/, '')
+          setTestStatus({ state:message.includes('is not configured.') ? 'not_configured' : 'unavailable', message })
+        } else setTestStatus({ state:'connected', message:`Connected — ${PROVIDERS[aiProv]?.name} replied: "${reply.trim().slice(0,60)}"` })
       }
-    } catch (e) { setTestStatus('❌ ' + e.message) }
+    } catch { setTestStatus({ state:'unavailable', message:'The provider is unavailable. Check its configuration and try again.' }) }
   }
 
   return (
@@ -2986,15 +3008,18 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       {tab==='ai' && (
         <div style={{ maxWidth:540 }}>
           <p style={{ margin:'0 0 20px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
-            Choose your AI provider. Your selection applies to <strong style={{color:C.t1}}>every feature</strong> — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder. API keys are stored securely on the server, never in your browser.
+            Choose your AI provider. Your selection applies to <strong style={{color:C.t1}}>every feature</strong> — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder. Add only the optional provider keys you use; API keys stay securely on the server and never enter your browser.
           </p>
 
           {/* ── Provider cards ── */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:20 }}>
             {Object.values(PROVIDERS).map(p => {
               const active = aiProv === p.id
+              const configuration = getProviderConfigurationState(p.id, providerAvailability)
+              const configurationLabel = configuration === 'not_configured' ? 'Not configured' : configuration === 'local' ? 'Local — test connection' : 'Ready to test'
+              const configurationColor = configuration === 'not_configured' ? C.red : configuration === 'local' ? C.yellow : C.green
               return (
-                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus('') }}
+                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus(null) }}
                   style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}>
                     <span style={{ fontSize:20 }}>{p.icon}</span>
@@ -3002,6 +3027,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
                   </div>
                   <span style={{ fontSize:13, fontWeight:700, color:active?C.accent:C.t1 }}>{p.name}</span>
                   <span style={{ fontSize:11, color:C.t3 }}>{p.sub}</span>
+                  <span style={{ fontSize:11, color:configurationColor }}>{configurationLabel}</span>
                 </button>
               )
             })}
@@ -3009,7 +3035,12 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
           {/* ── Per-provider config panel ── */}
           <Card style={{ padding:18, marginBottom:16 }}>
-            {aiProv !== 'ollama' && (() => {
+            {!aiProv && (
+              <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
+                No cloud AI provider is configured for this deployment. Add one optional provider key on the server, or choose Local Ollama and test its connection. Authentication and the rest of FounderLab continue to work without an AI key.
+              </div>
+            )}
+            {aiProv && aiProv !== 'ollama' && (() => {
               const p = PROVIDERS[aiProv]
               return (
                 <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
@@ -3092,16 +3123,18 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
           {/* ── Test Connection ── */}
           <Card style={{ padding:16, marginBottom:16 }}>
             <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-              <Button onClick={testConnection} disabled={testStatus==='testing'} variant="secondary" size="sm">
-                {testStatus==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
+              <Button onClick={testConnection} disabled={testStatus?.state==='testing'} variant="secondary" size="sm">
+                {testStatus?.state==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
               </Button>
-              {testStatus && testStatus !== 'testing' && (
-                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.startsWith('✅')?C.green:testStatus.startsWith('⚠')?C.yellow:C.red }}>{testStatus}</span>
+              {testStatus && testStatus.state !== 'testing' && (
+                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.state==='connected'?C.green:testStatus.state==='not_configured'?C.yellow:C.red }}>
+                  {testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Unavailable'} — {testStatus.message}
+                </span>
               )}
             </div>
           </Card>
 
-          <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
+          <Button onClick={saveAISettings} full disabled={!aiProv}>Save &amp; Apply</Button>
         </div>
       )}
 
@@ -3219,7 +3252,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             <h3 style={{ margin:'0 0 16px', fontSize:15, color:C.t1 }}>Data Ownership</h3>
             <table style={{ width:'100%', fontSize:13, borderCollapse:'collapse' }}>
               <tbody>
-                {[['All notes & tasks','You','Export or delete anytime'],['AI conversations','You','Export or delete anytime'],['Usage analytics','FounderLab','Anonymous, aggregate only'],['AI processing','Anthropic','Per Anthropic privacy policy']].map(([a,b,c])=>(
+                {[['All notes & tasks','You','Export or delete anytime'],['AI conversations','You','Export or delete anytime'],['Usage analytics','FounderLab','Anonymous, aggregate only'],['AI processing','Selected provider','Per selected provider privacy policy']].map(([a,b,c])=>(
                   <tr key={a} style={{ borderBottom:`1px solid ${C.border}` }}>
                     <td style={{ padding:'10px 0', color:C.t1 }}>{a}</td>
                     <td style={{ padding:'10px 12px', color:C.t2 }}>{b}</td>
@@ -3256,6 +3289,7 @@ function AppInner() {
       const ok=await sb.boot()
       if (ok) {
         try {
+          await refreshProviderAvailability()
           const p=await sb.getProfile()
           setProfile(p)
           await migrateLocalToCloud()
@@ -3275,6 +3309,7 @@ function AppInner() {
 
   async function afterAuth() {
     try {
+      await refreshProviderAvailability()
       const p=await sb.getProfile()
       setProfile(p)
       await migrateLocalToCloud()

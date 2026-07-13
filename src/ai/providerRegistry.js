@@ -86,7 +86,6 @@ export const PROVIDERS = Object.freeze(Object.fromEntries(
 ))
 
 export const PROVIDER_IDS = Object.freeze(Object.keys(PROVIDERS))
-export const DEFAULT_PROVIDER_ID = 'anthropic'
 
 export function getProvider(providerId) {
   return PROVIDERS[providerId] || null

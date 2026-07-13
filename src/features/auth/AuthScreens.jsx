@@ -8,17 +8,27 @@ import { workspaceStore as sb } from '@/services/workspaceStore'
 export function SetupScreen() {
   return (
     <div style={{ minHeight:'100vh', background:C.bg, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <Card style={{ maxWidth:520, width:'100%', padding:40, borderRadius:16 }}>
+      <Card style={{ maxWidth:600, width:'100%', padding:40, borderRadius:16 }}>
         <div style={{ width:48, height:48, background:C.accent, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:'#fff', marginBottom:20 }}>✦</div>
         <h2 style={{ margin:'0 0 8px', fontSize:22, fontWeight:700, color:C.t1 }}>Setup Required</h2>
         <p style={{ margin:'0 0 12px', color:C.red, fontSize:14, lineHeight:1.6 }}>{SUPABASE_CONFIGURATION_ERROR}</p>
-        <p style={{ margin:'0 0 24px', color:C.t2, fontSize:14, lineHeight:1.6 }}>Create a <code style={{ background:C.surfHigh, padding:'1px 6px', borderRadius:4, color:C.accent }}>.env.local</code> file in your project root:</p>
-        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:2, marginBottom:24 }}>
+        <p style={{ margin:'0 0 20px', color:C.t2, fontSize:14, lineHeight:1.6 }}>Create a <code style={{ background:C.surfHigh, padding:'1px 6px', borderRadius:4, color:C.accent }}>.env.local</code> file in your project root. Authentication only needs the two browser values below.</p>
+        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:14 }}>
+          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Required for FounderLab and authentication</div>
           <div style={{ color:C.green }}>VITE_SUPABASE_URL=https://xxxx.supabase.co</div>
           <div style={{ color:C.green }}>VITE_SUPABASE_ANON_KEY=eyJ...</div>
-          <div style={{ color:C.t3 }}>Set ANTHROPIC_API_KEY on the server</div>
         </div>
-        <Tip>Get Supabase keys: supabase.com → Project → Settings → API. ANTHROPIC_API_KEY is server-side only — no VITE_ prefix.</Tip>
+        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:14 }}>
+          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Server authentication and production security</div>
+          <div style={{ color:C.t3 }}>SUPABASE_URL and SUPABASE_ANON_KEY</div>
+          <div style={{ color:C.t3 }}>FOUNDERLAB_ALLOWED_ORIGINS and FOUNDERLAB_RATE_LIMITER_URL in production</div>
+        </div>
+        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:1.8, marginBottom:24 }}>
+          <div style={{ color:C.t1, fontFamily:'inherit', fontWeight:700, marginBottom:4 }}>Optional AI and voice providers</div>
+          <div style={{ color:C.t3 }}>ANTHROPIC_API_KEY · GROQ_API_KEY · GEMINI_API_KEY · ELEVENLABS_API_KEY</div>
+          <div style={{ color:C.t3 }}>Add only the provider keys you plan to use. Local Ollama needs no server key.</div>
+        </div>
+        <Tip>Get Supabase keys: supabase.com → Project → Settings → API. AI provider keys are server-side only — never give them a VITE_ prefix.</Tip>
       </Card>
     </div>
   )

@@ -17,6 +17,11 @@ import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normaliz
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 import {
+  getProviderConfigurationState,
+  normalizeProviderAvailability,
+  resolveConfiguredProvider,
+} from '../src/ai/providerAvailability.js'
+import {
   getAIProviderPreference,
   getProviderModelPreference,
   setAIProviderPreference,
@@ -105,6 +110,30 @@ test('provider registry is the single source of supported providers, defaults, a
   assert.equal(isSupportedModel('groq', 'llama-3.3-70b-versatile', { includeInternal: true }), true)
 })
 
+test('provider availability resolves only configured providers and preserves Local Ollama as a deliberate option', () => {
+  const supabaseConfiguredWithoutAnthropic = normalizeProviderAvailability({
+    ollama: { configured: true, local: true },
+  })
+  assert.equal(resolveConfiguredProvider('anthropic', supabaseConfiguredWithoutAnthropic), 'ollama')
+  assert.equal(getProviderConfigurationState('anthropic', supabaseConfiguredWithoutAnthropic), 'not_configured')
+  assert.equal(getProviderConfigurationState('ollama', supabaseConfiguredWithoutAnthropic), 'local')
+
+  const geminiOnly = normalizeProviderAvailability({ gemini: { configured: true } })
+  assert.equal(resolveConfiguredProvider('', geminiOnly), 'gemini')
+  assert.equal(resolveConfiguredProvider('anthropic', geminiOnly), 'gemini')
+
+  const groqOnly = normalizeProviderAvailability({ groq: { configured: true } })
+  assert.equal(resolveConfiguredProvider('', groqOnly), 'groq')
+  assert.equal(resolveConfiguredProvider('gemini', groqOnly), 'groq')
+
+  const multipleProviders = normalizeProviderAvailability({
+    groq: { configured: true },
+    gemini: { configured: true },
+  })
+  assert.equal(resolveConfiguredProvider('gemini', multipleProviders), 'gemini')
+  assert.equal(resolveConfiguredProvider('anthropic', multipleProviders), 'groq')
+})
+
 test('voice configuration centralizes the ElevenLabs model, voice IDs, and browser fallback capability', () => {
   const voice = getVoiceProvider('elevenlabs')
   assert.equal(voice.defaultModel, 'eleven_multilingual_v2')
@@ -164,6 +193,10 @@ test('AI results normalize malformed output and premium failure categories witho
   assert.equal(classifyAIError({ provider: 'gemini', status: 429 }).code, 'RATE_LIMITED')
   assert.equal(classifyAIError({ provider: 'gemini', status: 503 }).code, 'PROVIDER_UNAVAILABLE')
   assert.equal(classifyAIError({ provider: 'anthropic', code: 'MISSING_CONFIGURATION' }).retryable, false)
+  assert.equal(
+    classifyAIError({ provider: 'anthropic', code: 'MISSING_CONFIGURATION' }).message,
+    'Anthropic is not configured. Choose another provider or add ANTHROPIC_API_KEY.'
+  )
   assert.equal(classifyAIError({ code: 'AUTHENTICATION_REQUIRED' }).status, 401)
 
   const normalized = normalizeApiResult({
@@ -318,6 +351,61 @@ test('AI endpoint returns normalized missing-auth, CORS, rate-limit, and accepte
   assert.equal(accepted.headers['Access-Control-Allow-Origin'], 'https://app.founderlab.test')
 })
 
+test('authenticated provider availability exposes no keys and supports independent optional providers', async () => {
+  const noAnthropic = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { action: 'provider-status' },
+  }), noAnthropic, { env: TEST_ENV, fetchImpl: authenticatedFetch() })
+  assert.equal(noAnthropic.statusCode, 200)
+  assert.equal(noAnthropic.body.ok, true)
+  assert.deepEqual(noAnthropic.body.providers, {
+    anthropic: { configured: false, local: false },
+    groq: { configured: false, local: false },
+    gemini: { configured: false, local: false },
+    ollama: { configured: true, local: true },
+  })
+  assert.equal(JSON.stringify(noAnthropic.body).includes('API_KEY'), false)
+
+  const geminiOnly = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { action: 'provider-status' },
+  }), geminiOnly, {
+    env: { ...TEST_ENV, GEMINI_API_KEY: 'server-only-gemini-key' },
+    fetchImpl: authenticatedFetch(),
+  })
+  assert.equal(geminiOnly.body.providers.gemini.configured, true)
+  assert.equal(geminiOnly.body.providers.anthropic.configured, false)
+  assert.equal(resolveConfiguredProvider('anthropic', geminiOnly.body.providers), 'gemini')
+
+  const groqOnly = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { action: 'provider-status' },
+  }), groqOnly, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-groq-key' },
+    fetchImpl: authenticatedFetch(),
+  })
+  assert.equal(groqOnly.body.providers.groq.configured, true)
+  assert.equal(resolveConfiguredProvider('gemini', groqOnly.body.providers), 'groq')
+})
+
+test('a selected cloud provider without a key returns the premium missing-configuration message', async () => {
+  const missingAnthropic = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [message()] },
+  }), missingAnthropic, {
+    env: TEST_ENV,
+    fetchImpl: authenticatedFetch(),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(missingAnthropic.statusCode, 503)
+  assert.equal(missingAnthropic.body.error.code, 'MISSING_CONFIGURATION')
+  assert.equal(missingAnthropic.body.error.message, 'Anthropic is not configured. Choose another provider or add ANTHROPIC_API_KEY.')
+})
+
 test('YouTube and TTS endpoint failures use the normalized error contract without raw upstream details', async () => {
   const youtube = createResponseRecorder()
   await youtubeHandler(createRequest({
@@ -367,6 +455,57 @@ test('YouTube and TTS endpoint failures use the normalized error contract withou
   assert.equal(ttsProviderFailure.statusCode, 500)
   assert.equal(ttsProviderFailure.body.error.code, 'PROVIDER_UNAVAILABLE')
   assert.equal(JSON.stringify(ttsProviderFailure.body).includes('upstream raw detail'), false)
+})
+
+test('viral clip analysis uses the selected configured cloud provider and rejects internal model selection', async () => {
+  const geminiAnalysis = createResponseRecorder()
+  await youtubeHandler(createRequest({
+    url: '/api/youtube/analyze',
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: {
+      transcript: 'A real transcript for configured Gemini analysis.',
+      provider: 'gemini',
+      model: 'gemini-3.5-flash',
+    },
+  }), geminiAnalysis, {
+    env: { ...TEST_ENV, GEMINI_API_KEY: 'server-only-gemini-key' },
+    fetchImpl: authenticatedFetch(async (url) => {
+      assert.match(url, /^https:\/\/generativelanguage\.googleapis\.com\//)
+      return jsonResponse({ body: {
+        candidates: [{ content: { parts: [{ text: '```json\n' + JSON.stringify({
+          viralityScore: 88,
+          reason: 'Strong narrative arc.',
+          peakMoment: 42,
+          suggestedTitle: 'A better title',
+          hook: 'Watch this now',
+          hashtags: ['#founders'],
+          clipRanges: [{ start: 12, end: 42, label: 'Key insight', score: 88 }],
+          shortScript: 'A concise short script.',
+          thumbnailIdea: 'A clear thumbnail.',
+        }) + '\n```' }] } }],
+      } })
+    }),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(geminiAnalysis.statusCode, 200)
+  assert.equal(geminiAnalysis.body.viralityScore, 88)
+
+  const internalModel = createResponseRecorder()
+  await youtubeHandler(createRequest({
+    url: '/api/youtube/analyze',
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: {
+      transcript: 'A real transcript for internal model validation.',
+      provider: 'groq',
+      model: 'llama-3.3-70b-versatile',
+    },
+  }), internalModel, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-groq-key' },
+    fetchImpl: authenticatedFetch(async () => assert.fail('Internal models must be rejected before execution')),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(internalModel.statusCode, 400)
+  assert.equal(internalModel.body.error.code, 'INVALID_MODEL')
 })
 
 test('authenticated voice availability probes expose registry availability without executing a provider request', async () => {
@@ -446,7 +585,7 @@ test('provider preferences self-heal invalid and malformed values while preservi
     assert.equal([...store.values()].some((value) => /api.?key|token|secret/i.test(value)), false)
 
     store.set('fl_ai_provider', 'unknown-provider')
-    assert.equal(getAIProviderPreference(), 'anthropic')
+    assert.equal(getAIProviderPreference(), '')
     store.set('fl_ai_models', '{malformed')
     assert.equal(getProviderModelPreference('groq'), 'openai/gpt-oss-120b')
     store.set('fl_ai_models', JSON.stringify({ groq: 'llama-3.3-70b-versatile' }))

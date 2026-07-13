@@ -1,5 +1,4 @@
 import {
-  DEFAULT_PROVIDER_ID,
   getProvider,
   getProviderMaxTokens,
   isSupportedModel,
@@ -94,7 +93,7 @@ export function normalizeAIRequest(input = {}, {
   restrictOllamaToLocal = false,
   allowInternalModels = false,
 } = {}) {
-  const provider = input.provider || DEFAULT_PROVIDER_ID
+  const provider = input.provider || ''
   if (!isSupportedProvider(provider)) {
     return requestError('REQUEST_INVALID', 'The selected AI provider is not supported.')
   }

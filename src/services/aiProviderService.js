@@ -1,5 +1,9 @@
 import { PROVIDERS, getDefaultModel, resolveModel } from '@/ai/providerRegistry'
 import {
+  normalizeProviderAvailability,
+  resolveConfiguredProvider,
+} from '@/ai/providerAvailability'
+import {
   getAIProviderPreference,
   getOllamaModelPreference,
   getOllamaURLPreference,
@@ -18,6 +22,44 @@ export {
   PROVIDERS,
   OLLAMA_MODEL_STORAGE_KEY,
   OLLAMA_URL_STORAGE_KEY,
+}
+
+let providerAvailability = normalizeProviderAvailability()
+
+export function getProviderAvailability() {
+  return providerAvailability
+}
+
+export async function refreshProviderAvailability({
+  fetchImpl = globalThis.fetch,
+  accessToken = workspaceStore.session?.access_token,
+} = {}) {
+  const preferredProvider = getAIProviderPreference()
+  if (!accessToken || typeof fetchImpl !== 'function') {
+    return { provider: preferredProvider, providers: providerAvailability }
+  }
+
+  try {
+    const response = await fetchImpl('/api/ai', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + accessToken,
+      },
+      body: JSON.stringify({ action: 'provider-status' }),
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok || !payload.providers || typeof payload.providers !== 'object') {
+      return { provider: preferredProvider, providers: providerAvailability }
+    }
+
+    providerAvailability = normalizeProviderAvailability(payload.providers)
+    const provider = resolveConfiguredProvider(preferredProvider, providerAvailability)
+    if (provider && provider !== preferredProvider) setAIProviderPreference(provider)
+    return { provider, providers: providerAvailability }
+  } catch {
+    return { provider: preferredProvider, providers: providerAvailability }
+  }
 }
 
 export function getAIProvider() {
@@ -65,6 +107,7 @@ export async function ollamaChat(messages, system, maxTokens) {
 
 export async function ai(messages, system = '', maxTokens = 1200) {
   const provider = getAIProvider()
+  if (!provider) return '⚠ No AI provider is configured. Add one optional provider key in the server environment, then try again.'
   const model = provider === 'ollama'
     ? getOllamaModel() || resolveModel('ollama', '')
     : getProviderModel(provider)

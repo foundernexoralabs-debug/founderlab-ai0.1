@@ -13,13 +13,26 @@ function getEngine() {
     enginePromise = Promise.all([
       import('../src/ai/normalizeRequest.js'),
       import('../src/ai/normalizeResponse.js'),
-    ]).then(([request, response]) => ({
+      import('../src/ai/providerRegistry.js'),
+    ]).then(([request, response, registry]) => ({
       normalizeServerAIRequest: request.normalizeServerAIRequest,
       createAIErrorResult: response.createAIErrorResult,
       createAIResult: response.createAIResult,
+      listProviders: registry.listProviders,
     }))
   }
   return enginePromise
+}
+
+function hasConfiguredKey(env, keyName) {
+  return !keyName || (typeof env?.[keyName] === 'string' && env[keyName].trim().length > 0)
+}
+
+function getProviderAvailability(listProviders, env) {
+  return Object.fromEntries(listProviders().map((provider) => [provider.id, {
+    configured: hasConfiguredKey(env, provider.keyEnv),
+    local: provider.capabilities.local === true,
+  }]))
 }
 
 async function handler(req, res, dependencies = {}) {
@@ -44,6 +57,10 @@ async function handler(req, res, dependencies = {}) {
 
   const user = await requireAuthenticatedUser(req, res, { provider, model, env, fetchImpl })
   if (!user) return
+
+  if (req.body?.action === 'provider-status') {
+    return res.status(200).json({ ok: true, providers: getProviderAvailability(engine.listProviders, env) })
+  }
 
   const normalized = engine.normalizeServerAIRequest(req.body || {})
   if (!normalized.ok) {

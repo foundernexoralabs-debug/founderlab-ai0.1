@@ -56,9 +56,20 @@ function extractVideoId(url) {
   return null
 }
 
-async function analyzeWithGroq(transcript, durationSec = 0, { env, fetchImpl } = {}) {
+function parseAnalysisJson(text) {
+  const trimmed = String(text || '').trim()
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)
+  const candidate = fenced?.[1]?.trim() || trimmed
+  const firstObject = candidate.indexOf('{')
+  const lastObject = candidate.lastIndexOf('}')
+  return JSON.parse(firstObject >= 0 && lastObject > firstObject
+    ? candidate.slice(firstObject, lastObject + 1)
+    : candidate)
+}
+
+async function analyzeTranscript(transcript, durationSec = 0, { env, fetchImpl, selection } = {}) {
   if (!transcript?.trim()) {
-    throw createProviderError({ provider: TEXT_PROVIDER, status: 400, code: 'REQUEST_INVALID', message: 'Transcript is required.' })
+    throw createProviderError({ provider: selection?.provider || TEXT_PROVIDER, status: 400, code: 'REQUEST_INVALID', message: 'Transcript is required.' })
   }
   const prompt = `Analyze this YouTube transcript for viral potential.
 Duration: ${durationSec}s. Transcript: ${transcript.slice(0, 4000)}
@@ -77,24 +88,33 @@ Return ONLY valid JSON (no markdown) with exactly these fields:
 }`
 
   const { getPurposeModel, normalizeAIRequest } = await getYouTubeAIEngine()
-  const selection = getPurposeModel('youtube-analysis')
-  if (!selection) {
+  const internalSelection = getPurposeModel('youtube-analysis')
+  const requestedSelection = selection?.provider ? selection : internalSelection
+  if (!requestedSelection) {
     throw createProviderError({ provider: TEXT_PROVIDER, status: 503, code: 'MISSING_CONFIGURATION', message: 'YouTube analysis model is not configured.' })
   }
   const normalized = normalizeAIRequest({
-    provider: selection.provider,
-    model: selection.model,
+    provider: requestedSelection.provider,
+    model: requestedSelection.model,
     messages: [{ role: 'user', content: prompt }],
     maxTokens: 2000,
     temperature: 0.2,
-  }, { enforceLimits: true, allowInternalModels: true })
+  }, {
+    enforceLimits: true,
+    // The internal Groq model is retained only for legacy callers that did
+    // not send a Settings selection. Browser-supplied choices can never use it.
+    allowInternalModels: !selection?.provider,
+  })
   if (!normalized.ok) {
-    throw createProviderError({ provider: selection.provider, status: normalized.error.status, code: normalized.error.code, message: normalized.error.message })
+    throw createProviderError({ provider: requestedSelection.provider, status: normalized.error.status, code: normalized.error.code, message: normalized.error.message })
   }
 
-  const output = await runProvider({ ...normalized.value, responseFormat: { type: 'json_object' } }, { env, fetchImpl })
+  const output = await runProvider({
+    ...normalized.value,
+    ...(normalized.value.provider === 'groq' ? { responseFormat: { type: 'json_object' } } : {}),
+  }, { env, fetchImpl })
   try {
-    const result = JSON.parse(output.text)
+    const result = parseAnalysisJson(output.text)
     const peakMoment = Number(result?.peakMoment)
     const viralityScore = Number(result?.viralityScore)
     if (!result || Array.isArray(result) || !Number.isFinite(peakMoment) || !Number.isFinite(viralityScore)) {
@@ -105,7 +125,7 @@ Return ONLY valid JSON (no markdown) with exactly these fields:
     }
     return result
   } catch {
-    throw createProviderError({ provider: selection.provider, status: 502, code: 'MALFORMED_RESPONSE', message: 'YouTube analysis returned an invalid result.' })
+    throw createProviderError({ provider: normalized.value.provider, status: 502, code: 'MALFORMED_RESPONSE', message: 'YouTube analysis returned an invalid result.' })
   }
 }
 
@@ -138,8 +158,8 @@ async function getVideoInfo(url) {
   }
 }
 
-function providerForRoute(urlPath) {
-  return urlPath === '/ai-dub' ? VOICE_PROVIDER : urlPath === '/analyze' ? TEXT_PROVIDER : null
+function providerForRoute(urlPath, requestedProvider) {
+  return urlPath === '/ai-dub' ? VOICE_PROVIDER : urlPath === '/analyze' ? requestedProvider || TEXT_PROVIDER : null
 }
 
 async function requireYouTubeLimit(req, res, user, scope, provider, dependencies) {
@@ -160,7 +180,7 @@ async function handler(req, res, injectedDependencies = {}) {
     rateLimiter: injectedDependencies.rateLimiter,
   }
   const urlPath = (req.url || '').split('?')[0].replace(/^\/api\/youtube/, '')
-  const provider = providerForRoute(urlPath)
+  let provider = providerForRoute(urlPath, req.body?.provider)
   const cors = await handleCors(req, res, { env: dependencies.env, provider })
   if (cors.handled) return
 
@@ -193,15 +213,17 @@ async function handler(req, res, injectedDependencies = {}) {
     }
 
     if (urlPath === '/analyze' && req.method === 'POST') {
-      const { transcript, duration = 0, url } = await parseBody(req)
-      if (!await requireYouTubeLimit(req, res, user, 'youtube', TEXT_PROVIDER, dependencies)) return
+      const { transcript, duration = 0, url, provider: requestedProvider, model } = await parseBody(req)
+      const selection = requestedProvider ? { provider: requestedProvider, model } : null
+      provider = selection?.provider || TEXT_PROVIDER
+      if (!await requireYouTubeLimit(req, res, user, 'youtube', provider, dependencies)) return
       let text = transcript
       if (!text && url) {
         const videoId = extractVideoId(url)
         if (videoId) text = await fetchTranscript(videoId)
       }
-      if (!text?.trim()) return sendNormalizedError(res, { provider: TEXT_PROVIDER, status: 400, code: 'REQUEST_INVALID' })
-      const result = await analyzeWithGroq(text, duration, dependencies)
+      if (!text?.trim()) return sendNormalizedError(res, { provider, status: 400, code: 'REQUEST_INVALID' })
+      const result = await analyzeTranscript(text, duration, { ...dependencies, selection })
       return res.status(200).json(result)
     }
 

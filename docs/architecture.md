@@ -79,6 +79,29 @@ holds ElevenLabs voice/model metadata and `api/voice/elevenlabs.js` is the
 server-only adapter. Browser Web Speech remains the fallback when the voice
 endpoint does not return audio.
 
+## Deployment configuration
+
+FounderLab has deliberately independent configuration groups:
+
+- **Required for the browser app and authentication:** `VITE_SUPABASE_URL` and
+  `VITE_SUPABASE_ANON_KEY`. These are Vite browser configuration values and
+  must contain the HTTPS Supabase project origin and anon key.
+- **Required for server-side authentication and production security:**
+  `SUPABASE_URL`, `SUPABASE_ANON_KEY`, an allowed-origin configuration
+  (`FOUNDERLAB_ALLOWED_ORIGINS` or `FOUNDERLAB_PRODUCTION_ORIGIN`, plus preview
+  controls where needed), and `FOUNDERLAB_RATE_LIMITER_URL` in Vercel or
+  production. `FOUNDERLAB_RATE_LIMITER_TOKEN` is required when the configured
+  limiter expects authentication.
+- **Optional providers:** `ANTHROPIC_API_KEY`, `GROQ_API_KEY`,
+  `GEMINI_API_KEY`, and `ELEVENLABS_API_KEY`. Configure only the providers the
+  deployment will use. Authentication and the rest of the workspace never
+  depend on `ANTHROPIC_API_KEY`; Local Ollama needs no server key.
+
+Provider availability is queried only after a user is authenticated. The API
+returns provider booleans, never provider keys, and the browser keeps a saved
+provider only when it remains configured. Otherwise it selects the first
+configured provider from the registry.
+
 ## Extraction rule
 
 When changing a page in `App.jsx`, move stable page-level code into its
