@@ -17,8 +17,7 @@ import { C } from '@/app/theme'
 import { ToastContainer, toast } from '@/app/toast'
 import { renderMsg } from '@/components/content/MessageContent'
 import { Badge, Button, Card, EmptyState, Input, Spinner } from '@/components/ui/Primitives'
-import { MobileBottomNav, MobileTopBar, Sidebar } from '@/features/navigation/Navigation'
-import { getMobileNavigationMode } from '@/features/navigation/navigationMode'
+import { Sidebar } from '@/features/navigation/Navigation'
 import { AuthScreen, OnboardingModal, SetupScreen } from '@/features/auth/AuthScreens'
 import { Dashboard } from '@/features/dashboard/Dashboard'
 import { FeedbackModal } from '@/features/feedback/FeedbackModal'
@@ -3309,7 +3308,6 @@ function AppInner() {
   const [profile, setProfile] = useState(null)
   const [collapsed, setCollapsed] = useState(false)
   const [showFb, setShowFb]   = useState(false)
-  const [mobile, setMobile]   = useState(() => getMobileNavigationMode())
 
   useEffect(() => {
     async function boot() {
@@ -3324,13 +3322,11 @@ function AppInner() {
       } else { setState('auth') }
     }
     boot()
-    const onResize=()=>setMobile(getMobileNavigationMode())
-    window.addEventListener('resize',onResize)
     // Cross-module handoff bus: any page can call flNavigate(page, payload) to
     // switch tabs and hand data to the destination page (e.g. Code AI → Builder).
     const onNav = (e) => { if (e.detail?.page) setPage(e.detail.page) }
     window.addEventListener('fl:navigate', onNav)
-    return ()=>{ window.removeEventListener('resize',onResize); window.removeEventListener('fl:navigate', onNav) }
+    return ()=>{ window.removeEventListener('fl:navigate', onNav) }
   }, [])
 
   async function afterAuth() {
@@ -3383,20 +3379,12 @@ function AppInner() {
       {state==='app'&&(
         <>
           {showFb&&<FeedbackModal onClose={()=>setShowFb(false)} />}
-          {mobile ? (
-            <div style={{ minHeight:'100vh', background:C.bg }}>
-              <MobileTopBar onFeedback={()=>setShowFb(true)} />
-              <div style={{ paddingBottom:80 }}>{renderPage()}</div>
-              <MobileBottomNav page={page} setPage={setPage} />
+          <div style={{ display:'flex', minHeight:'100vh', background:C.bg, overflow:'hidden' }}>
+            <Sidebar page={page} setPage={setPage} user={user} profile={profile} collapsed={collapsed} setCollapsed={setCollapsed} onFeedback={()=>setShowFb(true)} />
+            <div style={{ flex:1, minWidth:0, overflow:'hidden', display:'flex', flexDirection:'column' }}>
+              {renderPage()}
             </div>
-          ) : (
-            <div style={{ display:'flex', height:'100vh', background:C.bg, overflow:'hidden' }}>
-              <Sidebar page={page} setPage={setPage} user={user} profile={profile} collapsed={collapsed} setCollapsed={setCollapsed} onFeedback={()=>setShowFb(true)} />
-              <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
-                {renderPage()}
-              </div>
-            </div>
-          )}
+          </div>
         </>
       )}
     </>
