@@ -7,8 +7,8 @@ import { createBuilderGenerationService, BuilderGenerationError } from '../src/f
 import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from '../src/features/builder/builderFileOperations.js'
 import { createBuilderProject, normalizeBuilderProject } from '../src/features/builder/builderProjectSchema.js'
 import { createBuilderProjectRepository } from '../src/features/builder/builderProjectRepository.js'
-import { buildBuilderPatchPrompt } from '../src/features/builder/builderPrompts.js'
-import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, inlineLocalSvgReferences } from '../src/features/builder/builderPreview.js'
+import { buildBuilderFilesPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt } from '../src/features/builder/builderPrompts.js'
+import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, getLastWorkingPreviewFiles, inlineLocalSvgReferences } from '../src/features/builder/builderPreview.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
 import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
@@ -88,6 +88,20 @@ test('scoped Builder edits include only the selected file content so valid large
   assert.ok(prompt.length < 10000)
 })
 
+test('Builder prompts set a concrete premium landing-page quality bar without expanding the supported runtime', () => {
+  const planPrompt = buildBuilderPlanPrompt('Create a simple AI-powered meeting notes website')
+  const filesPrompt = buildBuilderFilesPrompt({
+    brief: 'Create a simple AI-powered meeting notes website',
+    plan: { name: 'Minutes', summary: 'AI meeting notes', pages: [{ path: 'index.html' }], brand: {} },
+    manifest: { entryFile: 'index.html', files: [{ path: 'index.html' }, { path: 'styles.css' }, { path: 'app.js' }] },
+  })
+  assert.match(planPrompt, /outcome-led hero/i)
+  assert.match(planPrompt, /trust\/reliability/i)
+  assert.match(filesPrompt, /complete, visually ordered page/i)
+  assert.match(filesPrompt, /Avoid lorem ipsum/i)
+  assert.match(filesPrompt, /never use package imports, web fonts, CDNs, external images/i)
+})
+
 test('Builder preview uses an opaque minimal sandbox and CSP without external network or generated parent access', () => {
   const preview = buildBuilderPreviewDocument(validFiles)
   assert.equal(preview.ok, true)
@@ -106,6 +120,12 @@ test('Builder preview uses an opaque minimal sandbox and CSP without external ne
   assert.equal(rejected.ok, false)
   assert.equal(rejected.validation.issues.some((item) => item.code === 'EXTERNAL_NETWORK'), true)
 
+  const readableUrl = validateBuilderFiles([{ path: 'index.html', content: '<main><p>See https://example.test in your documentation.</p><svg xmlns="http://www.w3.org/2000/svg"></svg></main>' }])
+  assert.equal(readableUrl.valid, true)
+  const rejectedNavigation = validateBuilderFiles([{ path: 'index.html', content: '<main><a href="https://example.test">External</a></main>' }])
+  assert.equal(rejectedNavigation.valid, false)
+  assert.equal(rejectedNavigation.issues.some((item) => item.code === 'EXTERNAL_NETWORK'), true)
+
   const svgFiles = [
     { path: 'index.html', content: '<main><img src="assets/mark.svg" alt="Mark"></main>' },
     { path: 'assets/mark.svg', content: '<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>' },
@@ -115,6 +135,27 @@ test('Builder preview uses an opaque minimal sandbox and CSP without external ne
   assert.match(svgPreview.srcDoc, /data:image\/svg\+xml/)
   assert.doesNotMatch(svgPreview.srcDoc, /src="assets\/mark\.svg"/)
   assert.match(inlineLocalSvgReferences('a{background:url(assets/mark.svg)}', svgFiles), /data:image\/svg\+xml/)
+})
+
+test('Builder retains a last known good preview without treating a failed current version as ready', () => {
+  const project = {
+    preview: { status: 'error', lastSuccessfulVersionId: 'version-good' },
+    versions: [
+      { id: 'version-good', files: validFiles },
+      { id: 'version-bad', files: [{ path: 'index.html', content: '<iframe src="nope"></iframe>' }] },
+    ],
+  }
+  assert.deepEqual(getLastWorkingPreviewFiles(project), validFiles)
+  assert.equal(getLastWorkingPreviewFiles({ preview: { lastSuccessfulVersionId: 'missing' }, versions: [] }), null)
+})
+
+test('Builder workspace makes the rendered website primary while keeping code available on demand', () => {
+  const workspaceSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/builder/BuilderWorkspace.jsx'), 'utf8')
+  assert.match(workspaceSource, /Website preview/)
+  assert.match(workspaceSource, /View code/)
+  assert.match(workspaceSource, /gridTemplateColumns: showCode \?/)
+  assert.match(workspaceSource, /Showing your last working preview/)
+  assert.doesNotMatch(workspaceSource, /function ProjectList/)
 })
 
 test('Builder versions are immutable, bounded by a current pointer, and restore into a recoverable new version', () => {

@@ -52,7 +52,7 @@ src/features/builder/
   builderValidation.js          paths, imports, runtime/safety validation
   builderFileOperations.js      safe file creation, rename/reference rewrites, tree data
   builderVersions.js            immutable versions, restore, undo
-  builderPrompts.js             JSON-only plan/manifest/files/patch prompts
+  builderPrompts.js             JSON-only plan/manifest/files/patch prompts and product-quality guidance
   builderGeneration.js          staged provider orchestration and cancellation
   builderPreview.js             CSP-wrapped static preview document
   BuilderWorkspace.jsx          route composition plus focused start, file,
@@ -98,6 +98,20 @@ retains the last successful version.
    send its narrow ready signal after `load` before Builder records the new
    version as the last successful preview.
 
+### First-generation quality standard
+
+The plan and file prompts share a product-quality contract. For an ordinary
+landing-page brief, Builder produces an intentional narrative rather than a
+single hero or a collection of generic boxes: navigation, an outcome-led hero,
+proof or reassurance, useful features, an understandable product/workflow
+moment, an appropriate trust section, final CTA, and footer. The generated CSS
+must establish its own responsive type scale, layout, focus states, controls,
+and restrained visual system. It must use concise real copy rather than lorem
+ipsum, invented customers, fake metrics, or placeholder dashboards.
+
+This is guidance, not a new runtime. Generation remains bounded to five local
+static files and retains the same structured JSON and validation gates.
+
 The controller uses a request-scoped `AbortController`, a generation id, and a
 single in-flight guard. Cancellation stops outstanding browser requests when
 possible and always prevents stale completions from committing state. A
@@ -119,6 +133,14 @@ New Builder projects use an iframe with `sandbox="allow-scripts"` and
 an opaque origin, so generated code cannot access FounderLab's tokens, storage,
 or parent DOM. A narrow message bridge reports only preview lifecycle and safe
 error codes; it never accepts commands or data from the preview.
+
+Preview state is intentionally version-aware. If an edited version fails
+validation or reports an isolated runtime error, Builder retains the last
+version that sent a ready signal in the canvas where available. The user sees a
+clear scoped message with retry and deliberate AI-repair actions; a fallback
+ready signal can never mark the failed current version as ready. The visual
+preview is the default primary workspace surface. Files, versions, and raw code
+remain available for advanced editing without competing with the first result.
 
 ## Deferred, intentionally
 

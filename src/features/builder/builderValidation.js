@@ -7,12 +7,17 @@ export const BUILDER_MAX_GENERATION_FILE_COUNT = 5
 
 const ALLOWED_PATH = /^(?:index\.html|styles\.css|app\.js|pages\/[a-z0-9][a-z0-9._-]*\.html|assets\/[a-z0-9][a-z0-9._/-]*)$/i
 const FORBIDDEN_CONTENT = [
-  { code: 'EXTERNAL_NETWORK', expression: /\bhttps?:\/\//i, message: 'External network resources are not supported in the isolated preview.' },
+  // Do not reject plain copy or the standard SVG namespace merely because it contains an https URL.
+  // Only URLs that would actually load or navigate away from the isolated preview are unsafe here.
+  { code: 'EXTERNAL_NETWORK', expression: /\b(?:src|href)\s*=\s*(['"])(?:https?:)?\/\//i, message: 'External network resources are not supported in the isolated preview.' },
+  { code: 'EXTERNAL_NETWORK', expression: /\burl\(\s*(['"]?)(?:https?:)?\/\//i, message: 'External network resources are not supported in the isolated preview.' },
+  { code: 'EXTERNAL_NETWORK', expression: /\b(?:fetch|WebSocket|EventSource)\s*\(/i, message: 'External network access is not supported in the isolated preview.' },
+  { code: 'EXTERNAL_NETWORK', expression: /\bnew\s+XMLHttpRequest\s*\(/i, message: 'External network access is not supported in the isolated preview.' },
   { code: 'UNSAFE_EVAL', expression: /\b(?:eval|Function)\s*\(/, message: 'Dynamic code execution is not allowed.' },
   { code: 'PARENT_ACCESS', expression: /\b(?:window\s*\.\s*)?(?:parent|top|opener)\s*(?:\.|\[)/i, message: 'Generated projects cannot access a parent window.' },
   { code: 'EMBEDDED_DOCUMENT', expression: /<\s*(?:iframe|object|embed|base)\b/i, message: 'Embedded documents are not supported.' },
   { code: 'INLINE_RUNTIME_TAG', expression: /<\s*(?:script|link|style)\b/i, message: 'Use the project styles.css and app.js files instead of inline runtime tags.' },
-  { code: 'REMOTE_RESOURCE', expression: /(?:<\s*(?:script|link|img)[^>]+(?:src|href)\s*=|url\s*\()\s*['"]?\s*(?:\/\/|data:text\/html)/i, message: 'Only local project resources are supported.' },
+  { code: 'REMOTE_RESOURCE', expression: /(?:<\s*(?:script|link|img)[^>]+(?:src|href)\s*=|url\s*\()\s*['"]?\s*data:text\/html/i, message: 'Only local project resources are supported.' },
 ]
 const HTML_LOCAL_REFERENCE = /\b(?:href|src)\s*=\s*(['"])((?:pages|assets)\/[a-z0-9][a-z0-9._/-]*)\1/gi
 const CSS_LOCAL_REFERENCE = /\burl\(\s*(['"]?)((?:assets)\/[a-z0-9][a-z0-9._/-]*)\1\s*\)/gi

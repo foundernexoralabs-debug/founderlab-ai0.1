@@ -52,6 +52,12 @@ export function inlineLocalSvgReferences(source, files) {
     })
 }
 
+export function getLastWorkingPreviewFiles(project) {
+  const versionId = project?.preview?.lastSuccessfulVersionId
+  const version = (project?.versions || []).find((item) => item.id === versionId)
+  return Array.isArray(version?.files) && version.files.length ? version.files : null
+}
+
 function safePreviewBridge() {
   return `
     (function () {

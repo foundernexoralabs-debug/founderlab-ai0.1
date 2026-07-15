@@ -7,7 +7,7 @@ import { builderGenerationService } from './builderGeneration.js'
 import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from './builderFileOperations.js'
 import { createBuilderProject, BUILDER_ENTRY_FILE } from './builderProjectSchema.js'
 import { builderProjectRepository } from './builderProjectRepository.js'
-import { buildBuilderPreviewDocument, BUILDER_PREVIEW_SANDBOX, isSafeBuilderPreviewMessage } from './builderPreview.js'
+import { buildBuilderPreviewDocument, BUILDER_PREVIEW_SANDBOX, getLastWorkingPreviewFiles, isSafeBuilderPreviewMessage } from './builderPreview.js'
 import { BUILDER_MAX_FILE_BYTES, validateBuilderFiles } from './builderValidation.js'
 import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from './builderVersions.js'
 
@@ -127,6 +127,11 @@ function BuilderPlan({ plan, onChange, onBuild, onBack, onCancel, busy, activity
     <h1 style={{ fontSize: 34, letterSpacing: '-.035em', margin: '16px 0 8px' }}>{plan.name || 'Your project'}</h1>
     <p style={{ color: C.t2, margin: 0 }}>Review the direction before FounderLab generates the files. You can edit the key decisions without completing a long form.</p>
     <div style={{ display: 'grid', gap: 14, marginTop: 28 }}>
+      <section aria-label="Design direction" style={{ background: `linear-gradient(135deg, ${C.accentM}, ${C.surf})`, border: `1px solid ${C.border}`, padding: 18, borderRadius: 12 }}>
+        <strong style={{ fontSize: 13 }}>Design direction</strong>
+        <p style={{ color: C.t2, fontSize: 13, lineHeight: 1.55, margin: '8px 0 12px' }}>{plan.brand?.visualDirection || plan.designSystem?.layout || 'A clear, considered responsive website.'}</p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{[plan.designSystem?.typography, plan.designSystem?.surfaces, plan.designSystem?.accent, plan.brand?.tone].filter(Boolean).slice(0, 4).map((item) => <span key={item} style={{ color: C.t2, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 999, padding: '4px 8px', fontSize: 11 }}>{item}</span>)}{(plan.brand?.colors || []).slice(0, 4).map((color) => <span key={color} title={color} aria-label={`Brand color ${color}`} style={{ width: 18, height: 18, borderRadius: 99, background: color, border: `1px solid ${C.border}` }} />)}</div>
+      </section>
       <div><label style={{ display: 'block', marginBottom: 6, color: C.t2, fontSize: 12, fontWeight: 700 }}>Project name</label><Input value={plan.name || ''} onChange={(event) => update('name', event.target.value)} /></div>
       <div><label style={{ display: 'block', marginBottom: 6, color: C.t2, fontSize: 12, fontWeight: 700 }}>Summary</label><Input rows={3} value={plan.summary || ''} onChange={(event) => update('summary', event.target.value)} /></div>
       <div style={{ background: C.surf, border: `1px solid ${C.border}`, padding: 16, borderRadius: 10, display: 'grid', gap: 12 }}>
@@ -139,14 +144,6 @@ function BuilderPlan({ plan, onChange, onBuild, onBack, onCancel, busy, activity
     <div style={{ display: 'flex', gap: 8, marginTop: 24, flexWrap: 'wrap' }}><Button onClick={onBuild} disabled={busy}>{busy ? <Spinner size={15} color="#fff" /> : 'Approve and build'}</Button><Button onClick={onBack} disabled={busy} variant="secondary">Back to brief</Button>{busy && <Button onClick={onCancel} variant="ghost">Cancel</Button>}</div>
     {busy && <p role="status" style={{ color: C.accent, fontSize: 13, margin: '12px 0 0' }}>{activity.at(-1)?.message || 'Preparing your project…'}</p>}
   </div>
-}
-
-function ProjectList({ projects, selectedId, onSelect, onCreate, query, onQuery }) {
-  return <aside className="builder-project-list" aria-label="Builder projects" style={{ width: 230, borderRight: `1px solid ${C.border}`, padding: 12, overflow: 'auto', flexShrink: 0 }}>
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}><strong style={{ fontSize: 13 }}>Projects</strong><Button size="sm" onClick={onCreate}>New</Button></div>
-    <input aria-label="Search Builder projects" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search projects" style={{ margin: '12px 0', width: '100%', background: C.bg, border: `1px solid ${C.border}`, borderRadius: 7, color: C.t1, padding: '7px 8px', font: 'inherit', fontSize: 12 }} />
-    <div style={{ display: 'grid', gap: 5 }}>{projects.map((project) => <button type="button" key={project.id} onClick={() => onSelect(project)} style={{ textAlign: 'left', border: `1px solid ${selectedId === project.id ? C.borderFocus : 'transparent'}`, background: selectedId === project.id ? C.accentM : 'transparent', borderRadius: 8, color: selectedId === project.id ? C.t1 : C.t2, padding: 9, cursor: 'pointer', font: 'inherit' }}><span style={{ display: 'block', fontSize: 12, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{project.name}</span><span style={{ display: 'block', color: C.t3, fontSize: 10, marginTop: 4 }}>{compactDate(project.updatedAt)}</span></button>)}</div>
-  </aside>
 }
 
 function fileIcon(path) {
@@ -199,7 +196,7 @@ function PreviewPanel({ project, previewPath, onNavigate, onReady, onRuntimeErro
     return () => window.removeEventListener('message', listen)
   }, [onNavigate, onReady, onRuntimeError])
   useEffect(() => {
-    if (!preview.ok) onRuntimeError()
+    if (!preview.ok) onRuntimeError(preview.validation.issues[0]?.message || 'This version could not be rendered safely.')
   }, [onRuntimeError, preview.ok])
   if (!preview.ok) return <div style={{ padding: 20 }}><EmptyState icon="⚠" title="Preview needs attention" description={preview.validation.issues[0]?.message || 'Fix the validation issues before previewing this project.'} /></div>
   return <iframe key={renderKey} ref={frame} srcDoc={preview.srcDoc} title="Builder live preview" sandbox={BUILDER_PREVIEW_SANDBOX} referrerPolicy="no-referrer" style={{ display: 'block', width: '100%', height: '100%', border: 'none', background: '#fff' }} />
@@ -210,12 +207,13 @@ function ActivityPanel({ project }) {
   return <section style={{ borderTop: `1px solid ${C.border}`, padding: 12, maxHeight: 145, overflow: 'auto' }}><strong style={{ fontSize: 11, color: C.t3, letterSpacing: '.07em', textTransform: 'uppercase' }}>Activity</strong>{activity.length ? <div style={{ display: 'grid', gap: 5, marginTop: 8 }}>{activity.map((item) => <div key={item.id || `${item.at}-${item.message}`} style={{ fontSize: 12, color: C.t2 }}><span style={{ color: C.accent, marginRight: 7 }}>{item.stage}</span>{item.message}</div>)}</div> : <p style={{ color: C.t3, fontSize: 12 }}>No project activity yet.</p>}</section>
 }
 
-function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onArchive, onDuplicate, busy, onCancel }) {
+function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProject, onProjectChange, onSave, onDelete, onArchive, onDuplicate, busy, onCancel }) {
   const [activePath, setActivePath] = useState(project.settings?.previewPath || BUILDER_ENTRY_FILE)
   const [previewPath, setPreviewPath] = useState(project.settings?.previewPath || BUILDER_ENTRY_FILE)
   const [draft, setDraft] = useState(() => project.files.find((file) => file.path === activePath)?.content || '')
   const [changeRequest, setChangeRequest] = useState('')
   const [editing, setEditing] = useState(false)
+  const [showCode, setShowCode] = useState(false)
   const [mobileTab, setMobileTab] = useState('preview')
   const [previewKey, setPreviewKey] = useState(0)
   const previewHost = useRef(null)
@@ -312,16 +310,16 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
       toast('Copy is not available in this browser. Select the file content to copy it.', 'error')
     }
   }
-  const applyChange = async () => {
-    if (!changeRequest.trim() || busy) return
-    if (changeRequest.length > 60000) return toast('Keep a scoped edit request under 60,000 characters so FounderLab can validate it safely.', 'error')
+  const applyChange = async ({ request = changeRequest, selectedPath = activePath, successMessage = 'Change applied in a new recoverable version.' } = {}) => {
+    if (!request.trim() || busy) return
+    if (request.length > 60000) return toast('Keep a scoped edit request under 60,000 characters so FounderLab can validate it safely.', 'error')
     setEditing(true)
     try {
-      const updated = await builderGenerationService.applyEdit({ project, request: changeRequest.trim(), selectedPath: activePath, onActivity: () => {} })
+      const updated = await builderGenerationService.applyEdit({ project, request: request.trim(), selectedPath, onActivity: () => {} })
       onProjectChange(updated)
       await onSave(updated)
       setChangeRequest('')
-      toast('Change applied in a new recoverable version.', 'success')
+      toast(successMessage, 'success')
     } catch (error) {
       const failure = safeProjectError(error)
       toast(`${failure.message} Reference: ${failure.reference}`, 'error')
@@ -333,6 +331,9 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
     if (project.files.some((file) => file.path === path && file.path.endsWith('.html'))) setPreviewPath(path)
   }, [project.files])
   const onPreviewReady = useCallback(() => {
+    // A previous version can stay visible after a failed edit. Never mark the failed
+    // current version ready merely because that fallback iframe loaded correctly.
+    if (project.preview?.status === 'error') return
     if (project.preview?.status === 'ready' && project.preview?.lastSuccessfulVersionId === project.currentVersionId) return
     const now = new Date().toISOString()
     const updated = {
@@ -358,9 +359,9 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
     void onSave(updated)
     toast('Isolated preview is ready.', 'success')
   }, [onProjectChange, onSave, project])
-  const onRuntimeError = useCallback(() => {
+  const onRuntimeError = useCallback((message = 'The isolated preview reported a runtime error.') => {
     if (project.preview?.status === 'error') return
-    const updated = { ...project, preview: { ...project.preview, status: 'error', lastError: 'The isolated preview reported a runtime error.' } }
+    const updated = { ...project, preview: { ...project.preview, status: 'error', lastError: message } }
     onProjectChange(updated)
     void onSave(updated)
   }, [onProjectChange, onSave, project])
@@ -374,39 +375,67 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
   }
   const previewDevice = project.settings?.device || 'desktop'
   const previewWidth = previewDevice === 'mobile' ? 390 : previewDevice === 'tablet' ? 768 : '100%'
+  const selectableProjects = projects.some((item) => item.id === project.id) ? projects : [project, ...projects]
+  const lastWorkingFiles = getLastWorkingPreviewFiles(project)
+  const showingFallback = project.preview?.status === 'error' && Boolean(lastWorkingFiles)
+  const previewProject = showingFallback ? { ...project, files: lastWorkingFiles } : project
+  const previewPages = previewProject.files.filter((file) => file.path.endsWith('.html'))
+  const displayedPreviewPath = previewPages.some((file) => file.path === previewPath)
+    ? previewPath
+    : previewProject.entryFile || BUILDER_ENTRY_FILE
+  const retryPreview = () => {
+    const updated = { ...project, preview: { ...project.preview, status: 'building', lastError: null } }
+    onProjectChange(updated)
+    void onSave(updated)
+    setPreviewKey((value) => value + 1)
+  }
+  const repairPreview = () => {
+    const repairPath = project.files.some((file) => file.path === 'styles.css') ? 'styles.css' : BUILDER_ENTRY_FILE
+    void applyChange({
+      request: 'Repair the current Builder preview. Keep the existing product message and visual direction, remove only the issue preventing a safe render, and preserve responsive, accessible behavior without external resources.',
+      selectedPath: repairPath,
+      successMessage: 'Preview repair applied in a new recoverable version.',
+    })
+  }
   const previewLabel = project.preview?.status === 'building'
     ? 'Building preview'
     : project.preview?.status === 'error'
-      ? 'Preview error'
+      ? showingFallback ? 'Showing last working version' : 'Preview needs attention'
       : 'Preview ready'
 
   return <div className="builder-workspace" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-    <style>{`@media (max-width: 760px){.builder-project-list,.builder-file-panel,.builder-history-panel{display:none!important}.builder-file-panel.builder-file-active,.builder-history-panel.builder-history-active{display:block!important;width:100%!important;max-width:none!important;border-left:none!important;border-right:none!important}.builder-mobile-tabs{display:flex!important}.builder-main-grid{grid-template-columns:1fr!important}.builder-main-grid.builder-main-inactive{display:none!important}.builder-editor-panel{display:var(--builder-editor-display,none)}.builder-preview-panel{display:var(--builder-preview-display,none)}}@media (min-width: 761px){.builder-mobile-tabs{display:none!important}}`}</style>
+    <style>{`@media (max-width: 760px){.builder-file-panel,.builder-history-panel{display:none!important}.builder-file-panel.builder-file-active,.builder-history-panel.builder-history-active{display:block!important;width:100%!important;max-width:none!important;border-left:none!important;border-right:none!important}.builder-mobile-tabs{display:flex!important}.builder-main-grid{grid-template-columns:1fr!important}.builder-main-grid.builder-main-inactive{display:none!important}.builder-editor-panel{display:var(--builder-editor-display,none)!important}.builder-preview-panel{display:var(--builder-preview-display,none)!important}.builder-project-switcher{width:100%}}@media (min-width: 761px){.builder-mobile-tabs{display:none!important}}`}</style>
     <header style={{ padding: '13px 18px', borderBottom: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-      <input aria-label="Project name" value={project.name} onChange={(event) => onProjectChange({ ...project, name: event.target.value, updatedAt: new Date().toISOString() })} onBlur={(event) => { const updated = { ...project, name: event.target.value, updatedAt: new Date().toISOString() }; onProjectChange(updated); onSave(updated) }} style={{ background: 'transparent', border: 'none', color: C.t1, fontSize: 17, fontWeight: 700, minWidth: 190, outline: 'none' }} />
+      <div className="builder-project-switcher" style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <select aria-label="Open Builder project" value={project.id} onChange={(event) => onSelectProject(selectableProjects.find((item) => item.id === event.target.value) || project)} style={{ maxWidth: 180, color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 7, font: '12px inherit', padding: '6px 8px' }}>{selectableProjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <Button size="sm" variant="secondary" onClick={onCreateProject}>New</Button>
+      </div>
+      <input aria-label="Project name" value={project.name} onChange={(event) => onProjectChange({ ...project, name: event.target.value, updatedAt: new Date().toISOString() })} onBlur={(event) => { const updated = { ...project, name: event.target.value, updatedAt: new Date().toISOString() }; onProjectChange(updated); onSave(updated) }} style={{ background: 'transparent', border: 'none', color: C.t1, fontSize: 17, fontWeight: 700, minWidth: 150, flex: '1 1 180px', outline: 'none' }} />
       <Badge color={status.color}>{status.label}</Badge>
       <span style={{ color: C.t3, fontSize: 12 }}>{project.validation?.valid ? 'Saved project checks passed' : 'Validation needs attention'}</span>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         {(busy || editing) && <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>}
+        <Button variant={showCode ? 'secondary' : 'ghost'} size="sm" onClick={() => setShowCode((visible) => !visible)} aria-pressed={showCode}>{showCode ? 'Hide code' : 'View code'}</Button>
         <Button variant="secondary" size="sm" onClick={undoLatest} disabled={!getPreviousBuilderVersion(project)}>Undo</Button>
         <Button variant="secondary" size="sm" onClick={onDuplicate}>Duplicate</Button>
         <Button variant="secondary" size="sm" onClick={() => onArchive({ ...project, status: project.status === 'archived' ? 'ready' : 'archived' })}>{project.status === 'archived' ? 'Restore' : 'Archive'}</Button>
         <Button variant="ghost" size="sm" onClick={() => onDelete(project)}>Delete</Button>
       </div>
     </header>
-    <div className="builder-mobile-tabs" style={{ gap: 6, padding: 8, borderBottom: `1px solid ${C.border}` }}>{['files', 'editor', 'preview', 'history'].map((tab) => <Button key={tab} size="sm" variant={mobileTab === tab ? 'secondary' : 'ghost'} onClick={() => setMobileTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</Button>)}</div>
+    <div className="builder-mobile-tabs" style={{ gap: 6, padding: 8, borderBottom: `1px solid ${C.border}` }}>{['preview', 'files', 'code', 'history'].map((tab) => <Button key={tab} size="sm" variant={mobileTab === tab ? 'secondary' : 'ghost'} onClick={() => setMobileTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</Button>)}</div>
     <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
       <FileExplorer project={project} activePath={activePath} dirtyPath={hasUnsavedChanges ? activePath : null} onSelect={selectFile} onAdd={addFile} onDelete={deleteFile} onRename={renameFile} activeOnMobile={mobileTab === 'files'} />
-      <div className={`builder-main-grid${mobileTab === 'files' || mobileTab === 'history' ? ' builder-main-inactive' : ''}`} style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: 'minmax(270px, .9fr) minmax(340px, 1.1fr)', minHeight: 0 }}>
-        <section className="builder-editor-panel" style={{ '--builder-editor-display': mobileTab === 'editor' ? 'flex' : 'none', borderRight: `1px solid ${C.border}`, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      <div className={`builder-main-grid${mobileTab === 'files' || mobileTab === 'history' ? ' builder-main-inactive' : ''}`} style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: showCode ? 'minmax(360px, 1.65fr) minmax(280px, .8fr)' : 'minmax(0, 1fr)', minHeight: 0 }}>
+        <section className="builder-editor-panel" style={{ '--builder-editor-display': mobileTab === 'code' ? 'flex' : 'none', borderLeft: `1px solid ${C.border}`, minWidth: 0, display: showCode ? 'flex' : 'none', flexDirection: 'column', order: 2 }}>
           <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ color: C.t2, font: '12px ui-monospace, monospace' }}>{activeFile?.path}{hasUnsavedChanges && <span aria-label="Unsaved changes" style={{ color: C.accent }}> · unsaved</span>}</span><span style={{ display: 'flex', gap: 5 }}><Button size="sm" variant="ghost" onClick={copyActiveFile}>Copy</Button><Button size="sm" variant="secondary" onClick={saveFile} disabled={!activeFile || !hasUnsavedChanges || isLargeFile}>Save file</Button></span></div>
           {isLargeFile && <p role="status" style={{ margin: 0, padding: '8px 12px', color: C.yellow, fontSize: 12, borderBottom: `1px solid ${C.border}` }}>This file exceeds the safe editor size limit and is read-only.</p>}
           <textarea aria-label={`Edit ${activeFile?.path || 'project file'}`} value={draft} onChange={(event) => setDraft(event.target.value)} readOnly={isLargeFile} spellCheck={false} style={{ flex: 1, width: '100%', minHeight: 180, border: 'none', outline: 'none', resize: 'none', padding: 14, background: '#06060b', color: '#e8e8f8', font: '12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace' }} />
-          <div style={{ borderTop: `1px solid ${C.border}`, padding: 10 }}><label style={{ display: 'block', color: C.t3, fontSize: 11, fontWeight: 700, marginBottom: 6 }}>REQUEST A SCOPED CHANGE</label><div style={{ display: 'flex', gap: 7 }}><Input value={changeRequest} onChange={(event) => setChangeRequest(event.target.value)} placeholder="Make this heading more direct…" onKeyDown={(event) => event.key === 'Enter' && applyChange()} /><Button size="sm" onClick={applyChange} disabled={busy || editing || !changeRequest.trim()}>{editing ? <Spinner size={13} color="#fff" /> : 'Apply'}</Button></div></div>
         </section>
-        <section ref={previewHost} className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', background: C.bg }}>
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}><span style={{ color: C.t2, fontSize: 12 }}>Live preview · {previewPath}</span><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 5, alignItems: 'center' }}><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={previewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{project.files.filter((file) => file.path.endsWith('.html')).map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={() => setPreviewKey((value) => value + 1)} aria-label="Refresh preview">↻</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
-          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: previewDevice === 'desktop' ? 0 : 12, display: 'grid', placeItems: 'start center' }}><div style={{ width: previewWidth, maxWidth: '100%', minHeight: '100%', background: '#fff', boxShadow: previewDevice === 'desktop' ? 'none' : '0 8px 28px rgba(0,0,0,.24)' }}>{<PreviewPanel project={project} previewPath={previewPath} onNavigate={onNavigate} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${project.currentVersionId || 'draft'}-${previewPath}-${previewKey}`} />}</div></div>
+        <section ref={previewHost} className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', background: C.bg, order: 1 }}>
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 13 }}>Website preview</strong><span style={{ color: C.t3, fontSize: 12 }}> · {displayedPreviewPath}</span></div><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 5, alignItems: 'center' }}><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={displayedPreviewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{previewPages.map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={retryPreview} aria-label="Refresh preview">↻</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
+          {project.preview?.status === 'error' && <div role="alert" style={{ margin: '10px 12px 0', padding: 11, border: `1px solid ${C.red}55`, borderRadius: 9, background: '#261116', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 12 }}>{showingFallback ? 'Showing your last working preview' : 'This version needs attention'}</strong><span style={{ display: 'block', fontSize: 12, marginTop: 3 }}>{project.preview?.lastError || 'The current version could not render safely.'}</span></div><span style={{ display: 'flex', gap: 6 }}><Button size="sm" variant="secondary" onClick={retryPreview}>Retry</Button><Button size="sm" onClick={repairPreview} disabled={busy || editing}>{editing ? <Spinner size={13} color="#fff" /> : 'Repair with AI'}</Button></span></div>}
+          <div style={{ padding: '10px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 8, alignItems: 'center', background: C.surf }}><Input aria-label="Refine the website" value={changeRequest} onChange={(event) => setChangeRequest(event.target.value)} placeholder="Refine the website: make the hero more confident, add a product workflow…" onKeyDown={(event) => event.key === 'Enter' && applyChange()} /><Button size="sm" onClick={() => applyChange()} disabled={busy || editing || !changeRequest.trim()}>{editing ? <Spinner size={13} color="#fff" /> : 'Refine'}</Button></div>
+          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: previewDevice === 'desktop' ? 0 : 12, display: 'grid', placeItems: 'start center' }}><div style={{ width: previewWidth, maxWidth: '100%', minHeight: '100%', background: '#fff', boxShadow: previewDevice === 'desktop' ? 'none' : '0 8px 28px rgba(0,0,0,.24)' }}><PreviewPanel project={previewProject} previewPath={displayedPreviewPath} onNavigate={onNavigate} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${showingFallback ? project.preview?.lastSuccessfulVersionId : project.currentVersionId || 'draft'}-${displayedPreviewPath}-${previewKey}`} /></div></div>
         </section>
       </div>
       <aside className={`builder-history-panel${mobileTab === 'history' ? ' builder-history-active' : ''}`} style={{ width: 205, borderLeft: `1px solid ${C.border}`, overflow: 'auto', flexShrink: 0 }}>
@@ -425,7 +454,6 @@ export function BuilderWorkspace({ user }) {
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
   const [activity, setActivity] = useState([])
-  const [search, setSearch] = useState('')
   const controller = useRef(null)
   const inFlight = useRef(false)
 
@@ -492,10 +520,9 @@ export function BuilderWorkspace({ user }) {
     await reload()
     toast(result.saved ? 'Project duplicated into a new versioned workspace.' : 'Duplicate is retained locally but could not be saved to your workspace.', result.saved ? 'success' : 'error')
   }
-  const filtered = projects.filter((project) => project.name.toLowerCase().includes(search.toLowerCase()))
   const visibleProject = activeProject && { ...activeProject, generationHistory: [...(activeProject.generationHistory || []), ...activity] }
 
-  if (visibleProject) return <div style={{ height: '100%', minHeight: 0, display: 'flex' }}><ProjectList projects={filtered} selectedId={visibleProject.id} onSelect={setActiveProject} onCreate={createNew} query={search} onQuery={setSearch} /><div style={{ flex: 1, minWidth: 0 }}><BuilderWorkspaceView project={visibleProject} onProjectChange={setActiveProject} onSave={persist} onDelete={remove} onArchive={archive} onDuplicate={duplicate} busy={busy} onCancel={cancel} /></div></div>
+  if (visibleProject) return <div style={{ height: '100%', minHeight: 0 }}><BuilderWorkspaceView project={visibleProject} projects={projects} onSelectProject={setActiveProject} onCreateProject={createNew} onProjectChange={setActiveProject} onSave={persist} onDelete={remove} onArchive={archive} onDuplicate={duplicate} busy={busy} onCancel={cancel} /></div>
   if (plan) return <BuilderPlan plan={plan} onChange={setPlan} onBuild={buildProject} onBack={() => setPlan(null)} onCancel={cancel} busy={busy} activity={activity} />
   return <BuilderStart brief={brief} onBriefChange={setBrief} onPlan={planProject} onBlank={blank} busy={busy} projects={projects} />
 }
