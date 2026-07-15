@@ -8,7 +8,8 @@ const ERROR_MESSAGES = {
   CORS_ORIGIN_DENIED: 'cannot be called from this website origin.',
   INVALID_MODEL: 'cannot use the selected model. Choose another model in Settings.',
   AUTHENTICATION_FAILED: 'could not authenticate with its server configuration. Check the server key and try again.',
-  RATE_LIMITED: 'is temporarily busy. Please try again in a moment.',
+  RATE_LIMITED: 'has reached FounderLab request protection. Wait briefly, then try again.',
+  PROVIDER_RATE_LIMITED: 'has reached its provider request limit. Wait briefly, then try again.',
   RATE_LIMIT_BACKEND_UNAVAILABLE: 'cannot run because AI request protection is unavailable for this deployment. Please try again later.',
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
   GEMINI_REQUEST_INVALID: 'rejected this request. Choose another Gemini model or check server-side Google AI access.',
@@ -49,14 +50,14 @@ export function classifyAIError({ provider, status, code, message } = {}) {
 
   const providerName = getProvider(provider)?.name || getVoiceProvider(provider)?.name || 'The AI provider'
   const globalError = ['AUTHENTICATION_REQUIRED', 'AUTHENTICATION_INVALID', 'AUTHENTICATION_UNAVAILABLE', 'CORS_ORIGIN_DENIED'].includes(resolvedCode)
-  const retryable = ['RATE_LIMITED', 'RATE_LIMIT_BACKEND_UNAVAILABLE', 'PROVIDER_UNAVAILABLE', 'NETWORK_FAILURE', 'MALFORMED_RESPONSE', 'EMPTY_RESPONSE', 'UNKNOWN', 'AUTHENTICATION_UNAVAILABLE'].includes(resolvedCode)
+  const retryable = ['RATE_LIMITED', 'PROVIDER_RATE_LIMITED', 'RATE_LIMIT_BACKEND_UNAVAILABLE', 'PROVIDER_UNAVAILABLE', 'NETWORK_FAILURE', 'MALFORMED_RESPONSE', 'EMPTY_RESPONSE', 'UNKNOWN', 'AUTHENTICATION_UNAVAILABLE'].includes(resolvedCode)
   const resolvedStatus = Number.isInteger(status)
     ? status
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
       : resolvedCode === 'REQUEST_CANCELLED' ? 499
       : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' ? 400
-      : resolvedCode === 'RATE_LIMITED' ? 429
+      : resolvedCode === 'RATE_LIMITED' || resolvedCode === 'PROVIDER_RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503
           : 502
 

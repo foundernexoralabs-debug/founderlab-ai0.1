@@ -38,7 +38,7 @@ function assertProviderResponse(response, payload, provider) {
   if (response.ok) return
   const status = response.status || 502
   const code = status === 429
-    ? 'RATE_LIMITED'
+    ? 'PROVIDER_RATE_LIMITED'
     : [401, 403].includes(status)
       ? 'AUTHENTICATION_FAILED'
       : status === 404

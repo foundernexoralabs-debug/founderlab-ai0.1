@@ -113,7 +113,7 @@ export function createBuilderProjectRepository({
         validation: project.validation,
         brand: project.brand,
         settings: project.settings,
-        preview: { status: project.validation?.valid ? 'ready' : 'idle', lastSuccessfulVersionId: null, lastSuccessfulAt: null, lastError: null },
+        preview: { status: project.validation?.valid ? 'building' : 'idle', lastSuccessfulVersionId: null, lastSuccessfulAt: null, lastError: null },
       }
       if (project.files?.length) {
         copy = appendBuilderVersion(copy, {
@@ -124,8 +124,6 @@ export function createBuilderProjectRepository({
           changedPaths: project.files.map((file) => file.path),
           now: createdAt,
         })
-        copy.preview.lastSuccessfulVersionId = copy.currentVersionId
-        copy.preview.lastSuccessfulAt = createdAt
       }
       return this.save(copy, ownerId)
     },

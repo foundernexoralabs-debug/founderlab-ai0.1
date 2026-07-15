@@ -60,3 +60,9 @@ export function restoreBuilderVersion(project, versionId, { now = new Date().toI
 export function getCurrentBuilderVersion(project) {
   return (project?.versions || []).find((version) => version.id === project.currentVersionId) || null
 }
+
+export function getPreviousBuilderVersion(project) {
+  const versions = project?.versions || []
+  const currentIndex = versions.findIndex((version) => version.id === project?.currentVersionId)
+  return currentIndex > 0 ? versions[currentIndex - 1] : null
+}

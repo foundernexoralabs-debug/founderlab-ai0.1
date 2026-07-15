@@ -3,12 +3,13 @@ import { C } from '../../app/theme.js'
 import { toast } from '../../app/toast.jsx'
 import { Badge, Button, EmptyState, Input, Spinner } from '../../components/ui/Primitives.jsx'
 import { uid } from '../../lib/ids.js'
-import { builderGenerationService, BuilderGenerationError } from './builderGeneration.js'
+import { builderGenerationService } from './builderGeneration.js'
+import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from './builderFileOperations.js'
 import { createBuilderProject, BUILDER_ENTRY_FILE } from './builderProjectSchema.js'
 import { builderProjectRepository } from './builderProjectRepository.js'
 import { buildBuilderPreviewDocument, BUILDER_PREVIEW_SANDBOX, isSafeBuilderPreviewMessage } from './builderPreview.js'
-import { validateBuilderFiles } from './builderValidation.js'
-import { appendBuilderVersion, restoreBuilderVersion } from './builderVersions.js'
+import { BUILDER_MAX_FILE_BYTES, validateBuilderFiles } from './builderValidation.js'
+import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from './builderVersions.js'
 
 const EXAMPLES = [
   'A polished landing page for a founder-focused accounting service with a calm, trustworthy visual style.',
@@ -16,12 +17,40 @@ const EXAMPLES = [
   'A waitlist website for an AI meeting-notes product aimed at small startup teams.',
 ]
 
+const SAFE_BUILDER_ERROR_MESSAGES = Object.freeze({
+  AUTHENTICATION_REQUIRED: 'Sign in is required before Builder can generate a project.',
+  AUTHENTICATION_INVALID: 'Your sign-in session could not be verified. Please sign in again.',
+  MISSING_CONFIGURATION: 'The selected AI provider is not configured. Choose another configured provider in Settings.',
+  INVALID_MODEL: 'The selected AI model is unavailable. Choose another model in Settings.',
+  INVALID_MANIFEST: 'FounderLab could not create a safe project structure. Please retry the build.',
+  INVALID_PLAN: 'FounderLab could not complete the project plan. Please review it and retry.',
+  GENERATION_FORMAT_ERROR: 'FounderLab received an incomplete structured response. No project was saved.',
+  FILE_BATCH_INVALID: 'FounderLab received an invalid project-file response. No project was saved.',
+  FILE_BATCH_INCOMPLETE: 'FounderLab received an incomplete project-file response. Please retry the build.',
+  VALIDATION_FAILED: 'The generated project did not pass Builder safety checks. No project was saved.',
+  PROVIDER_RATE_LIMITED: 'The selected provider has reached its request limit. Wait briefly, then retry.',
+  RATE_LIMITED: 'FounderLab request protection is temporarily limiting generation. Wait briefly, then retry.',
+  RATE_LIMIT_BACKEND_UNAVAILABLE: 'Builder generation is temporarily unavailable while request protection recovers.',
+  PROVIDER_UNAVAILABLE: 'The selected AI provider is unavailable right now. Please retry shortly.',
+  NETWORK_FAILURE: 'Builder could not reach the selected AI provider. Check your connection and retry.',
+  REQUEST_CANCELLED: 'Generation was cancelled.',
+  CANCELLED: 'Generation was cancelled.',
+})
+
 function safeProjectError(error) {
-  const message = error?.message || 'FounderLab could not complete this Builder operation.'
-  return { code: error?.code || 'BUILDER_OPERATION_FAILED', message, retryable: error?.retryable !== false, at: new Date().toISOString() }
+  const code = typeof error?.code === 'string' ? error.code : 'BUILDER_OPERATION_FAILED'
+  return {
+    code,
+    message: SAFE_BUILDER_ERROR_MESSAGES[code] || 'FounderLab could not complete this Builder operation. No project was changed.',
+    retryable: error?.retryable !== false,
+    reference: `FL-BLD-${code.replace(/[^A-Z0-9_]/gi, '').slice(0, 36) || 'UNKNOWN'}`,
+    at: new Date().toISOString(),
+  }
 }
 
 function projectStatus(project) {
+  if (project?.preview?.status === 'building') return { label: 'Building preview', color: 'accent' }
+  if (project?.preview?.status === 'error') return { label: 'Preview needs attention', color: 'red' }
   if (project?.status === 'ready' && project?.validation?.valid) return { label: 'Ready', color: 'green' }
   if (project?.status === 'error') return { label: 'Needs attention', color: 'red' }
   if (project?.status === 'legacy') return { label: 'Legacy project', color: 'yellow' }
@@ -47,9 +76,8 @@ function createBlankProject(ownerId) {
     files: validation.files,
     status: 'ready',
     validation: { valid: validation.valid, issues: validation.issues, checkedAt: now },
-    preview: { status: validation.valid ? 'ready' : 'error', lastSuccessfulVersionId: null, lastSuccessfulAt: validation.valid ? now : null, lastError: null },
+    preview: { status: validation.valid ? 'building' : 'error', lastSuccessfulVersionId: null, lastSuccessfulAt: null, lastError: null },
   }, { files: validation.files, origin: 'manual-edit', summary: 'Created blank project', validation: { valid: validation.valid, issues: validation.issues, checkedAt: now }, changedPaths: validation.files.map((file) => file.path), now })
-  project.preview.lastSuccessfulVersionId = project.currentVersionId
   return project
 }
 
@@ -121,27 +149,60 @@ function ProjectList({ projects, selectedId, onSelect, onCreate, query, onQuery 
   </aside>
 }
 
-function FileExplorer({ project, activePath, onSelect, onAdd, onDelete, activeOnMobile = false }) {
+function fileIcon(path) {
+  if (path.endsWith('.html')) return '◇'
+  if (path.endsWith('.css')) return '◒'
+  if (path.endsWith('.js')) return '◈'
+  if (path.endsWith('.svg')) return '◌'
+  if (path.endsWith('.json')) return '◫'
+  return '·'
+}
+
+function FileExplorer({ project, activePath, dirtyPath, onSelect, onAdd, onDelete, onRename, activeOnMobile = false }) {
+  const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const tree = useMemo(() => buildBuilderFileTree(project.files), [project.files])
+  const matches = (node) => node.type === 'file'
+    ? node.path.toLowerCase().includes(query.trim().toLowerCase())
+    : !query.trim() || node.children.some(matches)
+  const renderNode = (node, depth = 1) => {
+    if (!matches(node)) return null
+    if (node.type === 'folder') {
+      if (!node.path) return node.children.map((child) => renderNode(child, depth))
+      const expanded = !collapsed.has(node.path)
+      return <div key={node.path} role="treeitem" aria-level={depth} aria-expanded={expanded}>
+        <button type="button" onClick={() => setCollapsed((current) => { const next = new Set(current); if (next.has(node.path)) next.delete(node.path); else next.add(node.path); return next })} style={{ width: '100%', textAlign: 'left', border: 'none', background: 'transparent', color: C.t2, borderRadius: 6, padding: '6px 7px', cursor: 'pointer', font: '600 11px ui-monospace, SFMono-Regular, monospace' }}>{expanded ? '⌄' : '›'} <span aria-hidden="true">▱</span> {node.name}</button>
+        {expanded && <div style={{ paddingLeft: 10 }}>{node.children.map((child) => renderNode(child, depth + 1))}</div>}
+      </div>
+    }
+    const selected = node.path === activePath
+    return <button key={node.path} type="button" role="treeitem" aria-level={depth} aria-current={selected ? 'true' : undefined} onClick={() => onSelect(node.path)} style={{ width: '100%', textAlign: 'left', background: selected ? C.accentM : 'transparent', border: `1px solid ${selected ? C.borderFocus : 'transparent'}`, color: selected ? C.t1 : C.t2, borderRadius: 6, padding: '7px 8px', cursor: 'pointer', fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 11 }}><span aria-hidden="true">{fileIcon(node.path)}</span> {node.name}{dirtyPath === node.path && <span aria-label="Unsaved changes" style={{ color: C.accent }}> •</span>}</button>
+  }
   return <div className={`builder-file-panel${activeOnMobile ? ' builder-file-active' : ''}`} style={{ width: 210, minWidth: 150, maxWidth: 320, resize: 'horizontal', overflow: 'auto', borderRight: `1px solid ${C.border}`, padding: 12 }}>
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 5 }}><strong style={{ fontSize: 12 }}>Files</strong><span style={{ display: 'flex', gap: 2 }}><Button size="sm" variant="ghost" onClick={onAdd}>+</Button>{activePath !== BUILDER_ENTRY_FILE && <Button size="sm" variant="ghost" onClick={() => onDelete(activePath)}>−</Button>}</span></div>
-    <div style={{ display: 'grid', gap: 3, marginTop: 10 }}>{project.files.map((file) => <button key={file.path} type="button" onClick={() => onSelect(file.path)} style={{ textAlign: 'left', background: file.path === activePath ? C.accentM : 'transparent', border: `1px solid ${file.path === activePath ? C.borderFocus : 'transparent'}`, color: file.path === activePath ? C.t1 : C.t2, borderRadius: 6, padding: '7px 8px', cursor: 'pointer', fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 11 }}>{file.path}</button>)}</div>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 5 }}><strong style={{ fontSize: 12 }}>Files</strong><span style={{ display: 'flex', gap: 2 }}><Button size="sm" variant="ghost" onClick={onAdd} aria-label="Create file">+</Button><Button size="sm" variant="ghost" onClick={() => onRename(activePath)} disabled={activePath === BUILDER_ENTRY_FILE} aria-label="Rename selected file">↗</Button>{activePath !== BUILDER_ENTRY_FILE && <Button size="sm" variant="ghost" onClick={() => onDelete(activePath)} aria-label="Delete selected file">−</Button>}</span></div>
+    <input aria-label="Search project files" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files" style={{ margin: '12px 0 8px', width: '100%', background: C.bg, border: `1px solid ${C.border}`, borderRadius: 7, color: C.t1, padding: '7px 8px', font: 'inherit', fontSize: 12 }} />
+    <div role="tree" aria-label="Project files" style={{ display: 'grid', gap: 2 }}>{renderNode(tree)}</div>
   </div>
 }
 
-function PreviewPanel({ project, previewPath, onNavigate, onRuntimeError }) {
+function PreviewPanel({ project, previewPath, onNavigate, onReady, onRuntimeError, renderKey }) {
   const frame = useRef(null)
   const preview = useMemo(() => buildBuilderPreviewDocument(project.files, { entryFile: previewPath }), [project.files, previewPath])
   useEffect(() => {
     const listen = (event) => {
       if (!isSafeBuilderPreviewMessage(event, frame.current?.contentWindow)) return
       if (event.data.type === 'navigate') onNavigate(event.data.detail?.path)
+      if (event.data.type === 'ready') onReady()
       if (event.data.type === 'runtime-error') onRuntimeError()
     }
     window.addEventListener('message', listen)
     return () => window.removeEventListener('message', listen)
-  }, [onNavigate, onRuntimeError])
+  }, [onNavigate, onReady, onRuntimeError])
+  useEffect(() => {
+    if (!preview.ok) onRuntimeError()
+  }, [onRuntimeError, preview.ok])
   if (!preview.ok) return <div style={{ padding: 20 }}><EmptyState icon="⚠" title="Preview needs attention" description={preview.validation.issues[0]?.message || 'Fix the validation issues before previewing this project.'} /></div>
-  return <iframe ref={frame} srcDoc={preview.srcDoc} title="Builder live preview" sandbox={BUILDER_PREVIEW_SANDBOX} referrerPolicy="no-referrer" style={{ display: 'block', width: '100%', height: '100%', border: 'none', background: '#fff' }} />
+  return <iframe key={renderKey} ref={frame} srcDoc={preview.srcDoc} title="Builder live preview" sandbox={BUILDER_PREVIEW_SANDBOX} referrerPolicy="no-referrer" style={{ display: 'block', width: '100%', height: '100%', border: 'none', background: '#fff' }} />
 }
 
 function ActivityPanel({ project }) {
@@ -156,16 +217,35 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
   const [changeRequest, setChangeRequest] = useState('')
   const [editing, setEditing] = useState(false)
   const [mobileTab, setMobileTab] = useState('preview')
+  const [previewKey, setPreviewKey] = useState(0)
+  const previewHost = useRef(null)
 
   useEffect(() => {
     const file = project.files.find((entry) => entry.path === activePath) || project.files[0]
     if (file && file.path !== activePath) setActivePath(file.path)
     setDraft(file?.content || '')
-  }, [project, activePath])
+  }, [project.files, activePath])
 
   const activeFile = project.files.find((file) => file.path === activePath) || project.files[0]
+  const hasUnsavedChanges = Boolean(activeFile && draft !== activeFile.content)
+  const isLargeFile = (activeFile?.content.length || 0) > BUILDER_MAX_FILE_BYTES
+  useEffect(() => {
+    if (!hasUnsavedChanges) return undefined
+    const warnBeforeUnload = (event) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [hasUnsavedChanges])
+  const selectFile = useCallback((path) => {
+    if (path === activePath) return
+    if (hasUnsavedChanges && !window.confirm('Discard unsaved changes to the current file?')) return
+    setActivePath(path)
+  }, [activePath, hasUnsavedChanges])
   const saveFile = () => {
-    if (!activeFile || draft === activeFile.content) return
+    if (!activeFile || !hasUnsavedChanges) return
+    if (isLargeFile) return toast('This file exceeds the safe Builder editor size limit and is read-only.', 'error')
     const files = project.files.map((file) => file.path === activeFile.path ? { ...file, content: draft.replace(/\r\n?/g, '\n'), state: 'edited', updatedAt: new Date().toISOString() } : file)
     const validation = validateBuilderFiles(files)
     if (!validation.valid) {
@@ -173,26 +253,33 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
       return
     }
     const now = new Date().toISOString()
-    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now }, status: 'ready', preview: { ...project.preview, status: 'ready', lastError: null } }, { files: validation.files, origin: 'manual-edit', summary: `Edited ${activeFile.path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [activeFile.path], now })
-    updated.preview.lastSuccessfulVersionId = updated.currentVersionId
-    updated.preview.lastSuccessfulAt = now
+    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now }, status: 'ready', preview: { ...project.preview, status: 'building', lastError: null } }, { files: validation.files, origin: 'manual-edit', summary: `Edited ${activeFile.path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [activeFile.path], now })
     onProjectChange(updated)
     onSave(updated)
   }
   const addFile = () => {
     const path = window.prompt('New file path (pages/name.html or assets/name.json)')
     if (!path) return
-    if (!/^(pages\/[a-z0-9][a-z0-9._-]*\.html|assets\/[a-z0-9][a-z0-9._/-]*)$/i.test(path)) {
-      toast('Use pages/name.html or assets/name.json (or .svg).', 'error')
-      return
-    }
-    if (project.files.some((file) => file.path === path)) return toast('A file already uses that path.', 'error')
+    const created = createBuilderFile(path)
+    if (!created.ok) return toast(created.message, 'error')
+    if (project.files.some((file) => file.path === created.file.path)) return toast('A file already uses that path.', 'error')
     const now = new Date().toISOString()
-    const file = { path, content: path.endsWith('.html') ? '<main>New page</main>' : '{}', role: 'source', state: 'edited', createdAt: now, updatedAt: now }
+    const file = { ...created.file, createdAt: now, updatedAt: now }
     const validation = validateBuilderFiles([...project.files, file])
     if (!validation.valid) return toast(validation.issues[0].message, 'error')
-    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now } }, { files: validation.files, origin: 'manual-edit', summary: `Added ${path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [path], now })
-    onProjectChange(updated); onSave(updated); setActivePath(path)
+    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now }, preview: { ...project.preview, status: 'building', lastError: null } }, { files: validation.files, origin: 'manual-edit', summary: `Added ${file.path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [file.path], now })
+    onProjectChange(updated); onSave(updated); setActivePath(file.path)
+  }
+  const renameFile = (path) => {
+    const destination = window.prompt('Rename file to', path)
+    if (!destination) return
+    const now = new Date().toISOString()
+    const renamed = renameBuilderFile(project.files, path, destination, { now })
+    if (!renamed.ok) return toast(renamed.message, 'error')
+    const validation = validateBuilderFiles(renamed.files)
+    if (!validation.valid) return toast(validation.issues[0].message, 'error')
+    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now }, preview: { ...project.preview, status: 'building', lastError: null } }, { files: validation.files, origin: 'manual-edit', summary: `Renamed ${path} to ${destination}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: renamed.changedPaths, now })
+    onProjectChange(updated); onSave(updated); setActivePath(destination)
   }
   const deleteFile = (path) => {
     if (path === BUILDER_ENTRY_FILE) return toast('index.html is required for every Builder project.', 'error')
@@ -201,14 +288,29 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
     const files = project.files.filter((file) => file.path !== path)
     const validation = validateBuilderFiles(files)
     if (!validation.valid) return toast(validation.issues[0].message, 'error')
-    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now } }, { files: validation.files, origin: 'manual-edit', summary: `Deleted ${path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [path], now })
+    const updated = appendBuilderVersion({ ...project, files: validation.files, validation: { valid: true, issues: validation.issues, checkedAt: now }, preview: { ...project.preview, status: 'building', lastError: null } }, { files: validation.files, origin: 'manual-edit', summary: `Deleted ${path}`, validation: { valid: true, issues: validation.issues, checkedAt: now }, changedPaths: [path], now })
     onProjectChange(updated); onSave(updated); setActivePath(BUILDER_ENTRY_FILE)
   }
   const restore = (versionId) => {
     const result = restoreBuilderVersion(project, versionId)
     if (!result.restored) return
-    result.project.preview = { ...result.project.preview, status: 'ready', lastSuccessfulVersionId: result.project.currentVersionId, lastSuccessfulAt: new Date().toISOString(), lastError: null }
+    result.project.preview = { ...result.project.preview, status: 'building', lastError: null }
     onProjectChange(result.project); onSave(result.project)
+  }
+  const undoLatest = () => {
+    const previous = getPreviousBuilderVersion(project)
+    if (!previous) return toast('There is no earlier version to restore.', 'error')
+    restore(previous.id)
+  }
+  const copyActiveFile = async () => {
+    if (!activeFile) return
+    try {
+      if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(activeFile.content)
+      toast('File content copied.', 'success')
+    } catch {
+      toast('Copy is not available in this browser. Select the file content to copy it.', 'error')
+    }
   }
   const applyChange = async () => {
     if (!changeRequest.trim() || busy) return
@@ -221,7 +323,8 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
       setChangeRequest('')
       toast('Change applied in a new recoverable version.', 'success')
     } catch (error) {
-      toast(safeProjectError(error).message, 'error')
+      const failure = safeProjectError(error)
+      toast(`${failure.message} Reference: ${failure.reference}`, 'error')
     } finally { setEditing(false) }
   }
   const validate = validateBuilderFiles(project.files)
@@ -229,9 +332,53 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
   const onNavigate = useCallback((path) => {
     if (project.files.some((file) => file.path === path && file.path.endsWith('.html'))) setPreviewPath(path)
   }, [project.files])
+  const onPreviewReady = useCallback(() => {
+    if (project.preview?.status === 'ready' && project.preview?.lastSuccessfulVersionId === project.currentVersionId) return
+    const now = new Date().toISOString()
+    const updated = {
+      ...project,
+      preview: {
+        ...project.preview,
+        status: 'ready',
+        lastSuccessfulVersionId: project.currentVersionId,
+        lastSuccessfulAt: now,
+        lastError: null,
+      },
+      generationHistory: [...(project.generationHistory || []), {
+        id: `builder-event-${uid()}`,
+        at: now,
+        stage: 'ready',
+        message: 'Isolated preview rendered successfully',
+        provider: null,
+        model: null,
+        details: null,
+      }].slice(-30),
+    }
+    onProjectChange(updated)
+    void onSave(updated)
+    toast('Isolated preview is ready.', 'success')
+  }, [onProjectChange, onSave, project])
   const onRuntimeError = useCallback(() => {
-    onProjectChange({ ...project, preview: { ...project.preview, status: 'error', lastError: 'The isolated preview reported a runtime error.' } })
-  }, [onProjectChange, project])
+    if (project.preview?.status === 'error') return
+    const updated = { ...project, preview: { ...project.preview, status: 'error', lastError: 'The isolated preview reported a runtime error.' } }
+    onProjectChange(updated)
+    void onSave(updated)
+  }, [onProjectChange, onSave, project])
+  const setPreviewDevice = (device) => {
+    const updated = { ...project, settings: { ...project.settings, device } }
+    onProjectChange(updated)
+    void onSave(updated)
+  }
+  const expandPreview = () => {
+    previewHost.current?.requestFullscreen?.().catch(() => {})
+  }
+  const previewDevice = project.settings?.device || 'desktop'
+  const previewWidth = previewDevice === 'mobile' ? 390 : previewDevice === 'tablet' ? 768 : '100%'
+  const previewLabel = project.preview?.status === 'building'
+    ? 'Building preview'
+    : project.preview?.status === 'error'
+      ? 'Preview error'
+      : 'Preview ready'
 
   return <div className="builder-workspace" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
     <style>{`@media (max-width: 760px){.builder-project-list,.builder-file-panel,.builder-history-panel{display:none!important}.builder-file-panel.builder-file-active,.builder-history-panel.builder-history-active{display:block!important;width:100%!important;max-width:none!important;border-left:none!important;border-right:none!important}.builder-mobile-tabs{display:flex!important}.builder-main-grid{grid-template-columns:1fr!important}.builder-main-grid.builder-main-inactive{display:none!important}.builder-editor-panel{display:var(--builder-editor-display,none)}.builder-preview-panel{display:var(--builder-preview-display,none)}}@media (min-width: 761px){.builder-mobile-tabs{display:none!important}}`}</style>
@@ -241,6 +388,7 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
       <span style={{ color: C.t3, fontSize: 12 }}>{project.validation?.valid ? 'Saved project checks passed' : 'Validation needs attention'}</span>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         {(busy || editing) && <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>}
+        <Button variant="secondary" size="sm" onClick={undoLatest} disabled={!getPreviousBuilderVersion(project)}>Undo</Button>
         <Button variant="secondary" size="sm" onClick={onDuplicate}>Duplicate</Button>
         <Button variant="secondary" size="sm" onClick={() => onArchive({ ...project, status: project.status === 'archived' ? 'ready' : 'archived' })}>{project.status === 'archived' ? 'Restore' : 'Archive'}</Button>
         <Button variant="ghost" size="sm" onClick={() => onDelete(project)}>Delete</Button>
@@ -248,21 +396,22 @@ function BuilderWorkspaceView({ project, onProjectChange, onSave, onDelete, onAr
     </header>
     <div className="builder-mobile-tabs" style={{ gap: 6, padding: 8, borderBottom: `1px solid ${C.border}` }}>{['files', 'editor', 'preview', 'history'].map((tab) => <Button key={tab} size="sm" variant={mobileTab === tab ? 'secondary' : 'ghost'} onClick={() => setMobileTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</Button>)}</div>
     <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-      <FileExplorer project={project} activePath={activePath} onSelect={setActivePath} onAdd={addFile} onDelete={deleteFile} activeOnMobile={mobileTab === 'files'} />
+      <FileExplorer project={project} activePath={activePath} dirtyPath={hasUnsavedChanges ? activePath : null} onSelect={selectFile} onAdd={addFile} onDelete={deleteFile} onRename={renameFile} activeOnMobile={mobileTab === 'files'} />
       <div className={`builder-main-grid${mobileTab === 'files' || mobileTab === 'history' ? ' builder-main-inactive' : ''}`} style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: 'minmax(270px, .9fr) minmax(340px, 1.1fr)', minHeight: 0 }}>
         <section className="builder-editor-panel" style={{ '--builder-editor-display': mobileTab === 'editor' ? 'flex' : 'none', borderRight: `1px solid ${C.border}`, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ color: C.t2, font: '12px ui-monospace, monospace' }}>{activeFile?.path}</span><Button size="sm" variant="secondary" onClick={saveFile} disabled={!activeFile || draft === activeFile.content}>Save file</Button></div>
-          <textarea aria-label={`Edit ${activeFile?.path || 'project file'}`} value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} style={{ flex: 1, width: '100%', minHeight: 180, border: 'none', outline: 'none', resize: 'none', padding: 14, background: '#06060b', color: '#e8e8f8', font: '12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace' }} />
+          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span style={{ color: C.t2, font: '12px ui-monospace, monospace' }}>{activeFile?.path}{hasUnsavedChanges && <span aria-label="Unsaved changes" style={{ color: C.accent }}> · unsaved</span>}</span><span style={{ display: 'flex', gap: 5 }}><Button size="sm" variant="ghost" onClick={copyActiveFile}>Copy</Button><Button size="sm" variant="secondary" onClick={saveFile} disabled={!activeFile || !hasUnsavedChanges || isLargeFile}>Save file</Button></span></div>
+          {isLargeFile && <p role="status" style={{ margin: 0, padding: '8px 12px', color: C.yellow, fontSize: 12, borderBottom: `1px solid ${C.border}` }}>This file exceeds the safe editor size limit and is read-only.</p>}
+          <textarea aria-label={`Edit ${activeFile?.path || 'project file'}`} value={draft} onChange={(event) => setDraft(event.target.value)} readOnly={isLargeFile} spellCheck={false} style={{ flex: 1, width: '100%', minHeight: 180, border: 'none', outline: 'none', resize: 'none', padding: 14, background: '#06060b', color: '#e8e8f8', font: '12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace' }} />
           <div style={{ borderTop: `1px solid ${C.border}`, padding: 10 }}><label style={{ display: 'block', color: C.t3, fontSize: 11, fontWeight: 700, marginBottom: 6 }}>REQUEST A SCOPED CHANGE</label><div style={{ display: 'flex', gap: 7 }}><Input value={changeRequest} onChange={(event) => setChangeRequest(event.target.value)} placeholder="Make this heading more direct…" onKeyDown={(event) => event.key === 'Enter' && applyChange()} /><Button size="sm" onClick={applyChange} disabled={busy || editing || !changeRequest.trim()}>{editing ? <Spinner size={13} color="#fff" /> : 'Apply'}</Button></div></div>
         </section>
-        <section className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}><span style={{ color: C.t2, fontSize: 12 }}>Live preview · {previewPath}</span><select aria-label="Preview page" value={previewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{project.files.filter((file) => file.path.endsWith('.html')).map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select></div>
-          <div style={{ flex: 1, minHeight: 0 }}>{<PreviewPanel project={project} previewPath={previewPath} onNavigate={onNavigate} onRuntimeError={onRuntimeError} />}</div>
+        <section ref={previewHost} className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', background: C.bg }}>
+          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}><span style={{ color: C.t2, fontSize: 12 }}>Live preview · {previewPath}</span><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 5, alignItems: 'center' }}><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={previewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{project.files.filter((file) => file.path.endsWith('.html')).map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={() => setPreviewKey((value) => value + 1)} aria-label="Refresh preview">↻</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
+          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: previewDevice === 'desktop' ? 0 : 12, display: 'grid', placeItems: 'start center' }}><div style={{ width: previewWidth, maxWidth: '100%', minHeight: '100%', background: '#fff', boxShadow: previewDevice === 'desktop' ? 'none' : '0 8px 28px rgba(0,0,0,.24)' }}>{<PreviewPanel project={project} previewPath={previewPath} onNavigate={onNavigate} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${project.currentVersionId || 'draft'}-${previewPath}-${previewKey}`} />}</div></div>
         </section>
       </div>
       <aside className={`builder-history-panel${mobileTab === 'history' ? ' builder-history-active' : ''}`} style={{ width: 205, borderLeft: `1px solid ${C.border}`, overflow: 'auto', flexShrink: 0 }}>
         <div style={{ padding: 12, borderBottom: `1px solid ${C.border}` }}><strong style={{ fontSize: 12 }}>Validation</strong><p style={{ color: validate.valid ? C.green : C.red, fontSize: 12, lineHeight: 1.4, marginBottom: 0 }}>{validate.valid ? 'Project structure is valid.' : validate.issues[0]?.message}</p></div>
-        <div style={{ padding: 12 }}><strong style={{ fontSize: 12 }}>Version history</strong><div style={{ display: 'grid', gap: 5, marginTop: 10 }}>{[...(project.versions || [])].reverse().map((version) => <button type="button" key={version.id} onClick={() => restore(version.id)} style={{ textAlign: 'left', padding: 8, background: version.id === project.currentVersionId ? C.accentM : 'transparent', border: `1px solid ${version.id === project.currentVersionId ? C.borderFocus : C.border}`, borderRadius: 7, color: C.t2, cursor: 'pointer', font: 'inherit', fontSize: 11 }}><span style={{ display: 'block', color: C.t1 }}>{version.summary}</span><span style={{ display: 'block', color: C.t3, marginTop: 3 }}>{version.origin} · {compactDate(version.createdAt)}</span></button>)}</div></div>
+        <div style={{ padding: 12 }}><strong style={{ fontSize: 12 }}>Version history</strong><div style={{ display: 'grid', gap: 5, marginTop: 10 }}>{[...(project.versions || [])].reverse().map((version) => <button type="button" key={version.id} onClick={() => restore(version.id)} style={{ textAlign: 'left', padding: 8, background: version.id === project.currentVersionId ? C.accentM : 'transparent', border: `1px solid ${version.id === project.currentVersionId ? C.borderFocus : C.border}`, borderRadius: 7, color: C.t2, cursor: 'pointer', font: 'inherit', fontSize: 11 }}><span style={{ display: 'block', color: C.t1 }}>{version.summary}</span><span style={{ display: 'block', color: C.t3, marginTop: 3 }}>{version.origin} · {compactDate(version.createdAt)}</span>{version.changedPaths?.length > 0 && <span style={{ display: 'block', color: C.t3, marginTop: 3, fontFamily: 'ui-monospace, monospace' }}>{version.changedPaths.slice(0, 2).join(', ')}{version.changedPaths.length > 2 ? ` +${version.changedPaths.length - 2}` : ''}</span>}</button>)}</div></div>
       </aside>
     </div>
     <ActivityPanel project={project} />
@@ -308,7 +457,7 @@ export function BuilderWorkspace({ user }) {
     try {
       const result = await builderGenerationService.plan({ brief: brief.trim(), signal: controller.current.signal })
       setPlan({ ...result.plan, provider: result.provider, model: result.model })
-    } catch (error) { toast(safeProjectError(error).message, 'error') } finally { inFlight.current = false; setBusy(false); controller.current = null }
+    } catch (error) { const failure = safeProjectError(error); toast(`${failure.message} Reference: ${failure.reference}`, 'error') } finally { inFlight.current = false; setBusy(false); controller.current = null }
   }
   const buildProject = async () => {
     if (!brief.trim() || !plan || inFlight.current) return
@@ -317,10 +466,10 @@ export function BuilderWorkspace({ user }) {
       const project = await builderGenerationService.generate({ brief: brief.trim(), plan, ownerId: user?.id, signal: controller.current.signal, onActivity: (entry) => setActivity((current) => [...current, entry]) })
       const result = await persist(project)
       setActiveProject(result.project || project); setPlan(null); setBrief('')
-      toast(result.saved ? 'Your Builder project is ready.' : 'Project built and retained locally; cloud saving needs attention.', result.saved ? 'success' : 'error')
+      toast(result.saved ? 'Project saved. Building the isolated preview…' : 'Project built and retained locally; cloud saving needs attention.', result.saved ? 'success' : 'error')
     } catch (error) {
       const failure = safeProjectError(error)
-      toast(failure.code === 'CANCELLED' ? 'Generation cancelled. No partial files were saved.' : failure.message, 'error')
+      toast(failure.code === 'CANCELLED' ? 'Generation cancelled. No partial files were saved.' : `${failure.message} Reference: ${failure.reference}`, 'error')
     } finally { inFlight.current = false; setBusy(false); controller.current = null }
   }
   const blank = async () => {

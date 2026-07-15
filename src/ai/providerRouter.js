@@ -41,6 +41,7 @@ export async function routeAIRequest(input, {
         max_tokens: request.maxTokens,
         ...(request.system && { system: request.system }),
         ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
       }),
       signal,
     })

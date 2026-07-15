@@ -50,13 +50,13 @@ src/features/builder/
   builderProjectSchema.js       schema, migration, safe defaults
   builderProjectRepository.js   authenticated persistence and recovery cache
   builderValidation.js          paths, imports, runtime/safety validation
+  builderFileOperations.js      safe file creation, rename/reference rewrites, tree data
   builderVersions.js            immutable versions, restore, undo
-  builderPrompts.js             JSON-only plan/manifest/file/patch prompts
+  builderPrompts.js             JSON-only plan/manifest/files/patch prompts
   builderGeneration.js          staged provider orchestration and cancellation
   builderPreview.js             CSP-wrapped static preview document
-  BuilderWorkspace.jsx          route composition and feature state
-  components/                   project start, file explorer, editor, preview,
-                                activity, validation, and history panels
+  BuilderWorkspace.jsx          route composition plus focused start, file,
+                                editor, preview, activity, and history views
 ```
 
 Dependencies point inward: components call the workspace controller; the
@@ -84,21 +84,31 @@ retains the last successful version.
 
 1. Normalize the user's brief and request an editable JSON plan.
 2. Validate the plan, then request a JSON file manifest.
-3. Generate each manifest file through the normalized provider service.
-4. Normalize paths and line endings, reject duplicates and unsafe content.
-5. Validate files, imports, entry point, and supported preview format.
-6. Build the isolated preview document and record the last working version.
-7. Persist the project and operation history.
+3. Generate the small, bounded manifest (at most five files) in one structured
+   provider response through the normalized provider service. This avoids a
+   burst of per-file calls exhausting an upstream provider quota.
+4. Use a native JSON-object response mode for providers that support it, then
+   retain strict local parsing and validation as the final authority.
+5. Normalize paths and line endings, reject duplicates, missing local
+   references, and unsafe content.
+6. Validate files, the entry point, references, and supported preview format.
+   A targeted repair is bounded and never replaces a valid version until it
+   passes validation.
+7. Persist the project in a `building` preview state. The isolated iframe must
+   send its narrow ready signal after `load` before Builder records the new
+   version as the last successful preview.
 
 The controller uses a request-scoped `AbortController`, a generation id, and a
 single in-flight guard. Cancellation stops outstanding browser requests when
 possible and always prevents stale completions from committing state. A
-continuation can request only missing manifest files; it never replaces already
-validated files. Provider execution is also bounded server-side (60 seconds by
-default, configurable with the server-only `FOUNDERLAB_PROVIDER_TIMEOUT_MS`
-within a 5–120 second range), so a stalled upstream request becomes a safe,
-retryable provider-unavailable outcome rather than leaving the workspace in a
-false completed state.
+continuation re-requests only missing files as one bounded batch; it never
+replaces already validated files. Provider rate-limit results are not retried
+inside Builder and are distinct from FounderLab's Upstash protection response.
+Provider execution is also bounded server-side (60 seconds by default,
+configurable with the server-only `FOUNDERLAB_PROVIDER_TIMEOUT_MS` within a
+5–120 second range), so a stalled upstream request becomes a safe, retryable
+provider-unavailable outcome rather than leaving the workspace in a false
+completed state.
 
 ## Preview security
 

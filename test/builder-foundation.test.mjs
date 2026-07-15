@@ -4,12 +4,13 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
+import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from '../src/features/builder/builderFileOperations.js'
 import { createBuilderProject, normalizeBuilderProject } from '../src/features/builder/builderProjectSchema.js'
 import { createBuilderProjectRepository } from '../src/features/builder/builderProjectRepository.js'
 import { buildBuilderPatchPrompt } from '../src/features/builder/builderPrompts.js'
-import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX } from '../src/features/builder/builderPreview.js'
-import { validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
-import { appendBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
+import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, inlineLocalSvgReferences } from '../src/features/builder/builderPreview.js'
+import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
+import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 
 const NOW = '2026-07-15T12:00:00.000Z'
@@ -56,10 +57,24 @@ test('Builder validation rejects path traversal, duplicate paths, oversized unsa
   assert.equal(unsafe.issues.some((item) => item.code === 'EMBEDDED_DOCUMENT') || unsafe.issues.some((item) => item.code === 'PARENT_ACCESS'), true)
   assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main>Built for parent company teams</main>' }]).valid, true)
   assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<script>document.body.dataset.x = "1"</script>' }]).issues.some((item) => item.code === 'INLINE_RUNTIME_TAG'), true)
+  assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main><a href="pages/missing.html">Missing</a></main>' }]).issues.some((item) => item.code === 'MISSING_LOCAL_REFERENCE'), true)
 
   const manifest = validateBuilderManifest({ files: [{ path: 'styles.css' }] })
   assert.equal(manifest.valid, false)
   assert.equal(manifest.issues.some((item) => item.code === 'ENTRY_FILE_REQUIRED'), true)
+
+  const tooManyFiles = validateBuilderManifest({
+    files: [
+      { path: 'index.html' },
+      { path: 'styles.css' },
+      { path: 'app.js' },
+      { path: 'pages/about.html' },
+      { path: 'pages/pricing.html' },
+      { path: 'pages/contact.html' },
+    ],
+  }, { maxFiles: BUILDER_MAX_GENERATION_FILE_COUNT })
+  assert.equal(tooManyFiles.valid, false)
+  assert.equal(tooManyFiles.issues.some((item) => item.code === 'TOO_MANY_FILES'), true)
 })
 
 test('scoped Builder edits include only the selected file content so valid large projects stay within request bounds', () => {
@@ -80,6 +95,7 @@ test('Builder preview uses an opaque minimal sandbox and CSP without external ne
   assert.match(BUILDER_PREVIEW_CSP, /default-src 'none'/)
   assert.match(BUILDER_PREVIEW_CSP, /connect-src 'none'/)
   assert.match(preview.srcDoc, /Content-Security-Policy/)
+  assert.match(preview.srcDoc, /window\.addEventListener\('load'/)
   assert.doesNotMatch(preview.srcDoc, /https?:\/\//)
   assert.doesNotMatch(preview.srcDoc, /eval\s*\(/)
 
@@ -89,6 +105,16 @@ test('Builder preview uses an opaque minimal sandbox and CSP without external ne
   const rejected = buildBuilderPreviewDocument([{ path: 'index.html', content: '<img src="https://example.test/a.png">' }])
   assert.equal(rejected.ok, false)
   assert.equal(rejected.validation.issues.some((item) => item.code === 'EXTERNAL_NETWORK'), true)
+
+  const svgFiles = [
+    { path: 'index.html', content: '<main><img src="assets/mark.svg" alt="Mark"></main>' },
+    { path: 'assets/mark.svg', content: '<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>' },
+  ]
+  const svgPreview = buildBuilderPreviewDocument(svgFiles)
+  assert.equal(svgPreview.ok, true)
+  assert.match(svgPreview.srcDoc, /data:image\/svg\+xml/)
+  assert.doesNotMatch(svgPreview.srcDoc, /src="assets\/mark\.svg"/)
+  assert.match(inlineLocalSvgReferences('a{background:url(assets/mark.svg)}', svgFiles), /data:image\/svg\+xml/)
 })
 
 test('Builder versions are immutable, bounded by a current pointer, and restore into a recoverable new version', () => {
@@ -102,6 +128,27 @@ test('Builder versions are immutable, bounded by a current pointer, and restore 
   assert.equal(restored.restored, true)
   assert.equal(restored.project.files[0].content.includes('FounderLab'), true)
   assert.equal(restored.project.versions.at(-1).origin, 'restore')
+  assert.equal(getPreviousBuilderVersion(second).id, first.currentVersionId)
+})
+
+test('Builder file operations keep paths safe, preserve local references, and expose a navigable folder tree', () => {
+  const created = createBuilderFile('pages/contact.html', { now: NOW })
+  assert.equal(created.ok, true)
+  assert.equal(created.file.path, 'pages/contact.html')
+  assert.equal(createBuilderFile('../secrets.html').ok, false)
+
+  const files = [
+    { path: 'index.html', content: '<main><a href="pages/about.html">About</a></main>' },
+    { path: 'pages/about.html', content: '<main>About</main>' },
+    { path: 'assets/data.json', content: '{}' },
+  ]
+  const renamed = renameBuilderFile(files, 'pages/about.html', 'pages/team.html', { now: NOW })
+  assert.equal(renamed.ok, true)
+  assert.equal(renamed.files.some((file) => file.path === 'pages/team.html'), true)
+  assert.match(renamed.files.find((file) => file.path === 'index.html').content, /pages\/team\.html/)
+  assert.equal(renameBuilderFile(files, 'index.html', 'pages/home.html').code, 'ENTRY_FILE_RENAME_BLOCKED')
+  const tree = buildBuilderFileTree(renamed.files)
+  assert.deepEqual(tree.children.map((node) => node.name), ['assets', 'pages', 'index.html'])
 })
 
 test('Builder repository preserves Code AI records and reports an honest remote persistence result', async () => {
@@ -145,42 +192,65 @@ test('Malformed persisted Builder files remain recoverable but cannot be treated
   assert.equal(project.validation.issues.some((item) => item.code === 'INVALID_PATH'), true)
 })
 
-test('Builder generation consumes strict normalized AI responses, creates structured files, and rejects prose/fenced output', async () => {
+test('Builder generation uses a bounded structured batch, creates structured files, and rejects prose/fenced output', async () => {
   const responses = [
     { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ name: 'Founders', summary: 'A site for founders.', projectType: 'website', pages: [{ path: 'index.html', title: 'Home', purpose: 'Home' }], sections: ['Hero'], components: [], features: [], brand: { visualDirection: 'Calm', colors: ['#111827'] } }) },
     { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ entryFile: 'index.html', files: [{ path: 'index.html', role: 'entry', purpose: 'Home' }, { path: 'styles.css', role: 'style', purpose: 'Styles' }, { path: 'app.js', role: 'script', purpose: 'Interaction' }] }) },
-    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'index.html', content: '<main><h1>Founders</h1></main>' }) },
-    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'styles.css', content: 'body { margin: 0; }' }) },
-    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'app.js', content: 'document.body.dataset.ready = "true"' }) },
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ files: [
+      { path: 'index.html', content: '<main><h1>Founders</h1></main>' },
+      { path: 'styles.css', content: 'body { margin: 0; }' },
+      { path: 'app.js', content: 'document.body.dataset.ready = "true"' },
+    ] }) },
   ]
-  const service = createBuilderGenerationService({ request: async () => responses.shift() })
+  const requests = []
+  const service = createBuilderGenerationService({ request: async (input) => {
+    requests.push(input)
+    return responses.shift()
+  } })
   const project = await service.generate({ brief: 'Build a founder site', ownerId: 'user-1' })
   assert.equal(project.status, 'ready')
   assert.equal(project.validation.valid, true)
   assert.equal(project.versions[0].provider, 'groq')
   assert.equal(project.files.length, 3)
+  assert.equal(project.preview.status, 'building')
+  assert.equal(project.preview.lastSuccessfulVersionId, null)
+  assert.equal(requests.length, 3)
+  assert.deepEqual(requests.at(-1).responseFormat, { type: 'json_object' })
 
   const bad = createBuilderGenerationService({ request: async () => ({ ok: true, text: '```json\n{}\n```' }) })
   await assert.rejects(() => bad.plan({ brief: 'Bad format' }), (error) => error instanceof BuilderGenerationError && error.code === 'GENERATION_FORMAT_ERROR')
 })
 
 test('A normalized provider failure is preserved safely by Builder generation', async () => {
-  const service = createBuilderGenerationService({ request: async () => ({ ok: false, error: { code: 'RATE_LIMITED', message: 'Groq is temporarily busy.', retryable: true } }) })
-  await assert.rejects(() => service.plan({ brief: 'Build a site' }), (error) => error instanceof BuilderGenerationError && error.code === 'RATE_LIMITED' && error.message === 'Groq is temporarily busy.')
+  const service = createBuilderGenerationService({ request: async () => ({ ok: false, error: { code: 'PROVIDER_RATE_LIMITED', message: 'Groq has reached its provider request limit. Wait briefly, then try again.', retryable: true } }) })
+  await assert.rejects(() => service.plan({ brief: 'Build a site' }), (error) => error instanceof BuilderGenerationError && error.code === 'PROVIDER_RATE_LIMITED' && error.message.includes('provider request limit'))
 })
 
-test('Builder continuation retries only a missing file and cancellation remains a normalized request outcome', async () => {
+test('Builder continuation generates missing files in one bounded request and does not retry a provider rate limit', async () => {
   const manifest = { entryFile: 'index.html', files: [{ path: 'index.html', role: 'entry' }, { path: 'styles.css', role: 'style' }] }
   const replies = [
-    { ok: true, provider: 'groq', model: 'model', text: '{"path":"index.html","content":"<main>Recovered</main>"}' },
-    { ok: true, provider: 'groq', model: 'model', text: 'not json' },
-    { ok: true, provider: 'groq', model: 'model', text: '{"path":"styles.css","content":"body { margin: 0; }"}' },
+    { ok: true, provider: 'groq', model: 'model', text: '{"files":[{"path":"index.html","content":"<main>Recovered</main>"},{"path":"styles.css","content":"body { margin: 0; }"}]}' },
   ]
-  const service = createBuilderGenerationService({ request: async () => replies.shift() })
+  let calls = 0
+  const service = createBuilderGenerationService({ request: async () => { calls += 1; return replies.shift() } })
   const continued = await service.continueMissingFiles({ brief: 'Build', plan: { summary: 'Build', pages: [] }, manifest, files: [] })
   assert.deepEqual(continued.addedPaths, ['index.html', 'styles.css'])
   assert.equal(continued.files.length, 2)
+  assert.equal(calls, 1)
 
+  let limitedCalls = 0
+  const limited = createBuilderGenerationService({ request: async () => {
+    limitedCalls += 1
+    return { ok: false, error: { code: 'PROVIDER_RATE_LIMITED', message: 'Groq has reached its provider request limit.', retryable: true } }
+  } })
+  await assert.rejects(
+    () => limited.continueMissingFiles({ brief: 'Build', plan: { summary: 'Build', pages: [] }, manifest, files: [] }),
+    (error) => error instanceof BuilderGenerationError && error.code === 'PROVIDER_RATE_LIMITED'
+  )
+  assert.equal(limitedCalls, 1)
+})
+
+test('Builder cancellation remains a normalized request outcome', async () => {
   const aborted = await routeAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [{ role: 'user', content: 'Build' }] }, {
     fetchImpl: async () => { const error = new Error('cancelled'); error.name = 'AbortError'; throw error },
   })

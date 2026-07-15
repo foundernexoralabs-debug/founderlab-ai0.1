@@ -3,6 +3,7 @@ import { BUILDER_ENTRY_FILE, BUILDER_RUNTIME, inferFileLanguage, normalizeBuilde
 export const BUILDER_MAX_FILE_BYTES = 64 * 1024
 export const BUILDER_MAX_TOTAL_BYTES = 420 * 1024
 export const BUILDER_MAX_FILE_COUNT = 40
+export const BUILDER_MAX_GENERATION_FILE_COUNT = 5
 
 const ALLOWED_PATH = /^(?:index\.html|styles\.css|app\.js|pages\/[a-z0-9][a-z0-9._-]*\.html|assets\/[a-z0-9][a-z0-9._/-]*)$/i
 const FORBIDDEN_CONTENT = [
@@ -13,9 +14,24 @@ const FORBIDDEN_CONTENT = [
   { code: 'INLINE_RUNTIME_TAG', expression: /<\s*(?:script|link|style)\b/i, message: 'Use the project styles.css and app.js files instead of inline runtime tags.' },
   { code: 'REMOTE_RESOURCE', expression: /(?:<\s*(?:script|link|img)[^>]+(?:src|href)\s*=|url\s*\()\s*['"]?\s*(?:\/\/|data:text\/html)/i, message: 'Only local project resources are supported.' },
 ]
+const HTML_LOCAL_REFERENCE = /\b(?:href|src)\s*=\s*(['"])((?:pages|assets)\/[a-z0-9][a-z0-9._/-]*)\1/gi
+const CSS_LOCAL_REFERENCE = /\burl\(\s*(['"]?)((?:assets)\/[a-z0-9][a-z0-9._/-]*)\1\s*\)/gi
 
 function issue(code, message, path = null, severity = 'error') {
   return { code, message, path, severity }
+}
+
+function localReferences(content) {
+  const references = new Set()
+  for (const expression of [HTML_LOCAL_REFERENCE, CSS_LOCAL_REFERENCE]) {
+    expression.lastIndex = 0
+    let match = expression.exec(content)
+    while (match) {
+      references.add(match[2])
+      match = expression.exec(content)
+    }
+  }
+  return references
 }
 
 export function normalizeBuilderPath(value) {
@@ -73,6 +89,13 @@ export function validateBuilderFiles(inputFiles, { entryFile = BUILDER_ENTRY_FIL
   if (normalizedEntry !== BUILDER_ENTRY_FILE || !paths.has(BUILDER_ENTRY_FILE)) {
     issues.push(issue('ENTRY_FILE_REQUIRED', 'A valid index.html entry file is required.', BUILDER_ENTRY_FILE))
   }
+  for (const file of files) {
+    for (const reference of localReferences(file.content)) {
+      if (!paths.has(reference)) {
+        issues.push(issue('MISSING_LOCAL_REFERENCE', `This file references ${reference}, which is not part of the project.`, file.path))
+      }
+    }
+  }
 
   const invalidPaths = new Set(issues.filter((item) => item.path).map((item) => item.path))
   const validatedFiles = files.map((file) => ({
@@ -90,7 +113,7 @@ export function validateBuilderFiles(inputFiles, { entryFile = BUILDER_ENTRY_FIL
   }
 }
 
-export function validateBuilderManifest(manifest) {
+export function validateBuilderManifest(manifest, { maxFiles = BUILDER_MAX_FILE_COUNT } = {}) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     return { valid: false, issues: [issue('INVALID_MANIFEST', 'The generation manifest was not valid JSON.')] }
   }
@@ -105,7 +128,7 @@ export function validateBuilderManifest(manifest) {
     else seen.add(path)
   }
   if (!seen.has(BUILDER_ENTRY_FILE)) issues.push(issue('ENTRY_FILE_REQUIRED', 'The manifest must include index.html.', BUILDER_ENTRY_FILE))
-  if (files.length > BUILDER_MAX_FILE_COUNT) issues.push(issue('TOO_MANY_FILES', `The manifest exceeds ${BUILDER_MAX_FILE_COUNT} files.`))
+  if (files.length > maxFiles) issues.push(issue('TOO_MANY_FILES', `The manifest exceeds the ${maxFiles}-file generation limit.`))
   return { valid: !issues.length, issues }
 }
 

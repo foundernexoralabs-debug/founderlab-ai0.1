@@ -32,21 +32,50 @@ function routeLocalLinks(html) {
   return html.replace(/\bhref=(['"])((?:pages\/)?[a-z0-9][a-z0-9._-]*\.html)\1/gi, 'href="#" data-builder-path="$2"')
 }
 
+function localSvgDataUrls(files) {
+  return new Map((files || [])
+    .filter((file) => file?.path?.startsWith('assets/') && file.path.toLowerCase().endsWith('.svg'))
+    .map((file) => [file.path, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(file.content).replace(/'/g, '%27')}`]))
+}
+
+export function inlineLocalSvgReferences(source, files) {
+  const assets = localSvgDataUrls(files)
+  if (!assets.size) return source
+  return String(source || '')
+    .replace(/\b(src|href)=(['"])(assets\/[a-z0-9][a-z0-9._/-]*\.svg)\2/gi, (match, attribute, quote, path) => {
+      const dataUrl = assets.get(path)
+      return dataUrl ? `${attribute}=${quote}${dataUrl}${quote}` : match
+    })
+    .replace(/\burl\(\s*(['"]?)(assets\/[a-z0-9][a-z0-9._/-]*\.svg)\1\s*\)/gi, (match, quote, path) => {
+      const dataUrl = assets.get(path)
+      return dataUrl ? `url("${dataUrl}")` : match
+    })
+}
+
 function safePreviewBridge() {
   return `
     (function () {
+      var runtimeFailed = false;
       var notify = function (type, detail) {
         window.parent.postMessage({ source: 'founderlab-builder-preview', type: type, detail: detail || null }, '*');
       };
-      window.addEventListener('error', function () { notify('runtime-error', { code: 'PREVIEW_RUNTIME_ERROR' }); });
-      window.addEventListener('unhandledrejection', function () { notify('runtime-error', { code: 'PREVIEW_RUNTIME_ERROR' }); });
+      var runtimeError = function () {
+        runtimeFailed = true;
+        notify('runtime-error', { code: 'PREVIEW_RUNTIME_ERROR' });
+      };
+      window.addEventListener('error', runtimeError);
+      window.addEventListener('unhandledrejection', runtimeError);
       document.addEventListener('click', function (event) {
         var link = event.target.closest && event.target.closest('[data-builder-path]');
         if (!link) return;
         event.preventDefault();
         notify('navigate', { path: link.getAttribute('data-builder-path') });
       });
-      notify('ready', null);
+      window.addEventListener('load', function () {
+        window.setTimeout(function () {
+          if (!runtimeFailed) notify('ready', null);
+        }, 0);
+      });
     }());`
 }
 
@@ -59,10 +88,12 @@ export function buildBuilderPreviewDocument(files, { entryFile = BUILDER_ENTRY_F
   }
   const css = validation.files.find((file) => file.path === 'styles.css')?.content || ''
   const script = validation.files.find((file) => file.path === 'app.js')?.content || ''
+  const body = routeLocalLinks(inlineLocalSvgReferences(bodyOf(index.content), validation.files))
+  const previewCss = inlineLocalSvgReferences(css, validation.files)
   const srcDoc = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${BUILDER_PREVIEW_CSP}"><title>${escapeHtml(titleOf(index.content))}</title>
-<style>${escapeForScript(css)}</style></head><body>${routeLocalLinks(bodyOf(index.content))}
+<style>${escapeForScript(previewCss)}</style></head><body>${body}
 <script>${safePreviewBridge()}<\/script><script>${escapeForScript(script)}<\/script></body></html>`
   return { ok: true, validation, srcDoc }
 }

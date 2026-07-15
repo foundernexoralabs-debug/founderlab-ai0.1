@@ -43,6 +43,21 @@ ${repairInstructions ? `Repair instructions: ${repairInstructions}` : ''}
 Return exactly: {"path":${JSON.stringify(file.path)},"content":"complete file contents"}`
 }
 
+export function buildBuilderFilesPrompt({ brief, plan, manifest, repairInstructions = '' }) {
+  return `${JSON_RULES}
+
+You are generating every file in a small FounderLab Builder project in one cohesive response. Produce complete contents for each manifest file. The supported project has no dependencies, no imports, no external URLs, no network access, no iframe, no eval, and no Function constructor. Use semantic accessible responsive HTML, polished CSS, and small progressive-enhancement JavaScript where needed. Do not include script or link tags in HTML; styles.css and app.js are injected by the isolated runtime.
+
+Keep this project intentionally small: return only the manifest files, and keep total generated source concise enough to fit in one response. Every manifest path must appear once, with complete content.
+
+Brief: ${brief}
+Plan: ${JSON.stringify(plan)}
+Manifest: ${JSON.stringify(manifest)}
+${repairInstructions ? `Repair instructions: ${repairInstructions}` : ''}
+
+Return exactly: {"files":[{"path":"manifest file path","content":"complete file contents"}]}`
+}
+
 export function buildBuilderPatchPrompt({ request, project, selectedPath }) {
   const fileList = (project.files || []).map((file) => ({ path: file.path, role: file.role, language: file.language }))
   const selectedFile = (project.files || []).find((file) => file.path === selectedPath) || (project.files || [])[0]
