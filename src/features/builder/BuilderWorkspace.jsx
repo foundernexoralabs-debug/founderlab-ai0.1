@@ -29,6 +29,9 @@ const SAFE_BUILDER_ERROR_MESSAGES = Object.freeze({
   FILE_BATCH_INVALID: 'FounderLab received an invalid project-file response. No project was saved.',
   FILE_BATCH_INCOMPLETE: 'FounderLab received an incomplete project-file response. Please retry the build.',
   VALIDATION_FAILED: 'The generated project did not pass Builder safety checks. No project was saved.',
+  GENERATION_OUTPUT_TRUNCATED: 'The selected provider stopped before completing the Builder project. FounderLab kept the project unsaved.',
+  GEMINI_OUTPUT_TRUNCATED: 'Gemini stopped before completing this Builder file. No project was saved.',
+  GEMINI_STRUCTURED_OUTPUT_INVALID: 'Gemini did not return a complete structured Builder file. No project was saved.',
   PROVIDER_RATE_LIMITED: 'The selected provider has reached its request limit. Wait briefly, then retry.',
   PROVIDER_REQUEST_TOO_LARGE: 'This Builder request was larger than the selected provider can accept. Simplify the brief and retry.',
   RATE_LIMITED: 'FounderLab request protection is temporarily limiting generation. Wait briefly, then retry.',
@@ -184,19 +187,20 @@ function FileExplorer({ project, activePath, dirtyPath, onSelect, onAdd, onDelet
   </div>
 }
 
-function PreviewPanel({ project, previewPath, onNavigate, onReady, onRuntimeError, renderKey }) {
+function PreviewPanel({ project, previewPath, onNavigate, onNavigationError, onReady, onRuntimeError, renderKey }) {
   const frame = useRef(null)
   const preview = useMemo(() => buildBuilderPreviewDocument(project.files, { entryFile: previewPath }), [project.files, previewPath])
   useEffect(() => {
     const listen = (event) => {
       if (!isSafeBuilderPreviewMessage(event, frame.current?.contentWindow)) return
       if (event.data.type === 'navigate') onNavigate(event.data.detail?.path)
+      if (event.data.type === 'navigation-error') onNavigationError(event.data.detail?.code)
       if (event.data.type === 'ready') onReady()
       if (event.data.type === 'runtime-error') onRuntimeError()
     }
     window.addEventListener('message', listen)
     return () => window.removeEventListener('message', listen)
-  }, [onNavigate, onReady, onRuntimeError])
+  }, [onNavigate, onNavigationError, onReady, onRuntimeError])
   useEffect(() => {
     if (!preview.ok) onRuntimeError(preview.validation.issues[0]?.message || 'This version could not be rendered safely.')
   }, [onRuntimeError, preview.ok])
@@ -218,6 +222,7 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
   const [showCode, setShowCode] = useState(false)
   const [mobileTab, setMobileTab] = useState('preview')
   const [previewKey, setPreviewKey] = useState(0)
+  const [previewNotice, setPreviewNotice] = useState(null)
   const previewHost = useRef(null)
 
   useEffect(() => {
@@ -330,8 +335,18 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
   const validate = validateBuilderFiles(project.files)
   const status = projectStatus(project)
   const onNavigate = useCallback((path) => {
-    if (project.files.some((file) => file.path === path && file.path.endsWith('.html'))) setPreviewPath(path)
+    if (project.files.some((file) => file.path === path && file.path.endsWith('.html'))) {
+      setPreviewNotice(null)
+      setPreviewPath(path)
+      return
+    }
+    setPreviewNotice('This generated link does not point to a page in this project. Your current preview is unchanged.')
   }, [project.files])
+  const onNavigationError = useCallback((code) => {
+    setPreviewNotice(code === 'PREVIEW_FRAGMENT_MISSING'
+      ? 'This generated section link does not exist in the page. Your preview is still available.'
+      : 'This generated link is not supported by the isolated preview. Your preview is still available.')
+  }, [])
   const onPreviewReady = useCallback(() => {
     // A previous version can stay visible after a failed edit. Never mark the failed
     // current version ready merely because that fallback iframe loaded correctly.
@@ -386,10 +401,23 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
     ? previewPath
     : previewProject.entryFile || BUILDER_ENTRY_FILE
   const retryPreview = () => {
+    setPreviewNotice(null)
     const updated = { ...project, preview: { ...project.preview, status: 'building', lastError: null } }
     onProjectChange(updated)
     void onSave(updated)
     setPreviewKey((value) => value + 1)
+  }
+  const resetPreview = () => {
+    setPreviewPath(previewProject.entryFile || BUILDER_ENTRY_FILE)
+    retryPreview()
+  }
+  const returnToLastWorkingPreview = () => {
+    const versionId = project.preview?.lastSuccessfulVersionId
+    if (!versionId || versionId === project.currentVersionId) return resetPreview()
+    restore(versionId)
+    setPreviewPath(BUILDER_ENTRY_FILE)
+    setPreviewNotice('Returned to your last working Builder version.')
+    toast('Returned to your last working Builder version.', 'success')
   }
   const repairPreview = () => {
     const repairPath = project.files.some((file) => file.path === 'styles.css') ? 'styles.css' : BUILDER_ENTRY_FILE
@@ -434,10 +462,11 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
           <textarea aria-label={`Edit ${activeFile?.path || 'project file'}`} value={draft} onChange={(event) => setDraft(event.target.value)} readOnly={isLargeFile} spellCheck={false} style={{ flex: 1, width: '100%', minHeight: 180, border: 'none', outline: 'none', resize: 'none', padding: 14, background: '#06060b', color: '#e8e8f8', font: '12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace' }} />
         </section>
         <section ref={previewHost} className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', background: C.bg, order: 1 }}>
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 13 }}>Website preview</strong><span style={{ color: C.t3, fontSize: 12 }}> · {displayedPreviewPath}</span></div><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}><span style={{ color: C.t3, fontSize: 11 }}>Scroll inside preview</span><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={displayedPreviewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{previewPages.map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={retryPreview} aria-label="Refresh preview">↻</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
-          {project.preview?.status === 'error' && <div role="alert" style={{ margin: '10px 12px 0', padding: 11, border: `1px solid ${C.red}55`, borderRadius: 9, background: '#261116', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 12 }}>{showingFallback ? 'Showing your last working preview' : 'This version needs attention'}</strong><span style={{ display: 'block', fontSize: 12, marginTop: 3 }}>{project.preview?.lastError || 'The current version could not render safely.'}</span></div><span style={{ display: 'flex', gap: 6 }}><Button size="sm" variant="secondary" onClick={retryPreview}>Retry</Button><Button size="sm" onClick={repairPreview} disabled={busy || editing}>{editing ? <Spinner size={13} color="#fff" /> : 'Repair with AI'}</Button></span></div>}
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 13 }}>Website preview</strong><span style={{ color: C.t3, fontSize: 12 }}> · {displayedPreviewPath}</span></div><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}><span style={{ color: C.t3, fontSize: 11 }}>Scroll inside preview</span><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={displayedPreviewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{previewPages.map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={resetPreview} aria-label="Reset preview to home">Home</Button><Button size="sm" variant="ghost" onClick={retryPreview} aria-label="Refresh preview">Refresh</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
+          {previewNotice && <div role="alert" style={{ margin: '10px 12px 0', padding: '9px 11px', border: `1px solid ${C.yellow}55`, borderRadius: 9, background: '#241d0d', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><span style={{ fontSize: 12 }}>{previewNotice}</span><Button size="sm" variant="ghost" onClick={() => setPreviewNotice(null)}>Dismiss</Button></div>}
+          {project.preview?.status === 'error' && <div role="alert" style={{ margin: '10px 12px 0', padding: 11, border: `1px solid ${C.red}55`, borderRadius: 9, background: '#261116', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 12 }}>{showingFallback ? 'Showing your last working preview' : 'This version needs attention'}</strong><span style={{ display: 'block', fontSize: 12, marginTop: 3 }}>{project.preview?.lastError || 'The current version could not render safely.'}</span></div><span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}><Button size="sm" variant="secondary" onClick={retryPreview}>Refresh preview</Button>{showingFallback && <Button size="sm" variant="secondary" onClick={returnToLastWorkingPreview}>Return to saved version</Button>}<Button size="sm" onClick={repairPreview} disabled={busy || editing}>{editing ? <Spinner size={13} color="#fff" /> : 'Repair with AI'}</Button></span></div>}
           <div style={{ padding: '10px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 8, alignItems: 'center', background: C.surf }}><Input aria-label="Refine the website" value={changeRequest} onChange={(event) => setChangeRequest(event.target.value)} placeholder="Refine the website: make the hero more confident, add a product workflow…" onKeyDown={(event) => event.key === 'Enter' && applyChange()} /><Button size="sm" onClick={() => applyChange()} disabled={busy || editing || !changeRequest.trim()}>{editing ? <Spinner size={13} color="#fff" /> : 'Refine'}</Button></div>
-          <div aria-label="Website preview canvas" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: previewDevice === 'desktop' ? 10 : 16, display: 'flex', justifyContent: 'center', alignItems: 'stretch', background: '#06060b', boxSizing: 'border-box' }}><div style={{ width: previewWidth, maxWidth: '100%', height: '100%', minHeight: 0, flex: previewDevice === 'desktop' ? '1 1 auto' : '0 1 auto', overflow: 'hidden', background: '#fff', borderRadius: previewDevice === 'desktop' ? 10 : 14, boxShadow: '0 12px 32px rgba(0,0,0,.28)' }}><PreviewPanel project={previewProject} previewPath={displayedPreviewPath} onNavigate={onNavigate} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${showingFallback ? project.preview?.lastSuccessfulVersionId : project.currentVersionId || 'draft'}-${displayedPreviewPath}-${previewKey}`} /></div></div>
+          <div aria-label="Website preview canvas" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: previewDevice === 'desktop' ? 10 : 16, display: 'flex', justifyContent: 'center', alignItems: 'stretch', background: '#06060b', boxSizing: 'border-box' }}><div style={{ width: previewWidth, maxWidth: '100%', height: '100%', minHeight: 0, flex: previewDevice === 'desktop' ? '1 1 auto' : '0 1 auto', overflow: 'hidden', background: '#fff', borderRadius: previewDevice === 'desktop' ? 10 : 14, boxShadow: '0 12px 32px rgba(0,0,0,.28)' }}><PreviewPanel project={previewProject} previewPath={displayedPreviewPath} onNavigate={onNavigate} onNavigationError={onNavigationError} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${showingFallback ? project.preview?.lastSuccessfulVersionId : project.currentVersionId || 'draft'}-${displayedPreviewPath}-${previewKey}`} /></div></div>
         </section>
       </div>
       <aside className={`builder-history-panel${mobileTab === 'history' ? ' builder-history-active' : ''}`} style={{ width: 184, borderLeft: `1px solid ${C.border}`, overflow: 'auto', flexShrink: 0 }}>
@@ -493,7 +522,7 @@ export function BuilderWorkspace({ user }) {
     if (!brief.trim() || !plan || inFlight.current) return
     inFlight.current = true; setBusy(true); setActivity([]); controller.current = new AbortController()
     try {
-      const project = await builderGenerationService.generate({ brief: brief.trim(), plan, ownerId: user?.id, signal: controller.current.signal, onActivity: (entry) => setActivity((current) => [...current, entry]) })
+      const project = await builderGenerationService.generate({ brief: brief.trim(), plan, provider: plan.provider, model: plan.model, ownerId: user?.id, signal: controller.current.signal, onActivity: (entry) => setActivity((current) => [...current, entry]) })
       const result = await persist(project)
       setActiveProject(result.project || project); setPlan(null); setBrief('')
       toast(result.saved ? 'Project saved. Building the isolated preview…' : 'Project built and retained locally; cloud saving needs attention.', result.saved ? 'success' : 'error')

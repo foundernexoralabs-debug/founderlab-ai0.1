@@ -19,22 +19,34 @@ const FORBIDDEN_CONTENT = [
   { code: 'INLINE_RUNTIME_TAG', expression: /<\s*(?:script|link|style)\b/i, message: 'Use the project styles.css and app.js files instead of inline runtime tags.' },
   { code: 'REMOTE_RESOURCE', expression: /(?:<\s*(?:script|link|img)[^>]+(?:src|href)\s*=|url\s*\()\s*['"]?\s*data:text\/html/i, message: 'Only local project resources are supported.' },
 ]
-const HTML_LOCAL_REFERENCE = /\b(?:href|src)\s*=\s*(['"])((?:pages|assets)\/[a-z0-9][a-z0-9._/-]*)\1/gi
+const HTML_REFERENCE = /\b(?:href|src)\s*=\s*(['"])([^'"]+)\1/gi
 const CSS_LOCAL_REFERENCE = /\burl\(\s*(['"]?)((?:assets)\/[a-z0-9][a-z0-9._/-]*)\1\s*\)/gi
 
 function issue(code, message, path = null, severity = 'error') {
   return { code, message, path, severity }
 }
 
+function localHtmlReference(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw || raw.startsWith('#') || raw.startsWith('//') || /^(?:[a-z][a-z0-9+.-]*:|data:)/i.test(raw)) return null
+  const path = raw.split(/[?#]/, 1)[0].replace(/^\.\//, '').replace(/^\/+/, '')
+  return path === BUILDER_ENTRY_FILE || path.startsWith('pages/') || path.startsWith('assets/') ? path : null
+}
+
 function localReferences(content) {
   const references = new Set()
-  for (const expression of [HTML_LOCAL_REFERENCE, CSS_LOCAL_REFERENCE]) {
-    expression.lastIndex = 0
-    let match = expression.exec(content)
-    while (match) {
-      references.add(match[2])
-      match = expression.exec(content)
-    }
+  HTML_REFERENCE.lastIndex = 0
+  let match = HTML_REFERENCE.exec(content)
+  while (match) {
+    const reference = localHtmlReference(match[2])
+    if (reference) references.add(reference)
+    match = HTML_REFERENCE.exec(content)
+  }
+  CSS_LOCAL_REFERENCE.lastIndex = 0
+  match = CSS_LOCAL_REFERENCE.exec(content)
+  while (match) {
+    references.add(match[2])
+    match = CSS_LOCAL_REFERENCE.exec(content)
   }
   return references
 }

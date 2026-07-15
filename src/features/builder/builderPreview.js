@@ -4,6 +4,8 @@ import { validateBuilderFiles } from './builderValidation.js'
 export const BUILDER_PREVIEW_SANDBOX = 'allow-scripts'
 export const BUILDER_PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 
+const PREVIEW_PAGE_PATH = /^(?:index\.html|pages\/[a-z0-9][a-z0-9._-]*\.html)$/i
+
 function escapeForScript(value) {
   return String(value || '').replace(/<\/script/gi, '<\\/script')
 }
@@ -28,8 +30,17 @@ function escapeHtml(value) {
   })[character])
 }
 
-function routeLocalLinks(html) {
-  return html.replace(/\bhref=(['"])((?:pages\/)?[a-z0-9][a-z0-9._-]*\.html)\1/gi, 'href="#" data-builder-path="$2"')
+export function normalizePreviewPagePath(value) {
+  if (typeof value !== 'string') return null
+  const path = value.split(/[?#]/, 1)[0].trim().replace(/^\.\//, '').replace(/^\/+/, '')
+  return PREVIEW_PAGE_PATH.test(path) ? path : null
+}
+
+export function routeLocalLinks(html) {
+  return String(html || '').replace(/\bhref=(['"])([^'"]+)\1/gi, (match, quote, href) => {
+    const path = normalizePreviewPagePath(href)
+    return path ? `href="#" data-builder-path="${path}"` : match
+  })
 }
 
 function localSvgDataUrls(files) {
@@ -72,10 +83,33 @@ function safePreviewBridge() {
       window.addEventListener('error', runtimeError);
       window.addEventListener('unhandledrejection', runtimeError);
       document.addEventListener('click', function (event) {
-        var link = event.target.closest && event.target.closest('[data-builder-path]');
+        if (event.defaultPrevented || event.button && event.button !== 0) return;
+        var link = event.target.closest && event.target.closest('a[href]');
         if (!link) return;
+        var path = link.getAttribute('data-builder-path');
+        if (path) {
+          event.preventDefault();
+          notify('navigate', { path: path });
+          return;
+        }
+        var href = link.getAttribute('href') || '';
+        if (href.charAt(0) === '#') {
+          event.preventDefault();
+          var fragment = href.slice(1);
+          if (!fragment) {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            return;
+          }
+          var target = document.getElementById(fragment);
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            return;
+          }
+          notify('navigation-error', { code: 'PREVIEW_FRAGMENT_MISSING' });
+          return;
+        }
         event.preventDefault();
-        notify('navigate', { path: link.getAttribute('data-builder-path') });
+        notify('navigation-error', { code: 'PREVIEW_LINK_UNSUPPORTED' });
       });
       window.addEventListener('load', function () {
         window.setTimeout(function () {
@@ -108,5 +142,5 @@ export function isSafeBuilderPreviewMessage(event, iframeWindow) {
   const data = event?.data
   return event?.source === iframeWindow
     && data?.source === 'founderlab-builder-preview'
-    && ['ready', 'runtime-error', 'navigate'].includes(data?.type)
+    && ['ready', 'runtime-error', 'navigate', 'navigation-error'].includes(data?.type)
 }

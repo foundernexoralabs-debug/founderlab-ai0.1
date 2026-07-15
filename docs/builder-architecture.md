@@ -84,9 +84,11 @@ retains the last successful version.
 
 1. Normalize the user's brief and request an editable JSON plan.
 2. Bound the brief and every plan/manifest field before it is interpolated into a
-   later prompt, then request a JSON file manifest. This prevents an unusually
-   verbose plan from turning the first file-generation request into an upstream
-   request-size failure.
+   later prompt. A standard one-page landing plan uses a deterministic,
+   validated `index.html` / `styles.css` / `app.js` manifest; multi-page plans
+   alone request a JSON manifest. This removes one provider round trip from the
+   normal first-build path and prevents an unusually verbose plan from turning a
+   later request into an upstream request-size failure.
 3. Generate the small, bounded manifest (at most five files) in one structured
    provider response through the normalized provider service. This avoids a
    burst of per-file calls exhausting an upstream provider quota.
@@ -135,6 +137,14 @@ An upstream HTTP 413 is returned as the specific, non-retryable
 `PROVIDER_REQUEST_TOO_LARGE` error rather than being hidden as a generic
 provider outage.
 
+Provider selection is captured from the plan request and carried into every
+later generation request. Groq uses the compact all-files batch to minimize
+cloud calls. Gemini generates one bounded JSON file at a time because a
+multi-file JSON response can exceed its completion budget; a `MAX_TOKENS`
+finish reason gets one visible, higher-budget retry for that file only. A
+complete fenced JSON object is normalized safely, while malformed or truncated
+output remains unsaved and receives a provider-specific Builder error.
+
 ## Preview security
 
 New Builder projects use an iframe with `sandbox="allow-scripts"` and
@@ -156,6 +166,13 @@ The desktop canvas has a definite viewport height and hides its outer overflow;
 the rendered site owns its own iframe scroll position. This keeps the website
 framed stably while making it clear that the Builder shell itself is not the
 page being previewed.
+
+The preview bridge only permits fragment scrolling and pages that are present in
+the validated project. It intercepts any unsupported link before the opaque
+iframe can navigate away, leaves the current preview intact, and sends a narrow
+safe error code to Builder. The canvas exposes Home, Refresh, and—when a
+fallback is active—Return to saved version controls; restoring a version creates
+an ordinary recoverable version rather than silently discarding work.
 
 ## Deferred, intentionally
 

@@ -2,6 +2,15 @@ import { BUILDER_ENTRY_FILE, BUILDER_RUNTIME, BUILDER_TEMPLATE } from './builder
 
 const JSON_RULES = `Return exactly one valid JSON object. Do not use Markdown, code fences, commentary, or keys that were not requested.`
 
+export const BUILDER_LANDING_PAGE_MANIFEST = Object.freeze({
+  entryFile: 'index.html',
+  files: Object.freeze([
+    Object.freeze({ path: 'index.html', role: 'entry', purpose: 'Complete responsive landing page' }),
+    Object.freeze({ path: 'styles.css', role: 'style', purpose: 'Visual system and responsive layout' }),
+    Object.freeze({ path: 'app.js', role: 'script', purpose: 'Small progressive enhancements only' }),
+  ]),
+})
+
 export const BUILDER_PROMPT_LIMITS = Object.freeze({
   briefCharacters: 24000,
   nameCharacters: 96,
@@ -73,6 +82,18 @@ export function normalizeBuilderPlan(plan) {
   }
 }
 
+export function canUseLandingPageManifest(plan) {
+  const pages = normalizeBuilderPlan(plan).pages
+  return pages.length === 1 && pages[0].path === BUILDER_ENTRY_FILE
+}
+
+export function createLandingPageManifest() {
+  return {
+    entryFile: BUILDER_LANDING_PAGE_MANIFEST.entryFile,
+    files: BUILDER_LANDING_PAGE_MANIFEST.files.map((file) => ({ ...file })),
+  }
+}
+
 function compactBuilderManifest(manifest) {
   return {
     entryFile: compactText(manifest?.entryFile, BUILDER_PROMPT_LIMITS.labelCharacters),
@@ -101,6 +122,7 @@ Visual execution standard:
 - Establish a responsive max-width layout (around 1100–1200px), a distinct type scale, generous section rhythm, and an intentional contrast hierarchy. Use CSS custom properties so the system stays coherent.
 - Make primary actions obvious and repeat the CTA only where it naturally supports the journey. Give feature cards, proof, and workflow content different visual roles instead of repeating one card pattern.
 - If the product is an AI meeting-notes tool, show a believable note summary, decisions, and action items in the visual treatment—never an empty generic dashboard.
+- For a single-page website, navigation and CTA links must use fragment targets that exist in the page (for example #features, #workflow, or #start). Never invent a route, page, or external link that is not part of the generated project.
 - One restrained tonal treatment or soft gradient is enough; do not use decoration to hide weak hierarchy. Keep all content readable, accessible, and useful on a narrow screen.`
 
 export function buildBuilderPlanPrompt(brief) {
@@ -164,7 +186,7 @@ Generation quality bar:
 - Keep copy concrete and concise. Avoid lorem ipsum, invented testimonials or customers, fake metrics, generic repeated cards, and empty placeholder boxes.
 - Use semantic landmarks and real button/link labels. Ensure the site remains coherent with JavaScript disabled.
 
-Keep this project intentionally small: return only the manifest files, and keep total generated source concise enough to fit in one response. Every manifest path must appear once, with complete content.
+Keep this project intentionally small: return only the manifest files, and keep total generated source concise enough to fit in one response. Every manifest path must appear once, with complete content. For a single-page manifest, all navigation must remain inside index.html using valid fragment links.
 
 Brief: ${compactBuilderBrief(brief)}
 Plan: ${JSON.stringify(normalizeBuilderPlan(plan))}
@@ -195,9 +217,10 @@ Return exactly: {"summary":"short change summary","changes":[{"path":"existing f
 export function parseStrictBuilderJson(text, label = 'generation response') {
   if (typeof text !== 'string' || !text.trim()) throw new BuilderFormatError(`The ${label} was empty.`)
   const source = text.trim()
-  if (source.startsWith('```')) throw new BuilderFormatError(`The ${label} was not returned in the required JSON format.`)
+  const fenced = source.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const jsonSource = fenced ? fenced[1].trim() : source
   try {
-    const parsed = JSON.parse(source)
+    const parsed = JSON.parse(jsonSource)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected object')
     return parsed
   } catch {
