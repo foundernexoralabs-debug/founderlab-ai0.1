@@ -1,12 +1,9 @@
 // ============================================================
-// FOUNDERLAB AI — src/App.jsx  |  Phase 2 Complete
-// Single file · Inline styles · Voice + TTS via dedicated modules
+// FOUNDERLAB AI — Application shell
+// Feature views, services, hooks, and UI primitives are composed here.
 // ============================================================
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import VoiceSpeedSelector from '@/components/settings/VoiceSpeedSelector'
-import { DEFAULT_VOICE_CONFIG } from '@/lib/voiceService'
-import { loadBrowserVoices, synthesizeSpeech, stopSpeech } from '@/services/speechService'
-import { getMicrophoneStream } from '@/lib/microphone'
 import { zipSupported, createZip, readZip, downloadBlob } from '@/lib/zip'
 import { detectLanguage, detectFromDescription } from '@/lib/langDetect'
 import { parseFiles, isPreviewable, buildPreviewDoc } from '@/lib/codeFiles'
@@ -14,581 +11,58 @@ import { downloadProjectZip, pushToGithub as pushToGithubShared, openVercelDeplo
 import { classifyEdit, extractSection, replaceSection, KNOWN_SECTIONS } from '@/lib/htmlSections'
 import { REQUIRED_PAGES, REQUIRED_COMPONENTS, CONFIG_FILES, classifyProjectEdit } from '@/lib/nextProjectSpec'
 import { buildProjectPreview, isPreviewableProject } from '@/lib/previewBundle'
+import { GENERATED_PREVIEW_REFERRER_POLICY, GENERATED_PREVIEW_SANDBOX } from '@/lib/previewSecurity'
+import { ErrorBoundary } from '@/app/ErrorBoundary'
+import { C } from '@/app/theme'
+import { ToastContainer, toast } from '@/app/toast'
+import { renderMsg } from '@/components/content/MessageContent'
+import { Badge, Button, Card, EmptyState, Input, Spinner } from '@/components/ui/Primitives'
+import { Sidebar } from '@/features/navigation/Navigation'
+import { AuthScreen, OnboardingModal, SetupScreen } from '@/features/auth/AuthScreens'
+import { Dashboard } from '@/features/dashboard/Dashboard'
+import { FeedbackModal } from '@/features/feedback/FeedbackModal'
+import { fileToBase64, ACCEPTED_IMAGE_TYPES } from '@/lib/files'
+import { copyText, flConsumeHandoff, flNavigate, fmtDate, ts, uid } from '@/lib/appUtils'
+import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
+import { useTextToSpeech } from '@/hooks/useTextToSpeech'
+import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
+import { clearGithubToken, getGithubToken, setGithubToken } from '@/services/githubTokenSession'
+import { authenticatedFetch } from '@/services/authenticatedFetch'
+import { getProvider } from '@/ai/providerRegistry'
+import { getProviderConfigurationState } from '@/ai/providerAvailability'
+import {
+  getProviderConnectionState,
+  getProviderConnectionStatuses,
+  setProviderConnectionStatus,
+  subscribeProviderConnectionStatuses,
+} from '@/ai/providerConnectionState'
+import {
+  ai,
+  getAIProvider,
+  getOllamaModel,
+  getOllamaURL,
+  getProviderAvailability,
+  getProviderModel,
+  isElectron as IS_ELECTRON,
+  ollamaChat,
+  ollamaProbe,
+  OLLAMA_MODEL_STORAGE_KEY,
+  OLLAMA_URL_STORAGE_KEY,
+  PROVIDERS,
+  createProviderConnectionTestRequest,
+  requestAIResult,
+  refreshProviderAvailability,
+  setAIProvider as setAIProviderLS,
+  setProviderModel,
+} from '@/services/aiProviderService'
+import {
+  isWorkspaceConfigured as CONFIGURED,
+  loadWorkspaceData as load,
+  migrateLocalWorkspaceToCloud as migrateLocalToCloud,
+  saveWorkspaceData as save,
+  workspaceStore as sb,
+} from '@/services/workspaceStore'
 
-// ── VOICE CONFIG PERSISTENCE ──────────────────────────────────
-const LS_VOICE = 'fl_voice_config'
-function getVoiceConfig() {
-  try { return { ...DEFAULT_VOICE_CONFIG, ...JSON.parse(localStorage.getItem(LS_VOICE) || '{}') } }
-  catch { return { ...DEFAULT_VOICE_CONFIG } }
-}
-function persistVoiceConfig(c) {
-  try { localStorage.setItem(LS_VOICE, JSON.stringify(c)) } catch {}
-}
-
-// ── SPEECH RECOGNITION HOOK ───────────────────────────────────
-// Uses getMicrophoneStream() from microphone.ts for clean, error-mapped
-// permission handling before SpeechRecognition acquires the hardware.
-function useSpeechRecognition() {
-  const [listening,  setListening]  = useState(false)
-  const [transcript, setTranscript] = useState('')
-  const recoRef = useRef(null)
-
-  const start = useCallback(async (onFinal) => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) { toast('Voice input requires Chrome, Edge, or Safari.', 'error'); return }
-
-    // getMicrophoneStream() maps all browser permission errors to clear messages
-    let stream
-    try { stream = await getMicrophoneStream() }
-    catch (err) { toast(err.message, 'error'); return }
-
-    // Release stream — we only need the permission grant
-    stream.getTracks().forEach(t => t.stop())
-
-    // 150 ms settle: audio subsystem releases hardware before SpeechRecognition re-acquires
-    await new Promise(r => setTimeout(r, 150))
-
-    const reco = new SR()
-    recoRef.current = reco
-    reco.lang = 'en-GB'
-    reco.interimResults = true
-    reco.continuous = false
-    reco.maxAlternatives = 1
-    reco.onstart  = () => setListening(true)
-    reco.onresult = (e) => {
-      const t = Array.from(e.results).map(r => r[0].transcript).join('')
-      setTranscript(t)
-      if (e.results[e.results.length - 1].isFinal) onFinal?.(t)
-    }
-    reco.onend   = () => setListening(false)
-    reco.onerror = (e) => {
-      setListening(false)
-      const silent = new Set(['no-speech', 'aborted'])
-      if (!silent.has(e.error)) {
-        const msgs = {
-          'not-allowed':   'Mic blocked — allow microphone access in browser settings.',
-          'audio-capture': 'No microphone found.',
-          'network':       'Network error during speech recognition.',
-        }
-        toast(msgs[e.error] || ('Speech error: ' + e.error), 'error')
-      }
-    }
-    reco.start()
-  }, [])
-
-  const stop = useCallback(() => { recoRef.current?.stop(); setListening(false) }, [])
-  return { listening, transcript, setTranscript, start, stop }
-}
-
-// ── TTS HOOK ─────────────────────────────────────────────────
-// Delegates to speechService.ts: ElevenLabs proxy first, browser fallback.
-// voiceConfig comes from localStorage (fl_voice_config) via SettingsPage.
-function useTTS(voiceConfig) {
-  const [speaking, setSpeaking]   = useState(false)
-  const [elAvailable, setElAvail] = useState(null) // null=checking, true, false
-
-  // Load browser voices on mount (must happen early — voiceschanged is async)
-  useEffect(() => { loadBrowserVoices() }, [])
-
-  // Probe ElevenLabs availability once on mount
-  useEffect(() => {
-    fetch('/api/tts', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: ' ', gender: 'male' }),
-    })
-      .then(r => { const ct = r.headers.get('Content-Type') || ''; setElAvail(ct.includes('audio')) })
-      .catch(() => setElAvail(false))
-  }, [])
-
-  async function speak(text) {
-    if (speaking) { stopSpeech(); setSpeaking(false); return }
-    setSpeaking(true)
-    try { await synthesizeSpeech(voiceConfig, text) }
-    finally { setSpeaking(false) }
-  }
-
-  function stop() { stopSpeech(); setSpeaking(false) }
-  return { speaking, speak, stop, elAvailable }
-}
-
-// ── IMAGE FILE UTILS ──────────────────────────────────────────
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload  = e => resolve(e.target.result)
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-const ACCEPTED_TYPES = 'image/*,image/png,image/jpeg,image/webp,image/gif'
-
-
-class ErrorBoundary extends React.Component {
-  constructor(props) { super(props); this.state = { err: null } }
-  static getDerivedStateFromError(err) { return { err } }
-  render() {
-    if (this.state.err) return (
-      <div style={{ minHeight:'100vh', background:'#09090f', display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-        <div style={{ background:'#0f0f1a', border:'1px solid rgba(255,255,255,.07)', borderRadius:12, padding:32, maxWidth:480, width:'100%', textAlign:'center' }}>
-          <div style={{ fontSize:32, marginBottom:16 }}>⚠️</div>
-          <h2 style={{ color:'#eeeef8', margin:'0 0 8px', fontSize:18 }}>Something went wrong</h2>
-          <p style={{ color:'#8888b0', fontSize:13, margin:'0 0 20px' }}>{this.state.err?.message || 'Unexpected error'}</p>
-          <button onClick={()=>window.location.reload()} style={{ background:'#6366f1', color:'#fff', border:'none', borderRadius:8, padding:'10px 24px', fontSize:14, cursor:'pointer', fontFamily:'inherit' }}>Reload App</button>
-        </div>
-      </div>
-    )
-    return this.props.children
-  }
-}
-
-// ── ENV ──────────────────────────────────────────────────────
-const SB_URL  = import.meta.env.VITE_SUPABASE_URL  || ''
-const SB_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
-const CONFIGURED = Boolean(SB_URL && SB_ANON)
-const LS_KEY = 'fl_session'
-
-// ── SUPABASE CLIENT (raw fetch — no SDK) ─────────────────────
-const sb = {
-  session: null,
-  _rem: true,
-
-  async boot() {
-    try {
-      const raw = localStorage.getItem(LS_KEY)
-      if (!raw) return false
-      const saved = JSON.parse(raw)
-      if (!saved?.refresh_token) return false
-      const d = await this._ar('/auth/v1/token?grant_type=refresh_token', { refresh_token: saved.refresh_token })
-      this._save(d, true)
-      return true
-    } catch { localStorage.removeItem(LS_KEY); return false }
-  },
-
-  _save(d, rem = this._rem) {
-    this.session = {
-      access_token: d.access_token,
-      refresh_token: d.refresh_token,
-      user_id: d.user?.id,
-      email: d.user?.email,
-    }
-    if (rem) localStorage.setItem(LS_KEY, JSON.stringify(this.session))
-  },
-
-  async _ar(path, body, token) {
-    const h = { 'Content-Type': 'application/json', apikey: SB_ANON }
-    if (token) h.Authorization = `Bearer ${token}`
-    const res = await fetch(`${SB_URL}${path}`, { method: 'POST', headers: h, body: JSON.stringify(body) })
-    const d = await res.json()
-    if (!res.ok) throw new Error(d.msg || d.error_description || d.message || 'Auth error')
-    return d
-  },
-
-  async signUp(email, password)         { return this._ar('/auth/v1/signup', { email, password }) },
-  async resetPassword(email)            { return this._ar('/auth/v1/recover', { email }) },
-  async resendVerification(email)       { return this._ar('/auth/v1/resend', { type: 'signup', email }) },
-  async signIn(email, password, rem = true) {
-    this._rem = rem
-    const d = await this._ar('/auth/v1/token?grant_type=password', { email, password })
-    this._save(d, rem)
-    return d
-  },
-  async signOut() {
-    try { await this._ar('/auth/v1/logout', {}, this.session?.access_token) } catch {}
-    this.session = null
-    localStorage.removeItem(LS_KEY)
-  },
-  async updatePassword(pw) {
-    const res = await fetch(`${SB_URL}/auth/v1/user`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: `Bearer ${this.session.access_token}` },
-      body: JSON.stringify({ password: pw }),
-    })
-    if (!res.ok) throw new Error('Update failed')
-  },
-
-  _h() { return { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: `Bearer ${this.session?.access_token}` } },
-
-  async _get(path) {
-    try {
-      const res = await fetch(`${SB_URL}/rest/v1/${path}`, { headers: this._h() })
-      return res.ok ? await res.json() : null
-    } catch { return null }
-  },
-  async _patch(path, body, prefer = 'return=minimal') {
-    try {
-      const res = await fetch(`${SB_URL}/rest/v1/${path}`, { method: 'PATCH', headers: { ...this._h(), Prefer: prefer }, body: JSON.stringify(body) })
-      if (!res.ok) return prefer.includes('representation') ? [] : false
-      return prefer.includes('representation') ? await res.json() : true
-    } catch { return prefer.includes('representation') ? [] : false }
-  },
-  async _post(path, body, prefer = 'return=minimal') {
-    try {
-      const res = await fetch(`${SB_URL}/rest/v1/${path}`, { method: 'POST', headers: { ...this._h(), Prefer: prefer }, body: JSON.stringify(body) })
-      return res.ok
-    } catch { return false }
-  },
-
-  async getProfile()       { const d = await this._get(`profiles?id=eq.${this.session.user_id}&select=*`); return Array.isArray(d) ? d[0] || null : null },
-  async updateProfile(obj) { return this._post('profiles', { id: this.session.user_id, ...obj }, 'resolution=merge-duplicates,return=minimal') },
-  // getData: always read the MOST RECENT row for this key — protects against
-  // duplicate rows if the DB is missing a unique(user_id,key) constraint.
-  async getData(key) {
-    const d = await this._get(`user_data?user_id=eq.${this.session.user_id}&key=eq.${encodeURIComponent(key)}&select=id,value&order=id.desc&limit=1`)
-    return Array.isArray(d) && d.length ? d[0].value : null
-  },
-  // setData: does NOT rely on PostgREST upsert (which silently no-ops into a
-  // plain insert if the DB lacks a unique constraint). Instead: try to PATCH
-  // the existing row for (user_id,key); if none exists, INSERT one. This is
-  // correct and idempotent no matter what the live schema looks like.
-  async setData(key, val) {
-    const uid = this.session.user_id
-    const updated = await this._patch(
-      `user_data?user_id=eq.${uid}&key=eq.${encodeURIComponent(key)}`,
-      { value: val },
-      'return=representation'
-    )
-    if (Array.isArray(updated) && updated.length > 0) return true
-    return this._post('user_data', { user_id: uid, key, value: val }, 'return=minimal')
-  },
-  async exportAll()        { return this._get(`user_data?user_id=eq.${this.session.user_id}&select=key,value`) || [] },
-  async logEvent(ev, pg)   { try { await this._post('usage_events', { user_id: this.session.user_id, event: ev, page: pg }) } catch {} },
-  async getEventCounts()   {
-    const d = await this._get(`usage_events?user_id=eq.${this.session.user_id}&select=event`)
-    if (!Array.isArray(d)) return {}
-    return d.reduce((a, e) => { a[e.event] = (a[e.event] || 0) + 1; return a }, {})
-  },
-  async submitFeedback(type, description) { return this._post('fl_feedback', { user_id: this.session?.user_id, email: this.session?.email, type, description }) },
-  async getFeedback()      { return this._get(`fl_feedback?user_id=eq.${this.session.user_id}&select=*&order=created_at.desc`) || [] },
-  async resolveFeedback(id){ return this._patch(`fl_feedback?id=eq.${id}`, { status: 'resolved' }) },
-}
-
-// ── SAVE / LOAD (Supabase KV store + localStorage fallback) ──
-const save = async (key, value) => {
-  // Always write to localStorage as an instant local copy
-  try { localStorage.setItem(key, JSON.stringify(value)) } catch {}
-  // If logged in, also sync to Supabase cloud
-  if (sb.session?.user_id) {
-    try { await sb.setData(key, value) } catch (e) {
-      console.warn('[save] Supabase write failed for', key, '— local copy kept:', e?.message)
-    }
-  }
-}
-const load = async (key, def = null) => {
-  if (sb.session?.user_id) {
-    try {
-      const r = await sb.getData(key)
-      if (r !== null && r !== undefined) return r
-      // Cloud returned nothing — try local copy (e.g. data saved before login)
-      const local = localStorage.getItem(key)
-      return local ? JSON.parse(local) : def
-    } catch {
-      try { const local = localStorage.getItem(key); return local ? JSON.parse(local) : def } catch { return def }
-    }
-  }
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : def } catch { return def }
-}
-async function migrateLocalToCloud() {
-  for (const key of ['fl_convos', 'fl_notes', 'fl_tasks']) {
-    try {
-      const raw = localStorage.getItem(key); if (!raw) continue
-      const local = JSON.parse(raw)
-      if (!local || (Array.isArray(local) && !local.length)) continue
-      const cloud = await sb.getData(key)
-      if (!cloud || (Array.isArray(cloud) && !cloud.length)) { await sb.setData(key, local); localStorage.removeItem(key) }
-    } catch {}
-  }
-}
-
-// ── AI HELPER ────────────────────────────────────────────────
-// ── AI PROVIDER MANAGER ──────────────────────────────────────
-// All keys live server-side (process.env). Frontend stores only
-// provider selection and non-secret config in localStorage.
-
-const LS_PROVIDER  = 'fl_ai_provider'
-const LS_MODELS    = 'fl_ai_models'    // { anthropic, groq, gemini } model per provider
-const LS_OLLAMA_URL   = 'fl_ollama_url'
-const LS_OLLAMA_MODEL = 'fl_ollama_model'
-
-// Catalogue — defines every supported provider and its available models
-const PROVIDERS = {
-  anthropic: {
-    id: 'anthropic', name: 'Anthropic Claude', icon: '✦',
-    sub: 'Best quality · Cloud API',
-    models: [
-      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4 (recommended)' },
-      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (fastest)' },
-      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6 (most capable)' },
-    ],
-    default: 'claude-sonnet-4-6',
-    keyEnv: 'ANTHROPIC_API_KEY',
-    docsUrl: 'https://console.anthropic.com',
-  },
-  groq: {
-    id: 'groq', name: 'Groq', icon: '⚡',
-    sub: 'Ultra-fast inference · Free tier',
-    models: [
-      { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B (recommended)' },
-      { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B (fastest)' },
-      { id: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
-      { id: 'moonshotai/kimi-k2-instruct-0905', label: 'Kimi K2 Instruct' },
-    ],
-    default: 'openai/gpt-oss-120b',
-    keyEnv: 'GROQ_API_KEY',
-    docsUrl: 'https://console.groq.com',
-  },
-  gemini: {
-    id: 'gemini', name: 'Google Gemini', icon: '✶',
-    sub: 'Google AI · Generous free tier',
-    models: [
-      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (recommended)' },
-      { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite (fastest)' },
-      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (most capable)' },
-    ],
-    default: 'gemini-3.5-flash',
-    keyEnv: 'GEMINI_API_KEY',
-    docsUrl: 'https://aistudio.google.com/app/apikey',
-  },
-  ollama: {
-    id: 'ollama', name: 'Local Ollama', icon: '🦙',
-    sub: '100% private · Free forever · Your machine',
-    models: [],   // populated at runtime by probing localhost
-    default: '',
-    keyEnv: null,
-    docsUrl: 'https://ollama.com',
-  },
-}
-
-// Storage helpers
-function getAIProvider()        { try { return localStorage.getItem(LS_PROVIDER) || 'anthropic' } catch { return 'anthropic' } }
-function setAIProviderLS(id)    { try { localStorage.setItem(LS_PROVIDER, id) } catch {} }
-function getProviderModel(id)   {
-  try {
-    const m = JSON.parse(localStorage.getItem(LS_MODELS)||'{}')
-    const cached = m[id]
-    const validIds = (PROVIDERS[id]?.models || []).map(x => x.id)
-    // Self-heal: if the cached model is no longer in the supported list (e.g. a
-    // deprecated/renamed model like an old Gemini preview string), fall back to
-    // the current default instead of sending a request that's guaranteed to fail.
-    if (cached && validIds.includes(cached)) return cached
-    return PROVIDERS[id]?.default || ''
-  } catch { return PROVIDERS[id]?.default || '' }
-}
-function setProviderModel(id,m) { try { const all = JSON.parse(localStorage.getItem(LS_MODELS)||'{}'); all[id]=m; localStorage.setItem(LS_MODELS, JSON.stringify(all)) } catch {} }
-function getOllamaURL()         { try { return localStorage.getItem(LS_OLLAMA_URL)   || 'http://localhost:11434' } catch { return 'http://localhost:11434' } }
-function getOllamaModel()       { try { return localStorage.getItem(LS_OLLAMA_MODEL) || '' } catch { return '' } }
-
-// Electron desktop bridge detection
-const IS_ELECTRON = typeof window !== 'undefined' && !!window.electronBridge?.isElectron
-
-// ── Ollama helpers (browser-direct or Electron IPC — no API key) ──
-
-async function ollamaProbe(base) {
-  const url = (base || getOllamaURL()).replace(/\/$/, '')
-  if (IS_ELECTRON) {
-    try { return await window.electronBridge.ollama.probe(url) } catch { return { running: false, corsOk: true, models: [] } }
-  }
-  try {
-    const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(5000) })
-    if (r.ok) {
-      const d  = await r.json()
-      const models = (d.models || []).map(m => m.name).filter(Boolean)
-      return { models, corsOk: true, running: true }
-    }
-    return { models: [], corsOk: true, running: false }
-  } catch {
-    try { await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(3000) }); return { models: [], corsOk: false, running: true } }
-    catch { return { models: [], corsOk: false, running: false } }
-  }
-}
-
-async function ollamaChat(messages, system, max) {
-  const base  = getOllamaURL().replace(/\/$/, '')
-  const model = getOllamaModel() || getProviderModel('ollama') || 'llama3.2'
-  const msgs  = system ? [{ role: 'system', content: system }, ...messages] : messages
-  if (IS_ELECTRON) {
-    const r = await window.electronBridge.ollama.chat({ url: base, model, messages: msgs, max })
-    if (!r.ok) throw new Error(`Ollama: ${r.data?.error || 'unknown error'}`)
-    return r.data?.message?.content || ''
-  }
-  const r = await fetch(`${base}/api/chat`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages: msgs, stream: false, options: { num_predict: max } }),
-    signal: AbortSignal.timeout(120000),
-  })
-  if (!r.ok) { const e = await r.text().catch(() => r.statusText); throw new Error(`Ollama ${r.status}: ${e}`) }
-  const d = await r.json()
-  return d.message?.content || ''
-}
-
-// ── ai() — THE single function all features call ──────────────
-// Routes to Ollama (browser-direct) or cloud providers (via /api/ai server).
-// Switching provider requires no changes in any feature component.
-async function ai(messages, system = '', max = 1200) {
-  const provider = getAIProvider()
-  try {
-    if (provider === 'ollama') {
-      return (await ollamaChat(messages, system, max)) || 'No response.'
-    }
-    // Cloud providers: key stays on server, never in browser bundle
-    const model = getProviderModel(provider)
-    const r = await fetch('/api/ai', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, model, max_tokens: max, ...(system && { system }), messages }),
-    })
-    const d = await r.json()
-    if (d.error) return `⚠ ${PROVIDERS[provider]?.name || 'AI'} error: ${d.error}`
-    return d.content?.[0]?.text || d.content?.map(c => c.text || '').join('') || 'No response.'
-  } catch (e) {
-    if (provider === 'ollama') {
-      if (e.name === 'TimeoutError') return '⚠ Ollama timed out — is it still running?'
-      if (e.message?.match(/fetch|Failed|NetworkError|cors/i))
-        return '⚠ Cannot reach Ollama. Open Settings → AI Provider and complete the CORS setup.'
-      return '⚠ Ollama: ' + e.message
-    }
-    return `⚠ ${PROVIDERS[provider]?.name || 'AI'} error: ${e.message}`
-  }
-}
-
-
-// ── UTILITIES ────────────────────────────────────────────────
-function uid()  { try { return crypto.randomUUID() } catch { return Date.now().toString(36) + Math.random().toString(36).slice(2) } }
-function ts()   { return new Date().toISOString() }
-function timeg(){ const h = new Date().getHours(); return h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening' }
-
-// Cross-module handoff: stash a payload for another page, then switch to it.
-// The destination page reads+clears fl_handoff_<page> on mount (see BuilderPage/ChatPage).
-function flNavigate(page, payload) {
-  try { if (payload !== undefined) localStorage.setItem(`fl_handoff_${page}`, JSON.stringify(payload)) } catch {}
-  window.dispatchEvent(new CustomEvent('fl:navigate', { detail: { page } }))
-}
-function flConsumeHandoff(page) {
-  try {
-    const raw = localStorage.getItem(`fl_handoff_${page}`)
-    if (!raw) return null
-    localStorage.removeItem(`fl_handoff_${page}`)
-    return JSON.parse(raw)
-  } catch { return null }
-}
-function fmtDate(iso) { if (!iso) return ''; try { return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short' }) } catch { return '' } }
-function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied!', 'success')).catch(() => {}) }
-
-// ── THEME (exact master spec colors) ─────────────────────────
-const C = {
-  bg:          '#09090f',
-  surf:        '#0f0f1a',
-  surfHigh:    '#15152a',
-  border:      'rgba(255,255,255,.07)',
-  borderHov:   'rgba(255,255,255,.12)',
-  borderFocus: 'rgba(99,102,241,.5)',
-  accent:      '#6366f1',
-  accentM:     'rgba(99,102,241,.12)',
-  green:       '#10b981',
-  greenM:      'rgba(16,185,129,.12)',
-  yellow:      '#f59e0b',
-  yellowM:     'rgba(245,158,11,.12)',
-  red:         '#ef4444',
-  redM:        'rgba(239,68,68,.12)',
-  t1:          '#eeeef8',
-  t2:          '#8888b0',
-  t3:          '#44445a',
-  sidebar:     196,
-  sidebarSm:   52,
-}
-
-// ── TOAST ────────────────────────────────────────────────────
-let _toast = null
-function toast(msg, type = 'info') { _toast?.(msg, type) }
-function ToastContainer() {
-  const [toasts, setToasts] = useState([])
-  useEffect(() => {
-    _toast = (msg, type) => {
-      const id = uid()
-      setToasts(p => [...p, { id, msg, type }])
-      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3200)
-    }
-    return () => { _toast = null }
-  }, [])
-  if (!toasts.length) return null
-  return (
-    <div style={{ position:'fixed', bottom:24, right:24, zIndex:9999, display:'flex', flexDirection:'column', gap:8 }}>
-      {toasts.map(t => (
-        <div key={t.id} style={{ background: t.type==='error'?'#1a0a0a':t.type==='success'?'#0a1a12':C.surfHigh, color:C.t1, border:`1px solid ${t.type==='error'?C.red:t.type==='success'?C.green:C.border}`, borderRadius:10, padding:'10px 16px', fontSize:14, boxShadow:'0 8px 32px #0009', maxWidth:340, animation:'flSlide .2s ease', lineHeight:1.4 }}>
-          {t.msg}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// ── BUTTON ───────────────────────────────────────────────────
-function Button({ children, onClick, variant='primary', size='md', disabled, full, icon, style:ex }) {
-  const [hov, setHov] = useState(false)
-  const sz = { sm:{fontSize:12,padding:'5px 10px'}, md:{fontSize:14,padding:'7px 14px'}, lg:{fontSize:14,padding:'12px 20px'} }[size]
-  const va = {
-    primary:   { background:hov?'#4f46e5':C.accent, color:'#fff', border:'none' },
-    secondary: { background:'transparent', color:C.t1, border:`1px solid ${hov?C.borderHov:C.border}` },
-    ghost:     { background:hov?C.surfHigh:'transparent', color:C.t2, border:'none' },
-    danger:    { background:hov?'#dc2626':C.red, color:'#fff', border:'none' },
-    success:   { background:hov?'#059669':C.green, color:'#fff', border:'none' },
-  }[variant||'primary']
-  return (
-    <button onClick={disabled?undefined:onClick} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-      style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6, borderRadius:8, cursor:disabled?'not-allowed':'pointer', fontWeight:500, fontFamily:'inherit', transition:'all .15s', width:full?'100%':undefined, opacity:disabled?.4:1, outline:'none', ...sz, ...va, ...ex }}>
-      {icon && <span style={{fontSize:14}}>{icon}</span>}
-      {children}
-    </button>
-  )
-}
-
-// ── INPUT ────────────────────────────────────────────────────
-function Input({ value, onChange, placeholder, rows, type='text', onKeyDown, autoFocus, readOnly, style:ex }) {
-  const [foc, setFoc] = useState(false)
-  const base = { width:'100%', background:C.surf, border:`1px solid ${foc?C.borderFocus:C.border}`, borderRadius:8, color:C.t1, fontSize:14, fontFamily:'inherit', padding:'9px 12px', outline:'none', boxShadow:foc?`0 0 0 3px ${C.accentM}`:'none', transition:'all .15s', resize:rows?'vertical':undefined, boxSizing:'border-box', ...ex }
-  const sp = { value, onChange, placeholder, onKeyDown, autoFocus, readOnly, style:base, onFocus:()=>setFoc(true), onBlur:()=>setFoc(false) }
-  return rows ? <textarea rows={rows} {...sp} /> : <input type={type} {...sp} />
-}
-
-// ── CARD ─────────────────────────────────────────────────────
-function Card({ children, style, onClick, hover }) {
-  const [hov, setHov] = useState(false)
-  return (
-    <div onClick={onClick} onMouseEnter={()=>hover&&setHov(true)} onMouseLeave={()=>hover&&setHov(false)}
-      style={{ background:C.surf, border:`1px solid ${hov?C.borderHov:C.border}`, borderRadius:10, padding:16, cursor:onClick?'pointer':undefined, transition:'all .15s', boxShadow:hov?'0 4px 24px #0007':'none', ...style }}>
-      {children}
-    </div>
-  )
-}
-
-// ── BADGE ────────────────────────────────────────────────────
-function Badge({ children, color='accent' }) {
-  const m = { accent:[C.accentM,C.accent], green:[C.greenM,C.green], yellow:[C.yellowM,C.yellow], red:[C.redM,C.red], gray:[C.surfHigh,C.t2] }[color]||[C.accentM,C.accent]
-  return <span style={{ background:m[0], color:m[1], fontSize:11, fontWeight:600, padding:'2px 8px', borderRadius:999, display:'inline-flex', alignItems:'center' }}>{children}</span>
-}
-
-// ── SPINNER ──────────────────────────────────────────────────
-function Spinner({ size=20, color=C.accent }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" style={{ animation:'flSpin .8s linear infinite', flexShrink:0 }}><circle cx="12" cy="12" r="10" fill="none" stroke={color} strokeWidth="2.5" strokeDasharray="31.4" strokeLinecap="round"/></svg>
-}
-
-// ── EMPTY STATE ──────────────────────────────────────────────
-function EmptyState({ icon, title, description, action }) {
-  return (
-    <div style={{ textAlign:'center', padding:60, color:C.t2 }}>
-      <div style={{ fontSize:44, marginBottom:16 }}>{icon}</div>
-      <div style={{ fontSize:17, fontWeight:600, color:C.t1, marginBottom:8 }}>{title}</div>
-      <div style={{ fontSize:14, maxWidth:300, margin:'0 auto 20px', lineHeight:1.6 }}>{description}</div>
-      {action}
-    </div>
-  )
-}
-
-// ── TIP ──────────────────────────────────────────────────────
-function Tip({ children }) {
-  return <div style={{ background:C.accentM, border:`1px solid rgba(99,102,241,.2)`, borderRadius:8, padding:'10px 14px', fontSize:13, color:C.t2, display:'flex', gap:8, alignItems:'flex-start', lineHeight:1.5 }}><span style={{flexShrink:0}}>💡</span><span>{children}</span></div>
-}
-
-// ── GLOBAL STYLES ────────────────────────────────────────────
 function GlobalStyles() {
   useEffect(() => {
     const el = document.createElement('style')
@@ -598,256 +72,6 @@ function GlobalStyles() {
     return () => { try { document.head.removeChild(el) } catch {} }
   }, [])
   return null
-}
-
-// ── SETUP SCREEN ─────────────────────────────────────────────
-function SetupScreen() {
-  return (
-    <div style={{ minHeight:'100vh', background:C.bg, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <Card style={{ maxWidth:520, width:'100%', padding:40, borderRadius:16 }}>
-        <div style={{ width:48, height:48, background:C.accent, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, color:'#fff', marginBottom:20 }}>✦</div>
-        <h2 style={{ margin:'0 0 8px', fontSize:22, fontWeight:700, color:C.t1 }}>Setup Required</h2>
-        <p style={{ margin:'0 0 24px', color:C.t2, fontSize:14, lineHeight:1.6 }}>Create a <code style={{ background:C.surfHigh, padding:'1px 6px', borderRadius:4, color:C.accent }}>.env.local</code> file in your project root:</p>
-        <div style={{ background:'#05050a', border:`1px solid ${C.border}`, borderRadius:8, padding:16, fontFamily:'monospace', fontSize:13, lineHeight:2, marginBottom:24 }}>
-          <div style={{ color:C.green }}>VITE_SUPABASE_URL=https://xxxx.supabase.co</div>
-          <div style={{ color:C.green }}>VITE_SUPABASE_ANON_KEY=eyJ...</div>
-          <div style={{ color:C.t3 }}>ANTHROPIC_API_KEY=sk-ant-...</div>
-        </div>
-        <Tip>Get Supabase keys: supabase.com → Project → Settings → API. ANTHROPIC_API_KEY is server-side only — no VITE_ prefix.</Tip>
-      </Card>
-    </div>
-  )
-}
-
-// ── AUTH SCREEN ───────────────────────────────────────────────
-function AuthScreen({ onAuth }) {
-  const [tab, setTab]     = useState('signin')
-  const [email, setEmail] = useState('')
-  const [pass, setPass]   = useState('')
-  const [pass2, setPass2] = useState('')
-  const [rem, setRem]     = useState(true)
-  const [loading, setLoading] = useState(false)
-  const [msg, setMsg]     = useState(null)
-
-  function sw(t) { setTab(t); setMsg(null); setPass(''); setPass2('') }
-
-  async function submit() {
-    setMsg(null)
-    if (!email.trim()) return setMsg({ e:true, t:'Email required.' })
-    if (tab === 'reset') {
-      setLoading(true)
-      try { await sb.resetPassword(email.trim()); setMsg({ t:'Reset email sent! Check your inbox.' }) }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
-      return
-    }
-    if (tab === 'verify') {
-      setLoading(true)
-      try { await sb.resendVerification(email.trim()); setMsg({ t:'Verification email resent!' }) }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
-      return
-    }
-    if (!pass) return setMsg({ e:true, t:'Password required.' })
-    if (tab === 'signup') {
-      if (pass.length < 6) return setMsg({ e:true, t:'Password must be 6+ characters.' })
-      if (pass !== pass2) return setMsg({ e:true, t:'Passwords do not match.' })
-      setLoading(true)
-      try { await sb.signUp(email.trim(), pass); setMsg({ t:'Account created! Check your email to verify, then sign in.' }); sw('signin') }
-      catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
-      return
-    }
-    setLoading(true)
-    try { await sb.signIn(email.trim(), pass, rem); onAuth() }
-    catch (e) { setMsg({ e:true, t:e.message }) } finally { setLoading(false) }
-  }
-
-  const TABS = [{ id:'signin',l:'Sign In' },{ id:'signup',l:'Sign Up' },{ id:'reset',l:'Reset' },{ id:'verify',l:'Verify' }]
-  const lbl = (s) => <label style={{ display:'block', fontSize:12, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>{s}</label>
-
-  return (
-    <div style={{ minHeight:'100vh', background:C.bg, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <div style={{ maxWidth:420, width:'100%' }}>
-        <div style={{ textAlign:'center', marginBottom:32 }}>
-          <div style={{ width:56, height:56, background:C.accent, borderRadius:14, display:'inline-flex', alignItems:'center', justifyContent:'center', fontSize:26, color:'#fff', marginBottom:14 }}>✦</div>
-          <h1 style={{ margin:0, fontSize:24, fontWeight:700, color:C.t1 }}>FounderLab AI</h1>
-          <p style={{ margin:'6px 0 0', color:C.t2, fontSize:14 }}>Your AI-powered founder workspace</p>
-        </div>
-        <Card style={{ padding:32, borderRadius:16 }}>
-          <div style={{ display:'flex', gap:3, marginBottom:24, background:C.bg, borderRadius:10, padding:4 }}>
-            {TABS.map(t => <button key={t.id} onClick={()=>sw(t.id)} style={{ flex:1, padding:'7px 4px', borderRadius:7, border:'none', background:tab===t.id?C.surfHigh:'transparent', color:tab===t.id?C.t1:C.t3, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:'inherit', transition:'all .15s' }}>{t.l}</button>)}
-          </div>
-          <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-            <div>{lbl('Email')}<Input value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" type="email" onKeyDown={e=>e.key==='Enter'&&submit()} autoFocus /></div>
-            {(tab==='signin'||tab==='signup') && <div>{lbl('Password')}<Input value={pass} onChange={e=>setPass(e.target.value)} placeholder="••••••••" type="password" onKeyDown={e=>e.key==='Enter'&&submit()} /></div>}
-            {tab==='signup' && <div>{lbl('Confirm Password')}<Input value={pass2} onChange={e=>setPass2(e.target.value)} placeholder="••••••••" type="password" onKeyDown={e=>e.key==='Enter'&&submit()} /></div>}
-            {tab==='signin' && (
-              <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13, color:C.t2 }}>
-                <input type="checkbox" checked={rem} onChange={e=>setRem(e.target.checked)} style={{ accentColor:C.accent }} /> Remember me
-              </label>
-            )}
-            {msg && <div style={{ padding:'10px 13px', borderRadius:8, fontSize:13, background:msg.e?C.redM:C.greenM, color:msg.e?C.red:C.green, border:`1px solid ${msg.e?C.red:C.green}40`, lineHeight:1.5 }}>{msg.t}</div>}
-            <Button onClick={submit} disabled={loading} full size="lg" style={{ marginTop:4 }}>
-              {loading && <Spinner size={14} color="#fff" />}
-              {tab==='signin'?'Sign In':tab==='signup'?'Create Account':tab==='reset'?'Send Reset Email':'Resend Verification'}
-            </Button>
-          </div>
-          {tab==='signin' && <p style={{ textAlign:'center', marginTop:16, fontSize:13, color:C.t2 }}>No account? <span onClick={()=>sw('signup')} style={{ color:C.accent, cursor:'pointer', fontWeight:500 }}>Sign up free</span></p>}
-        </Card>
-      </div>
-    </div>
-  )
-}
-
-// ── ONBOARDING MODAL ─────────────────────────────────────────
-function OnboardingModal({ onDone }) {
-  const [step, setStep] = useState(0)
-  const [role, setRole] = useState('')
-  const [goal, setGoal] = useState('')
-
-  const roles = ['Founder','Creator','Freelancer','Developer','Student']
-  const goals = ['Grow my business','Save time with AI','Create more content','Build in public','Learn faster']
-
-  async function finish() {
-    try { await sb.updateProfile({ onboarded:true, role, goal }) } catch {}
-    onDone()
-  }
-
-  const sel = (val, active, onSel) => (
-    <button onClick={()=>onSel(val)} style={{ padding:'12px 16px', borderRadius:8, border:`1px solid ${active===val?C.accent:C.border}`, background:active===val?C.accentM:'transparent', color:active===val?C.accent:C.t1, cursor:'pointer', fontSize:14, fontFamily:'inherit', fontWeight:500, textAlign:'left', transition:'all .15s', width:'100%' }}>{val}</button>
-  )
-
-  const steps = [
-    <div key={0} style={{ textAlign:'center' }}>
-      <div style={{ fontSize:48, marginBottom:16 }}>🚀</div>
-      <h2 style={{ margin:'0 0 12px', fontSize:22, fontWeight:700, color:C.t1 }}>Welcome to FounderLab AI</h2>
-      <p style={{ color:C.t2, fontSize:15, lineHeight:1.6, marginBottom:24 }}>Your all-in-one AI workspace. Chat, Notes, Tasks, YouTube AI, Code AI, and a Website Builder — all in one place, synced to the cloud.</p>
-      <Button onClick={()=>setStep(1)} full size="lg">Get Started →</Button>
-    </div>,
-    <div key={1}>
-      <div style={{ textAlign:'center', marginBottom:20 }}><h2 style={{ margin:'0 0 6px', fontSize:20, fontWeight:700, color:C.t1 }}>What best describes you?</h2><p style={{ color:C.t2, fontSize:14, margin:0 }}>Helps us personalise your experience</p></div>
-      <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:20 }}>{roles.map(r=>sel(r, role, setRole))}</div>
-      <div style={{ display:'flex', gap:8 }}><Button onClick={()=>setStep(0)} variant="secondary" full>Back</Button><Button onClick={()=>role&&setStep(2)} disabled={!role} full>Next →</Button></div>
-    </div>,
-    <div key={2}>
-      <div style={{ textAlign:'center', marginBottom:20 }}><h2 style={{ margin:'0 0 6px', fontSize:20, fontWeight:700, color:C.t1 }}>Your main goal?</h2><p style={{ color:C.t2, fontSize:14, margin:0 }}>We'll tailor suggestions to you</p></div>
-      <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:20 }}>{goals.map(g=>sel(g, goal, setGoal))}</div>
-      <div style={{ display:'flex', gap:8 }}><Button onClick={()=>setStep(1)} variant="secondary" full>Back</Button><Button onClick={()=>goal&&finish()} disabled={!goal} full>Enter FounderLab ✦</Button></div>
-    </div>,
-  ]
-
-  return (
-    <div style={{ position:'fixed', inset:0, background:'#000c', zIndex:2000, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <Card style={{ width:'100%', maxWidth:460, padding:36, borderRadius:16 }}>
-        <div style={{ display:'flex', gap:4, marginBottom:28 }}>
-          {[0,1,2].map(i=><div key={i} style={{ flex:1, height:3, borderRadius:99, background:i<=step?C.accent:C.border, transition:'background .3s' }} />)}
-        </div>
-        {steps[step]}
-      </Card>
-    </div>
-  )
-}
-
-// ── DASHBOARD ────────────────────────────────────────────────
-function Dashboard({ user, profile, setPage }) {
-  const [counts, setCounts]   = useState({})
-  const [banner, setBanner]   = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    async function init() {
-      setLoading(true)
-      sb.logEvent('visit', 'dashboard')
-      try {
-        const [ec, notes, tasks] = await Promise.all([
-          sb.getEventCounts().catch(()=>({})),
-          load('fl_notes', []),
-          load('fl_tasks', []),
-        ])
-        setCounts(ec)
-        const sorted = Array.isArray(notes) ? [...notes].sort((a,b) => b.updated_at > a.updated_at ? 1 : -1) : []
-        const pending = Array.isArray(tasks) ? tasks.filter(t=>t.status!=='done').length : 0
-        if (sorted[0] || pending > 0) setBanner({ note:sorted[0]||null, pending })
-      } catch {} finally { setLoading(false) }
-    }
-    init()
-  }, [])
-
-  const stats = [
-    { icon:'💬', label:'AI Chats', k:'chat', color:C.accent },
-    { icon:'📝', label:'Notes',    k:'note', color:C.green },
-    { icon:'✅', label:'Tasks',    k:'task', color:C.yellow },
-    { icon:'▶',  label:'YouTube',  k:'youtube', color:'#f43f5e' },
-    { icon:'⌨',  label:'Code',     k:'code', color:'#3b82f6' },
-    { icon:'⬡',  label:'Builder',  k:'builder', color:'#a78bfa' },
-  ]
-  const maxC = Math.max(...stats.map(s=>counts[s.k]||0), 1)
-
-  const quick = [
-    { icon:'💬', label:'AI Chat',    page:'chat' },
-    { icon:'📝', label:'New Note',   page:'notes' },
-    { icon:'✅', label:'Add Task',   page:'tasks' },
-    { icon:'▶',  label:'YouTube AI', page:'youtube' },
-    { icon:'⌨',  label:'Code AI',    page:'code' },
-    { icon:'⬡',  label:'Build Site', page:'builder' },
-  ]
-
-  return (
-    <div style={{ height:'100%', overflowY:'auto', padding:'32px 32px 48px' }}>
-      <div style={{ marginBottom:32 }}>
-        <h1 style={{ margin:'0 0 6px', fontSize:26, fontWeight:700, color:C.t1 }}>Good {timeg()} 👋</h1>
-        <p style={{ margin:0, color:C.t2, fontSize:15 }}>{profile?.full_name || user?.email}</p>
-      </div>
-
-      {banner && (
-        <Card style={{ padding:20, marginBottom:24, background:C.surfHigh, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:12 }}>
-          <div>
-            <div style={{ fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em', marginBottom:4 }}>Continue where you left off</div>
-            <div style={{ fontSize:14, color:C.t1 }}>
-              {banner.note && <span>📝 <span style={{ fontWeight:500 }}>{banner.note.title||'Untitled note'}</span></span>}
-              {banner.note && banner.pending>0 && <span style={{ color:C.t3, margin:'0 8px' }}>·</span>}
-              {banner.pending>0 && <span>✅ <span style={{ fontWeight:500 }}>{banner.pending} task{banner.pending!==1?'s':''} pending</span></span>}
-            </div>
-          </div>
-          <div style={{ display:'flex', gap:8 }}>
-            {banner.note && <Button onClick={()=>setPage('notes')} variant="secondary" size="sm">Open Notes</Button>}
-            {banner.pending>0 && <Button onClick={()=>setPage('tasks')} variant="secondary" size="sm">Open Tasks</Button>}
-          </div>
-        </Card>
-      )}
-
-      <div style={{ marginBottom:32 }}>
-        <div style={{ fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em', marginBottom:14 }}>Quick Actions</div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))', gap:12 }}>
-          {quick.map(a => (
-            <Card key={a.label} hover onClick={()=>setPage(a.page)} style={{ padding:'16px 14px', display:'flex', alignItems:'center', gap:10, cursor:'pointer' }}>
-              <span style={{ fontSize:20 }}>{a.icon}</span>
-              <span style={{ fontSize:13, fontWeight:500, color:C.t1 }}>{a.label}</span>
-            </Card>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <div style={{ fontSize:11, fontWeight:600, color:C.t3, textTransform:'uppercase', letterSpacing:'.05em', marginBottom:14 }}>Feature Usage</div>
-        <Card style={{ padding:'20px 24px' }}>
-          {loading ? <div style={{ display:'flex', justifyContent:'center', padding:20 }}><Spinner /></div> : (
-            <div style={{ display:'flex', alignItems:'flex-end', gap:16, height:120 }}>
-              {stats.map(s => {
-                const n = counts[s.k]||0
-                const h = Math.max(n/maxC*80, n>0?8:2)
-                return (
-                  <div key={s.k} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6, flex:1, minWidth:0 }}>
-                    <span style={{ fontSize:11, color:C.t2, fontWeight:600, height:16 }}>{n||''}</span>
-                    <div style={{ width:'100%', height:h, background:s.color, borderRadius:'4px 4px 0 0', opacity:n>0?1:0.15, transition:'height .4s ease' }} />
-                    <span style={{ fontSize:10, color:C.t3, textAlign:'center', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', width:'100%' }}>{s.label}</span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </Card>
-      </div>
-    </div>
-  )
 }
 
 // ── AI CHAT ──────────────────────────────────────────────────
@@ -868,71 +92,6 @@ const STARTERS = [
   'Write a cold email to potential investors or clients',
   'Break down my biggest goal into actionable daily tasks',
 ]
-
-function renderMsg(content) {
-  if (!content) return null
-  // Split on fenced code blocks first
-  const parts = content.split(/(```[\w]*\n[\s\S]*?```)/g)
-  return parts.map((part, i) => {
-    if (part.startsWith('```')) {
-      const m = part.match(/```(\w*)\n?([\s\S]*?)```/)
-      if (m) return (
-        <div key={i} style={{ background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, margin:'8px 0', overflow:'hidden' }}>
-          {m[1] && <div style={{ background:C.surfHigh, padding:'4px 12px', fontSize:10, color:C.accent, fontWeight:600, letterSpacing:'.06em', textTransform:'uppercase', borderBottom:`1px solid ${C.border}` }}>{m[1]}</div>}
-          <div style={{ padding:'10px 14px', fontFamily:'monospace', fontSize:12.5, whiteSpace:'pre-wrap', overflowX:'auto', lineHeight:1.6, color:'#e2e8f0' }}>{m[2].replace(/^\n/,'')}</div>
-        </div>
-      )
-    }
-    // Inline rendering: process line by line
-    const lines = part.split('\n')
-    const nodes = []
-    let listItems = []
-    const flushList = () => {
-      if (!listItems.length) return
-      nodes.push(<ul key={`ul-${nodes.length}`} style={{ margin:'6px 0', paddingLeft:20, lineHeight:1.7 }}>{listItems.map((li,j)=><li key={j} style={{ color:C.t1, fontSize:14 }}>{inlineRender(li)}</li>)}</ul>)
-      listItems = []
-    }
-    lines.forEach((line, li) => {
-      // Blank line
-      if (!line.trim()) { flushList(); nodes.push(<br key={`br-${nodes.length}`} />); return }
-      // Headings
-      const h3 = line.match(/^###\s+(.+)/)
-      const h2 = line.match(/^##\s+(.+)/)
-      const h1 = line.match(/^#\s+(.+)/)
-      if (h1) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'10px 0 4px', fontWeight:700, fontSize:17, color:C.t1 }}>{inlineRender(h1[1])}</p>); return }
-      if (h2) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'10px 0 4px', fontWeight:700, fontSize:15, color:C.t1 }}>{inlineRender(h2[1])}</p>); return }
-      if (h3) { flushList(); nodes.push(<p key={nodes.length} style={{ margin:'8px 0 2px', fontWeight:600, fontSize:14, color:C.t1 }}>{inlineRender(h3[1])}</p>); return }
-      // Bullet list
-      const bullet = line.match(/^[-*•]\s+(.+)/)
-      if (bullet) { listItems.push(bullet[1]); return }
-      // Numbered list
-      const num = line.match(/^\d+\.\s+(.+)/)
-      if (num) { listItems.push(num[1]); return }
-      // Normal line
-      flushList()
-      nodes.push(<p key={nodes.length} style={{ margin:'2px 0', lineHeight:1.65, whiteSpace:'pre-wrap', fontSize:14, color:C.t1 }}>{inlineRender(line)}</p>)
-    })
-    flushList()
-    return <div key={i}>{nodes}</div>
-  })
-}
-
-// Render inline markdown: **bold**, *italic*, `code`, links
-function inlineRender(text) {
-  const tokens = []
-  const rx = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|\[(.+?)\]\((https?:\/\/[^\)]+)\))/g
-  let last = 0, m
-  while ((m = rx.exec(text)) !== null) {
-    if (m.index > last) tokens.push(text.slice(last, m.index))
-    if (m[2]) tokens.push(<strong key={m.index}>{m[2]}</strong>)
-    else if (m[3]) tokens.push(<em key={m.index}>{m[3]}</em>)
-    else if (m[4]) tokens.push(<code key={m.index} style={{ background:C.surfHigh, color:C.accent, borderRadius:4, padding:'1px 5px', fontSize:'0.9em', fontFamily:'monospace' }}>{m[4]}</code>)
-    else if (m[5]) tokens.push(<a key={m.index} href={m[6]} target="_blank" rel="noopener noreferrer" style={{ color:C.accent, textDecoration:'underline' }}>{m[5]}</a>)
-    last = m.index + m[0].length
-  }
-  if (last < text.length) tokens.push(text.slice(last))
-  return tokens.length ? tokens : text
-}
 
 function ChatPage({ user }) {
   const [convos, setConvos]         = useState([])
@@ -958,7 +117,7 @@ function ChatPage({ user }) {
   const textRef    = useRef(null)
 
   const { listening, transcript, setTranscript, start: startReco, stop: stopReco } = useSpeechRecognition()
-  const { speaking, speak, stop: stopTTS, elAvailable } = useTTS(voiceCfg)
+  const { speaking, speak, stop: stopTTS, elAvailable } = useTextToSpeech(voiceCfg)
   const [activeTTS, setActiveTTS] = useState(null)
 
   const active   = convos.find(c => c.id === activeId)
@@ -1056,11 +215,12 @@ function ChatPage({ user }) {
     abortRef.current = false
 
     const provider = getAIProvider()
+    const supportsImageInput = getProvider(provider)?.capabilities.imageInput === true
     const history = (cvs.find(c => c.id === cid)?.messages || []).map(m => ({
       role: m.role,
       content: m.content,
-      ...(m.image && provider === 'anthropic' ? { image: m.image } : {}),
-      ...(m.image && provider !== 'anthropic' ? { content: (m.content || '') + '\n[User attached an image — describe what you would expect in response]' } : {}),
+      ...(m.image && supportsImageInput ? { image: m.image } : {}),
+      ...(m.image && !supportsImageInput ? { content: (m.content || '') + '\n[User attached an image — describe what you would expect in response]' } : {}),
     }))
 
     let reply
@@ -1088,7 +248,13 @@ function ChatPage({ user }) {
     const trimmed = convos.map(c => c.id === activeId ? { ...c, messages: upToUser, updated_at: ts() } : c)
     persist(trimmed); setSending(true); abortRef.current = false; setErrorMsg(null)
     const provider = getAIProvider()
-    const history = upToUser.map(m => ({ role: m.role, content: m.content, ...(m.image && provider === 'anthropic' ? { image: m.image } : {}) }))
+    const supportsImageInput = getProvider(provider)?.capabilities.imageInput === true
+    const history = upToUser.map(m => ({
+      role: m.role,
+      content: m.content,
+      ...(m.image && supportsImageInput ? { image: m.image } : {}),
+      ...(m.image && !supportsImageInput ? { content: (m.content || '') + '\n[User attached an image — describe what you would expect in response]' } : {}),
+    }))
     let reply
     try {
       reply = await ai(history, CHAT_SYS, 2000)
@@ -1581,7 +747,7 @@ function ChatPage({ user }) {
                     boxShadow:'0 8px 32px rgba(0,0,0,.35)',
                     transition:'border-color .18s',
                   }}>
-                  <input ref={fileRef} type="file" accept={ACCEPTED_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
+                  <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display:'none' }} onChange={handleImagePick} />
 
                   {/* Attach */}
                   <button onClick={() => fileRef.current?.click()} title="Attach image (or drag & drop, or paste)"
@@ -2182,7 +1348,7 @@ function YouTubeAIPage({ user }) {
     if (!videoId) { setVideoInfo(null); return }
     let cancelled = false
     setInfoLoad(true)
-    fetch('/api/youtube/info', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) })
+    authenticatedFetch('/api/youtube/info', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) })
       .then(r => r.json())
       .then(d => { if (!cancelled) { setVideoInfo(d); if (!title && d.title) setTitle(d.title) } })
       .catch(() => {})
@@ -2194,7 +1360,7 @@ function YouTubeAIPage({ user }) {
   async function fetchAutoTranscript() {
     if (!videoId) return
     setATMsg('Fetching captions…')
-    const r = await fetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
+    const r = await authenticatedFetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
     const d = await r.json()
     if (d.transcript) { setTrans(d.transcript); setATMsg('✅ Captions loaded automatically') }
     else setATMsg(d.message || '⚠ No captions found — paste transcript manually')
@@ -2221,21 +1387,24 @@ function YouTubeAIPage({ user }) {
   // ── Full Viral Clip Analysis ─────────────────────────────────
   async function runViralAnalysis() {
     if (!trans.trim() && !url.trim()) return toast('Add a YouTube URL or paste a transcript first', 'error')
+    const provider = getAIProvider()
+    if (!provider) return toast('Choose a configured cloud AI provider before running Viral Clip Analysis.', 'error')
+    if (provider === 'ollama') return toast('Viral Clip Analysis runs securely on the server. Choose a configured cloud provider; Local Ollama remains available for browser-executable AI features.', 'error')
     let text = trans
     if (!text && videoId) {
       setL(true)
-      const r = await fetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
+      const r = await authenticatedFetch('/api/youtube/transcript', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) })
       const d = await r.json()
       text = d.transcript || ''
       if (text) setTrans(text)
     }
     setL(true)
-    const r = await fetch('/api/youtube/analyze', {
+    const r = await authenticatedFetch('/api/youtube/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transcript: text, duration: videoInfo?.duration || 0, url }),
+      body: JSON.stringify({ transcript: text, duration: videoInfo?.duration || 0, url, provider, model:getProviderModel(provider) }),
     })
-    const d = await r.json()
-    if (d.error) { toast('Analysis failed: ' + d.error, 'error'); setL(false); return }
+    const d = await r.json().catch(() => null)
+    if (!r.ok || !d?.ok && d?.error) { toast('Analysis failed: ' + (d?.error?.message || 'Please try again.'), 'error'); setL(false); return }
     setAnalysis(d)
     setOut(p => ({ ...p, clips: `Viral Score: ${d.viralityScore}/100\n\n${d.reason}\n\nBest Hook: "${d.hook}"\n\nShort Script:\n${d.shortScript || 'See clip ranges below.'}` }))
     setL(false)
@@ -2244,15 +1413,17 @@ function YouTubeAIPage({ user }) {
   async function handleDub(gender) {
     if (!analysis?.shortScript && !trans.trim()) return toast('Run analysis first to get a script', 'error')
     setDubStatus('loading')
-    const r = await fetch('/api/youtube/ai-dub', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ transcript: analysis?.shortScript || trans.slice(0,1000), gender }) })
-    const d = await r.json()
-    if (d.fallback) { toast(d.message || 'Add ELEVENLABS_API_KEY for AI voice', 'error'); setDubStatus(null); return }
-    if (r.ok && r.headers.get('Content-Type')?.includes('audio')) {
-      const blob = new Blob([await r.arrayBuffer()], { type:'audio/mpeg' })
-      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download:'ai_dub.mp3' })
-      a.click(); URL.revokeObjectURL(a.href)
-      setDubStatus('done')
+    const r = await authenticatedFetch('/api/youtube/ai-dub', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ transcript: analysis?.shortScript || trans.slice(0,1000), gender }) })
+    if (!r.ok || !r.headers.get('Content-Type')?.includes('audio')) {
+      const d = await r.json().catch(() => null)
+      toast(d?.error?.message || 'AI voice could not be generated. Please try again.', 'error')
+      setDubStatus(null)
+      return
     }
+    const blob = await r.blob()
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download:'ai_dub.mp3' })
+    a.click(); URL.revokeObjectURL(a.href)
+    setDubStatus('done')
   }
 
   // ── Clip config summary for export ──────────────────────────
@@ -2426,7 +1597,6 @@ function YouTubeAIPage({ user }) {
 
           {/* Karaoke captions preview */}
           {(() => {
-            const KP = require ? null : null // avoid SSR issue — component imported at module level
             const words = analysis.shortScript
               ? analysis.shortScript.split(' ').map((w,i,arr) => ({ word:w, start:i*(analysis.clipRanges?.[0]?.end||60)/arr.length, end:(i+1)*(analysis.clipRanges?.[0]?.end||60)/arr.length }))
               : []
@@ -2482,7 +1652,7 @@ function YouTubeAIPage({ user }) {
               </button>
               {dubStatus==='done' && <span style={{ fontSize:12, color:C.green, alignSelf:'center' }}>✅ Downloaded</span>}
             </div>
-            {!process.env.ELEVENLABS_API_KEY && <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3 }}>Add ELEVENLABS_API_KEY in Vercel settings for premium voices.</p>}
+            <p style={{ margin:'8px 0 0', fontSize:11, color:C.t3 }}>Premium voices require ELEVENLABS_API_KEY to be configured on the server.</p>
           </div>
 
           {/* Export settings */}
@@ -2580,7 +1750,7 @@ function CodeAIPage({ user }) {
   const zipInputRef = useRef(null)
 
   // ── GitHub push / deploy ──────────────────────────────────────
-  const [ghPat, setGhPat]         = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghPat, setGhPat]         = useState(getGithubToken)
   const [ghRepoName, setGhRepoName] = useState('')
   const [ghRepoUrl, setGhRepoUrl] = useState('')
   const [pushing, setPushing]     = useState(false)
@@ -2596,7 +1766,7 @@ function CodeAIPage({ user }) {
 - Prefix multi-file responses with a filename comment (e.g. "// file: src/App.jsx") before each fenced block
 - Keep prose explanation OUTSIDE the code fences so it can be shown separately`
 
-  function saveGhPat(v) { setGhPat(v); try { localStorage.setItem('fl_github_pat', v) } catch {} }
+  function saveGhPat(value) { setGithubToken(value); setGhPat(value) }
 
   // ── Generate / Explain / Improve ─────────────────────────────
   async function run(action, prompt, opts = {}) {
@@ -2939,7 +2109,7 @@ ${bundle}`
 
                 {tab === 'preview' && (
                   previewable ? (
-                    <iframe title="Live preview" srcDoc={buildPreviewDoc(files)}
+                    <iframe title="Live preview" srcDoc={buildPreviewDoc(files)} sandbox={GENERATED_PREVIEW_SANDBOX} referrerPolicy={GENERATED_PREVIEW_REFERRER_POLICY}
                       style={{ width:'100%', height:'100%', minHeight:400, border:`1px solid ${C.border}`, borderRadius:8, background:'#fff' }} />
                   ) : <EmptyState icon="▶" title="No preview available" description="Live preview works for HTML/CSS/JS output. Generate a website or frontend component to preview it here." />
                 )}
@@ -3017,7 +2187,8 @@ ${bundle}`
               {showGhForm && (
                 <div style={{ display:'flex', gap:6, marginBottom:8, flexWrap:'wrap' }}>
                   <Input value={ghRepoName} onChange={e=>setGhRepoName(e.target.value)} placeholder="new-repo-name" style={{ flex:1, minWidth:140, fontSize:12 }} />
-                  <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (repo scope)"
+                  <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (this session only)"
+                    autoComplete="off"
                     style={{ flex:1, minWidth:160, background:C.surf, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'8px 10px', fontFamily:'inherit', outline:'none' }} />
                   <Button onClick={pushToGithub} disabled={pushing} size="sm">{pushing?<Spinner size={12} color="#fff"/>:'🚀'} Push</Button>
                 </div>
@@ -3128,7 +2299,7 @@ function BuilderPage({ user }) {
   const [editIn,setEditIn]     = useState('')
 
   // ── Export / GitHub ──────────────────────────────────────────────
-  const [ghPat,setGhPat]         = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghPat,setGhPat]         = useState(getGithubToken)
   const [ghRepoName,setGhRepoName] = useState('')
   const [ghRepoUrl,setGhRepoUrl] = useState('')
   const [showGhForm,setShowGhForm] = useState(false)
@@ -3147,7 +2318,7 @@ function BuilderPage({ user }) {
     init()
   }, [])
 
-  function saveGhPat(v) { setGhPat(v); try { localStorage.setItem('fl_github_pat', v) } catch {} }
+  function saveGhPat(value) { setGithubToken(value); setGhPat(value) }
 
   function persistNow(overrides = {}) {
     const project = {
@@ -3569,7 +2740,8 @@ Generated with FounderLab AI Builder.
                 {showGhForm && (
                   <div style={{ display:'flex', flexDirection:'column', gap:6, padding:8, background:C.surf, borderRadius:8, border:`1px solid ${C.border}` }}>
                     <Input value={ghRepoName} onChange={e=>setGhRepoName(e.target.value)} placeholder="repo-name" style={{ fontSize:12 }} />
-                    <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (repo scope)"
+                    <input type="password" value={ghPat} onChange={e=>saveGhPat(e.target.value)} placeholder="GitHub token (this session only)"
+                      autoComplete="off"
                       style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:12, padding:'8px 10px', fontFamily:'inherit', outline:'none' }} />
                     <Button onClick={pushGithub} disabled={pushing} size="sm">{pushing?<Spinner size={12} color="#fff"/>:'🚀'} Push</Button>
                   </div>
@@ -3619,7 +2791,7 @@ Generated with FounderLab AI Builder.
               )}
               {view==='preview'
                 ? (previewHtml
-                    ? <iframe srcDoc={previewHtml} style={{ width:'100%', height:'100%', border:'none' }} title="Live preview" sandbox="allow-scripts" />
+                    ? <iframe srcDoc={previewHtml} style={{ width:'100%', height:'100%', border:'none' }} title="Live preview" sandbox={GENERATED_PREVIEW_SANDBOX} referrerPolicy={GENERATED_PREVIEW_REFERRER_POLICY} />
                     : <EmptyState icon="⬡" title="Preview not ready" description="Generate the project to see a fully-navigable live preview." />)
                 : <pre style={{ margin:0, padding:20, fontFamily:'monospace', fontSize:12, color:C.t1, whiteSpace:'pre-wrap', overflowY:'auto', height:'100%', background:'#050508', boxSizing:'border-box' }}>{files.find(f=>f.path===activeFile)?.content || files[0]?.content || ''}</pre>}
             </div>
@@ -3646,6 +2818,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   // ── AI provider state ──────────────────────────────────────
   const [aiProv, setAIProv] = useState(getAIProvider)
+  const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
   // Per-provider model selections (initialised from localStorage)
   const [modelMap, setModelMap] = useState(() => {
     const stored = {}
@@ -3659,7 +2832,8 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [ollamaDetecting, setOllamaDetecting] = useState(false)
   const [ollamaDetectErr, setOllamaDetectErr] = useState('')
   // Shared test state
-  const [testStatus, setTestStatus]   = useState('') // '' | 'testing' | '✅ …' | '❌ …'
+  const [testStatus, setTestStatus]   = useState(null) // { provider, state, message } | null
+  const [providerConnectionStatuses, setProviderConnectionStatuses] = useState(getProviderConnectionStatuses)
 
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
@@ -3677,6 +2851,16 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   useEffect(() => {
     async function init() { setFbL(true); setFB(await sb.getFeedback()||[]); setFbL(false) }
     init()
+  }, [])
+  useEffect(() => subscribeProviderConnectionStatuses(setProviderConnectionStatuses), [])
+  useEffect(() => {
+    let mounted = true
+    refreshProviderAvailability().then(({ provider, providers }) => {
+      if (!mounted) return
+      setProviderAvailability(providers)
+      setAIProv(provider)
+    })
+    return () => { mounted = false }
   }, [])
 
   async function savePro() {
@@ -3720,7 +2904,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   const fbF = feedbacks.filter(f=>fbFilter==='all'||f.type===fbFilter)
   const tabs = [{id:'profile',l:'Profile'},{id:'ai',l:'AI Provider'},{id:'integrations',l:'Integrations'},{id:'feedback',l:'Feedback'},{id:'data',l:'Data & Export'}]
-  const [ghPatSettings, setGhPatSettings] = useState(() => { try { return localStorage.getItem('fl_github_pat') || '' } catch { return '' } })
+  const [ghPatSettings, setGhPatSettings] = useState(getGithubToken)
   const [ghUserSettings, setGhUserSettings] = useState(null)
   const [ghChecking, setGhChecking] = useState(false)
   const [ghInputVal, setGhInputVal] = useState('')
@@ -3741,14 +2925,14 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   function connectGithub() {
     if (!ghInputVal.trim()) return toast('Paste a GitHub token first', 'error')
-    try { localStorage.setItem('fl_github_pat', ghInputVal.trim()) } catch {}
+    setGithubToken(ghInputVal)
     setGhPatSettings(ghInputVal.trim())
     checkGithubConnection(ghInputVal.trim())
     setGhInputVal('')
   }
 
   function disconnectGithub() {
-    try { localStorage.removeItem('fl_github_pat') } catch {}
+    clearGithubToken()
     setGhPatSettings(''); setGhUserSettings(null)
     toast('GitHub disconnected', 'success')
   }
@@ -3759,8 +2943,8 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     try {
       setAIProviderLS(aiProv)
       Object.entries(modelMap).forEach(([id, m]) => setProviderModel(id, m))
-      try { localStorage.setItem(LS_OLLAMA_URL, ollamaUrl) } catch {}
-      try { localStorage.setItem(LS_OLLAMA_MODEL, ollamaModel) } catch {}
+      try { localStorage.setItem(OLLAMA_URL_STORAGE_KEY, ollamaUrl) } catch {}
+      try { localStorage.setItem(OLLAMA_MODEL_STORAGE_KEY, ollamaModel) } catch {}
       toast('AI settings saved', 'success')
     } catch { toast('Failed to save settings', 'error') }
   }
@@ -3780,20 +2964,42 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   }
 
   async function testConnection() {
-    setTestStatus('testing')
+    if (!aiProv) {
+      setTestStatus({ provider:null, state:'not_configured', message:'No AI provider is configured. Add one optional provider key or use Local Ollama.' })
+      return
+    }
+    const refreshed = await refreshProviderAvailability()
+    setProviderAvailability(refreshed.providers)
+    if (aiProv !== 'ollama' && getProviderConfigurationState(aiProv, refreshed.providers) === 'not_configured') {
+      setProviderConnectionStatus(aiProv, 'not_configured')
+      setTestStatus({ provider:aiProv, state:'not_configured', message:`${PROVIDERS[aiProv]?.name || 'This provider'} is not configured on the server.` })
+      return
+    }
+
+    setTestStatus({ provider:aiProv, state:'testing', message:'' })
     try {
       if (aiProv === 'ollama') {
         const { corsOk, running } = await ollamaProbe(ollamaUrl)
-        if (!running) { setTestStatus('❌ Ollama not running'); return }
-        if (!corsOk)  { setTestStatus('⚠ CORS blocked — start with OLLAMA_ORIGINS=* ollama serve'); return }
+        if (!running) { setTestStatus({ provider:aiProv, state:'failed', message:'Ollama is unavailable. Start Ollama on this machine, then try again.' }); return }
+        if (!corsOk)  { setTestStatus({ provider:aiProv, state:'failed', message:'Ollama is unavailable because browser CORS is blocked. Start it with OLLAMA_ORIGINS=* ollama serve.' }); return }
         const reply = await ollamaChat([{role:'user',content:'Say only: CONNECTED'}], '', 10)
-        setTestStatus(`✅ Connected — ${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"`)
+        setTestStatus({ provider:aiProv, state:'connected', message:`${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"` })
       } else {
-        const reply = await ai([{role:'user',content:'Say only: CONNECTED'}], '', 20)
-        if (reply.startsWith('⚠')) setTestStatus('❌ ' + reply.replace('⚠ ',''))
-        else setTestStatus(`✅ Connected — ${PROVIDERS[aiProv]?.name} replied: "${reply.trim().slice(0,60)}"`)
+        const result = await requestAIResult(createProviderConnectionTestRequest({
+          provider: aiProv,
+          model: modelMap[aiProv] || PROVIDERS[aiProv]?.default,
+        }))
+        if (!result.ok) {
+          setTestStatus({
+            provider: aiProv,
+            state: result.error.code === 'MISSING_CONFIGURATION' ? 'not_configured' : 'failed',
+            message: result.error.message,
+          })
+          return
+        }
+        setTestStatus({ provider:aiProv, state:'connected', message:`${PROVIDERS[aiProv]?.name} replied: "${result.text.trim().slice(0,60)}"` })
       }
-    } catch (e) { setTestStatus('❌ ' + e.message) }
+    } catch { setTestStatus({ provider:aiProv, state:'failed', message:'The provider could not be tested. Check its configuration and try again.' }) }
   }
 
   return (
@@ -3828,15 +3034,25 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       {tab==='ai' && (
         <div style={{ maxWidth:540 }}>
           <p style={{ margin:'0 0 20px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
-            Choose your AI provider. Your selection applies to <strong style={{color:C.t1}}>every feature</strong> — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder. API keys are stored securely on the server, never in your browser.
+            Choose your AI provider. Your selection applies to <strong style={{color:C.t1}}>every feature</strong> — Chat, Notes, Tasks, YouTube AI, Code AI, and Website Builder. Add only the optional provider keys you use; API keys stay securely on the server and never enter your browser.
           </p>
 
           {/* ── Provider cards ── */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:20 }}>
             {Object.values(PROVIDERS).map(p => {
               const active = aiProv === p.id
+              const configuration = getProviderConfigurationState(p.id, providerAvailability)
+              const lastKnownState = providerConnectionStatuses[p.id] || ''
+              const isTesting = testStatus?.provider === p.id && testStatus.state === 'testing'
+              const fallbackTestState = testStatus?.provider === p.id && !lastKnownState ? testStatus.state : ''
+              const connection = getProviderConnectionState(configuration, isTesting ? 'testing' : lastKnownState || fallbackTestState)
+              const configurationLabel = connection.label
+              const configurationColor = connection.state === 'connected' ? C.green
+                : connection.state === 'testing' ? C.accent
+                  : connection.state === 'failed' || connection.state === 'not_configured' ? C.red
+                    : connection.state === 'local' ? C.yellow : C.green
               return (
-                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus('') }}
+                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus(null) }}
                   style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}>
                     <span style={{ fontSize:20 }}>{p.icon}</span>
@@ -3844,6 +3060,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
                   </div>
                   <span style={{ fontSize:13, fontWeight:700, color:active?C.accent:C.t1 }}>{p.name}</span>
                   <span style={{ fontSize:11, color:C.t3 }}>{p.sub}</span>
+                  <span style={{ fontSize:11, color:configurationColor }}>{configurationLabel}</span>
                 </button>
               )
             })}
@@ -3851,7 +3068,12 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
           {/* ── Per-provider config panel ── */}
           <Card style={{ padding:18, marginBottom:16 }}>
-            {aiProv !== 'ollama' && (() => {
+            {!aiProv && (
+              <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
+                No cloud AI provider is configured for this deployment. Add one optional provider key on the server, or choose Local Ollama and test its connection. Authentication and the rest of FounderLab continue to work without an AI key.
+              </div>
+            )}
+            {aiProv && aiProv !== 'ollama' && (() => {
               const p = PROVIDERS[aiProv]
               return (
                 <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
@@ -3865,7 +3087,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
                       value={modelMap[aiProv] || p.default}
                       onChange={e => setModelMap(m => ({...m, [aiProv]: e.target.value}))}
                       style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
-                      {p.models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      {p.models.filter(m => !m.internalOnly).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
                     </select>
                   </div>
                   <div style={{ padding:10, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t3 }}>
@@ -3934,16 +3156,18 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
           {/* ── Test Connection ── */}
           <Card style={{ padding:16, marginBottom:16 }}>
             <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-              <Button onClick={testConnection} disabled={testStatus==='testing'} variant="secondary" size="sm">
-                {testStatus==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
+              <Button onClick={testConnection} disabled={testStatus?.state==='testing'} variant="secondary" size="sm">
+                {testStatus?.state==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
               </Button>
-              {testStatus && testStatus !== 'testing' && (
-                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.startsWith('✅')?C.green:testStatus.startsWith('⚠')?C.yellow:C.red }}>{testStatus}</span>
+              {testStatus && testStatus.state !== 'testing' && (
+                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.state==='connected'?C.green:testStatus.state==='not_configured'?C.yellow:C.red }}>
+                  {testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Failed'} — {testStatus.message}
+                </span>
               )}
             </div>
           </Card>
 
-          <Button onClick={saveAISettings} full>Save &amp; Apply</Button>
+          <Button onClick={saveAISettings} full disabled={!aiProv}>Save &amp; Apply</Button>
         </div>
       )}
 
@@ -3972,12 +3196,14 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             ) : (
               <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
                 <input type="password" value={ghInputVal} onChange={e=>setGhInputVal(e.target.value)}
-                  placeholder="Personal access token (repo scope)"
+                  placeholder="Personal access token (this session only)"
+                  autoComplete="off"
                   style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }} />
                 <div style={{ display:'flex', gap:8, alignItems:'center' }}>
                   <Button onClick={connectGithub} size="sm">Connect</Button>
                   <a href="https://github.com/settings/tokens/new?scopes=repo&description=FounderLab%20AI" target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.accent }}>Create a token →</a>
                 </div>
+                <p style={{ margin:0, color:C.t3, fontSize:11, lineHeight:1.5 }}>The token is kept in memory for this browser session only and is never saved to local storage.</p>
               </div>
             )}
           </Card>
@@ -4059,7 +3285,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             <h3 style={{ margin:'0 0 16px', fontSize:15, color:C.t1 }}>Data Ownership</h3>
             <table style={{ width:'100%', fontSize:13, borderCollapse:'collapse' }}>
               <tbody>
-                {[['All notes & tasks','You','Export or delete anytime'],['AI conversations','You','Export or delete anytime'],['Usage analytics','FounderLab','Anonymous, aggregate only'],['AI processing','Anthropic','Per Anthropic privacy policy']].map(([a,b,c])=>(
+                {[['All notes & tasks','You','Export or delete anytime'],['AI conversations','You','Export or delete anytime'],['Usage analytics','FounderLab','Anonymous, aggregate only'],['AI processing','Selected provider','Per selected provider privacy policy']].map(([a,b,c])=>(
                   <tr key={a} style={{ borderBottom:`1px solid ${C.border}` }}>
                     <td style={{ padding:'10px 0', color:C.t1 }}>{a}</td>
                     <td style={{ padding:'10px 12px', color:C.t2 }}>{b}</td>
@@ -4081,178 +3307,59 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 }
 
 // ── FEEDBACK MODAL ────────────────────────────────────────────
-function FeedbackModal({ onClose }) {
-  const [type, setType]   = useState('feedback')
-  const [text, setText]   = useState('')
-  const [loading, setL]   = useState(false)
-  const ph = { bug:'Describe what happened and how to reproduce it…', feature:'What feature would you like to see?', feedback:'Share your thoughts about FounderLab AI…' }
-
-  async function submit() {
-    if (!text.trim()) return toast('Please write something first','error')
-    setL(true)
-    const ok=await sb.submitFeedback(type,text.trim())
-    if (ok) { toast('Feedback submitted — thank you!','success'); onClose() }
-    else { toast('Submit failed. Try again.','error') }
-    setL(false)
-  }
-
-  return (
-    <div style={{ position:'fixed', inset:0, background:'#000c', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }} onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <Card style={{ width:'100%', maxWidth:440, padding:28, borderRadius:16 }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
-          <h3 style={{ margin:0, color:C.t1, fontSize:16 }}>Send Feedback</h3>
-          <button onClick={onClose} style={{ background:'none', border:'none', color:C.t2, cursor:'pointer', fontSize:22, lineHeight:1, padding:4, fontFamily:'inherit' }}>×</button>
-        </div>
-        <div style={{ display:'flex', gap:8, marginBottom:16 }}>
-          {[['bug','🐛 Bug'],['feature','✨ Feature'],['feedback','💬 Feedback']].map(([id,l])=>(
-            <button key={id} onClick={()=>setType(id)} style={{ flex:1, padding:'7px 0', borderRadius:8, border:`1px solid ${type===id?C.accent:C.border}`, background:type===id?C.accentM:'transparent', color:type===id?C.accent:C.t2, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:'inherit', transition:'all .15s' }}>{l}</button>
-          ))}
-        </div>
-        <Input rows={4} value={text} onChange={e=>setText(e.target.value)} placeholder={ph[type]} />
-        <div style={{ marginTop:16, display:'flex', gap:8, justifyContent:'flex-end' }}>
-          <Button onClick={onClose} variant="secondary">Cancel</Button>
-          <Button onClick={submit} disabled={loading}>{loading?<Spinner size={13} color="#fff"/>:null} Submit</Button>
-        </div>
-      </Card>
-    </div>
-  )
-}
-
-// ── NAVIGATION ────────────────────────────────────────────────
-const NAV=[
-  {id:'dashboard',label:'Dashboard', icon:'⊞'},
-  {id:'chat',     label:'AI Chat',   icon:'💬'},
-  {id:'notes',    label:'Notes',     icon:'📝'},
-  {id:'tasks',    label:'Tasks',     icon:'✅'},
-  {id:'youtube',  label:'YouTube AI',icon:'▶'},
-  {id:'code',     label:'Code AI',   icon:'⌨'},
-  {id:'builder',  label:'Builder',   icon:'⬡'},
-]
-const MNAV=[
-  {id:'dashboard',label:'Home', icon:'⊞'},
-  {id:'chat',     label:'Chat', icon:'💬'},
-  {id:'notes',    label:'Notes',icon:'📝'},
-  {id:'tasks',    label:'Tasks',icon:'✅'},
-  {id:'settings', label:'More', icon:'⚙'},
-]
-
-function NavBtn({ id, label, icon, page, setPage, collapsed }) {
-  const act=page===id
-  const [hov, setHov]=useState(false)
-  return (
-    <div onClick={()=>setPage(id)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} title={collapsed?label:undefined}
-      style={{ display:'flex', alignItems:'center', gap:10, padding:collapsed?'9px 0':'9px 12px', justifyContent:collapsed?'center':'flex-start', borderRadius:8, cursor:'pointer', marginBottom:2, background:act?C.accentM:'transparent', color:act?C.accent:hov?C.t1:C.t2, border:`1px solid ${act?C.borderFocus:hov?C.border:'transparent'}`, transition:'all .15s' }}>
-      <span style={{ fontSize:16, flexShrink:0 }}>{icon}</span>
-      {!collapsed && <span style={{ fontSize:13, fontWeight:act?500:400, whiteSpace:'nowrap' }}>{label}</span>}
-    </div>
-  )
-}
-
-function Sidebar({ page, setPage, user, profile, collapsed, setCollapsed, onFeedback }) {
-  return (
-    <div style={{ width:collapsed?C.sidebarSm:C.sidebar, height:'100vh', background:C.surf, borderRight:`1px solid ${C.border}`, display:'flex', flexDirection:'column', transition:'width .2s ease', flexShrink:0, overflow:'hidden', position:'sticky', top:0 }}>
-      <div style={{ display:'flex', alignItems:'center', justifyContent:collapsed?'center':'space-between', padding:collapsed?'16px 0':'16px 12px', borderBottom:`1px solid ${C.border}` }}>
-        <div style={{ display:'flex', alignItems:'center', gap:8, overflow:'hidden' }}>
-          <div style={{ width:28, height:28, background:C.accent, borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, color:'#fff', flexShrink:0, fontWeight:700 }}>✦</div>
-          {!collapsed && <span style={{ fontSize:14, fontWeight:700, color:C.t1, whiteSpace:'nowrap' }}>FounderLab</span>}
-        </div>
-        <button onClick={()=>setCollapsed(!collapsed)} style={{ background:'none', border:'none', color:C.t3, cursor:'pointer', fontSize:14, padding:4, lineHeight:1, flexShrink:0 }}>{collapsed?'›':'‹'}</button>
-      </div>
-      <div style={{ flex:1, padding:collapsed?'12px 6px':'12px 8px', overflowY:'auto' }}>
-        {NAV.map(n=><NavBtn key={n.id} {...n} page={page} setPage={setPage} collapsed={collapsed} />)}
-      </div>
-      <div style={{ padding:collapsed?'12px 6px':'12px 8px', borderTop:`1px solid ${C.border}` }}>
-        <NavBtn id="settings" label="Settings" icon="⚙" page={page} setPage={setPage} collapsed={collapsed} />
-        <div onClick={onFeedback} title={collapsed?'Feedback':undefined}
-          style={{ display:'flex', alignItems:'center', gap:10, padding:collapsed?'9px 0':'9px 12px', justifyContent:collapsed?'center':'flex-start', borderRadius:8, cursor:'pointer', color:C.t2, marginBottom:4, transition:'all .15s' }}>
-          <span style={{ fontSize:16 }}>💬</span>
-          {!collapsed && <span style={{ fontSize:13 }}>Feedback</span>}
-        </div>
-        {!collapsed&&(profile?.full_name||user?.email)&&<div style={{ fontSize:11, color:C.t3, padding:'6px 12px 0', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{profile?.full_name||user?.email}</div>}
-      </div>
-    </div>
-  )
-}
-
-function MobileTopBar({ onFeedback }) {
-  return (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 16px', background:C.surf, borderBottom:`1px solid ${C.border}`, position:'sticky', top:0, zIndex:100 }}>
-      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-        <div style={{ width:28, height:28, background:C.accent, borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, color:'#fff', fontWeight:700 }}>✦</div>
-        <span style={{ fontSize:15, fontWeight:700, color:C.t1 }}>FounderLab AI</span>
-      </div>
-      <button onClick={onFeedback} style={{ background:'none', border:'none', cursor:'pointer', fontSize:20, padding:4, color:C.t2 }}>💬</button>
-    </div>
-  )
-}
-
-function MobileBottomNav({ page, setPage }) {
-  return (
-    <div style={{ position:'fixed', bottom:0, left:0, right:0, background:C.surf, borderTop:`1px solid ${C.border}`, display:'flex', paddingBottom:'env(safe-area-inset-bottom)', zIndex:100 }}>
-      {MNAV.map(n=>{
-        const act=page===n.id
-        return (
-          <button key={n.id} onClick={()=>setPage(n.id)} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'8px 0', background:'none', border:'none', cursor:'pointer', color:act?C.accent:C.t3, gap:3, fontFamily:'inherit' }}>
-            <span style={{ fontSize:20 }}>{n.icon}</span>
-            <span style={{ fontSize:10, fontWeight:act?600:400 }}>{n.label}</span>
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
 // ── APP ROOT ──────────────────────────────────────────────────
+function hasCompletedOnboarding(profile) {
+  return profile?.onboarded === true
+}
+
 function AppInner() {
   const [state, setState]     = useState('booting') // booting|setup|auth|onboarding|app
   const [page, setPage]       = useState('dashboard')
   const [profile, setProfile] = useState(null)
   const [collapsed, setCollapsed] = useState(false)
   const [showFb, setShowFb]   = useState(false)
-  const [mobile, setMobile]   = useState(typeof window!=='undefined'&&window.innerWidth<768)
 
   useEffect(() => {
     async function boot() {
       if (!CONFIGURED) { setState('setup'); return }
       const ok=await sb.boot()
       if (ok) {
-        try {
-          const p=await sb.getProfile()
-          setProfile(p)
-          await migrateLocalToCloud()
-          setState(p?.onboarded?'app':'onboarding')
-        } catch { setState('app') }
+        try { await refreshProviderAvailability() } catch {}
+        const p=await sb.getProfile().catch(()=>null)
+        setProfile(p)
+        await migrateLocalToCloud()
+        setState(hasCompletedOnboarding(p)?'app':'onboarding')
       } else { setState('auth') }
     }
     boot()
-    const onResize=()=>setMobile(window.innerWidth<768)
-    window.addEventListener('resize',onResize)
     // Cross-module handoff bus: any page can call flNavigate(page, payload) to
     // switch tabs and hand data to the destination page (e.g. Code AI → Builder).
     const onNav = (e) => { if (e.detail?.page) setPage(e.detail.page) }
     window.addEventListener('fl:navigate', onNav)
-    return ()=>{ window.removeEventListener('resize',onResize); window.removeEventListener('fl:navigate', onNav) }
+    return ()=>{ window.removeEventListener('fl:navigate', onNav) }
   }, [])
 
   async function afterAuth() {
-    try {
-      const p=await sb.getProfile()
-      setProfile(p)
-      await migrateLocalToCloud()
-      setState(p?.onboarded?'app':'onboarding')
-    } catch { setState('app') }
+    try { await refreshProviderAvailability() } catch {}
+    const p=await sb.getProfile().catch(()=>null)
+    setProfile(p)
+    await migrateLocalToCloud()
+    setState(hasCompletedOnboarding(p)?'app':'onboarding')
   }
 
-  async function afterOnboarding() {
-    try {
-      const p=await sb.getProfile()
-      setProfile(p)
-    } catch {}
+  function afterOnboarding(completedProfile, completion = {}) {
+    setProfile(completedProfile)
     setState('app')
+    if (!completion.saved) {
+      toast('Onboarding is stored only on this device until a later sync succeeds.', 'error')
+    } else if (!completion.metadataSaved) {
+      toast('Workspace setup is saved. Your role and goal will sync when the connection returns.', 'error')
+    }
   }
 
   async function signOut() {
     await sb.signOut()
+    clearGithubToken()
     setProfile(null); setPage('dashboard'); setState('auth')
   }
 
@@ -4282,20 +3389,12 @@ function AppInner() {
       {state==='app'&&(
         <>
           {showFb&&<FeedbackModal onClose={()=>setShowFb(false)} />}
-          {mobile ? (
-            <div style={{ minHeight:'100vh', background:C.bg }}>
-              <MobileTopBar onFeedback={()=>setShowFb(true)} />
-              <div style={{ paddingBottom:80 }}>{renderPage()}</div>
-              <MobileBottomNav page={page} setPage={setPage} />
+          <div style={{ display:'flex', minHeight:'100vh', background:C.bg, overflow:'hidden' }}>
+            <Sidebar page={page} setPage={setPage} user={user} profile={profile} collapsed={collapsed} setCollapsed={setCollapsed} onFeedback={()=>setShowFb(true)} />
+            <div style={{ flex:1, minWidth:0, overflow:'hidden', display:'flex', flexDirection:'column' }}>
+              {renderPage()}
             </div>
-          ) : (
-            <div style={{ display:'flex', height:'100vh', background:C.bg, overflow:'hidden' }}>
-              <Sidebar page={page} setPage={setPage} user={user} profile={profile} collapsed={collapsed} setCollapsed={setCollapsed} onFeedback={()=>setShowFb(true)} />
-              <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
-                {renderPage()}
-              </div>
-            </div>
-          )}
+          </div>
         </>
       )}
     </>

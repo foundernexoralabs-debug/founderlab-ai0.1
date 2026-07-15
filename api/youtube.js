@@ -1,58 +1,75 @@
 /**
- * FounderLab AI — YouTube AI + Viral Clip Studio API
- * Routes: /info  /transcript  /analyze  /analyze-all  /clip-stream  /ai-dub  /generate-thumbnail
- *
- * Architecture note: Vercel serverless cannot run yt-dlp or ffmpeg binaries.
- * We use ytdl-core (npm, no binary) for video metadata + direct streaming,
- * youtube-transcript for auto-fetching captions, and Groq for AI analysis.
- * Video processing (reframe/karaoke burn) is exported as config for client-side or local tools.
+ * FounderLab YouTube API. Metadata and transcript helpers remain feature
+ * specific; AI analysis and voice synthesis use the shared provider adapters.
  */
+const { runProvider } = require('./ai/providerRunner')
+const { createProviderError } = require('./ai/providerUtils')
+const {
+  handleCors,
+  requireAuthenticatedUser,
+  requireRateLimit,
+  sendNormalizedError,
+} = require('./_lib/apiSecurity')
+const { synthesizeVoice } = require('./voice/elevenlabs')
 
-const fs   = require('fs')
-const path = require('path')
-const os   = require('os')
+const TEXT_PROVIDER = 'groq'
+const VOICE_PROVIDER = 'elevenlabs'
 
-function setCORS(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+let youtubeAIEnginePromise = null
+
+function getYouTubeAIEngine() {
+  if (!youtubeAIEnginePromise) {
+    youtubeAIEnginePromise = Promise.all([
+      import('../src/ai/normalizeRequest.js'),
+      import('../src/ai/providerRegistry.js'),
+    ]).then(([request, registry]) => ({
+      normalizeAIRequest: request.normalizeAIRequest,
+      getPurposeModel: registry.getPurposeModel,
+    }))
+  }
+  return youtubeAIEnginePromise
 }
 
 async function parseBody(req) {
   if (req.body && typeof req.body === 'object') return req.body
-  if (req.body && typeof req.body === 'string') { try { return JSON.parse(req.body) } catch { return {} } }
+  if (req.body && typeof req.body === 'string') {
+    try { return JSON.parse(req.body) } catch { return {} }
+  }
   return new Promise((resolve, reject) => {
     let data = ''
-    req.on('data', c => { data += c })
+    req.on('data', (chunk) => { data += chunk })
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}) } catch { resolve({}) } })
     req.on('error', reject)
   })
 }
 
-// ── Extract video ID from any YouTube URL format ───────────────
 function extractVideoId(url) {
   if (!url) return null
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
     /youtube\.com\/.*[?&]v=([A-Za-z0-9_-]{11})/,
   ]
-  for (const p of patterns) {
-    const m = url.match(p)
-    if (m) return m[1]
+  for (const pattern of patterns) {
+    const match = String(url).match(pattern)
+    if (match) return match[1]
   }
   return null
 }
 
-// ── Groq AI analysis ───────────────────────────────────────────
-async function analyzeWithGroq(transcript, durationSec = 0) {
-  const key = process.env.GROQ_API_KEY
-  if (!key || !transcript?.trim()) {
-    return {
-      viralityScore: 70, reason: 'Add your GROQ_API_KEY for real AI analysis.',
-      peakMoment: 30, suggestedTitle: 'Your Viral Moment',
-      hook: transcript?.slice(0, 80) || '', hashtags: ['#viral','#shorts'],
-      clipRanges: [{ start: 0, end: 60, label: 'Full segment', score: 70 }],
-    }
+function parseAnalysisJson(text) {
+  const trimmed = String(text || '').trim()
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)
+  const candidate = fenced?.[1]?.trim() || trimmed
+  const firstObject = candidate.indexOf('{')
+  const lastObject = candidate.lastIndexOf('}')
+  return JSON.parse(firstObject >= 0 && lastObject > firstObject
+    ? candidate.slice(firstObject, lastObject + 1)
+    : candidate)
+}
+
+async function analyzeTranscript(transcript, durationSec = 0, { env, fetchImpl, selection } = {}) {
+  if (!transcript?.trim()) {
+    throw createProviderError({ provider: selection?.provider || TEXT_PROVIDER, status: 400, code: 'REQUEST_INVALID', message: 'Transcript is required.' })
   }
   const prompt = `Analyze this YouTube transcript for viral potential.
 Duration: ${durationSec}s. Transcript: ${transcript.slice(0, 4000)}
@@ -65,165 +82,178 @@ Return ONLY valid JSON (no markdown) with exactly these fields:
   "suggestedTitle": "<catchy title>",
   "hook": "<first 10 words of best hook>",
   "hashtags": ["<5 hashtags>"],
-  "clipRanges": [
-    { "start": <seconds>, "end": <seconds>, "label": "<what happens>", "score": <0-100> }
-  ],
+  "clipRanges": [{ "start": <seconds>, "end": <seconds>, "label": "<what happens>", "score": <0-100> }],
   "shortScript": "<60-second word-for-word script for Shorts/TikTok/Reels>",
   "thumbnailIdea": "<describe the ideal thumbnail>"
 }`
 
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-    }),
+  const { getPurposeModel, normalizeAIRequest } = await getYouTubeAIEngine()
+  const internalSelection = getPurposeModel('youtube-analysis')
+  const requestedSelection = selection?.provider ? selection : internalSelection
+  if (!requestedSelection) {
+    throw createProviderError({ provider: TEXT_PROVIDER, status: 503, code: 'MISSING_CONFIGURATION', message: 'YouTube analysis model is not configured.' })
+  }
+  const normalized = normalizeAIRequest({
+    provider: requestedSelection.provider,
+    model: requestedSelection.model,
+    messages: [{ role: 'user', content: prompt }],
+    maxTokens: 2000,
+    temperature: 0.2,
+  }, {
+    enforceLimits: true,
+    // The internal Groq model is retained only for legacy callers that did
+    // not send a Settings selection. Browser-supplied choices can never use it.
+    allowInternalModels: !selection?.provider,
   })
-  const data = await r.json()
+  if (!normalized.ok) {
+    throw createProviderError({ provider: requestedSelection.provider, status: normalized.error.status, code: normalized.error.code, message: normalized.error.message })
+  }
+
+  const output = await runProvider({
+    ...normalized.value,
+    ...(normalized.value.provider === 'groq' ? { responseFormat: { type: 'json_object' } } : {}),
+  }, { env, fetchImpl })
   try {
-    const raw = data.choices?.[0]?.message?.content || '{}'
-    const result = JSON.parse(raw)
-    if (!result.clipRanges?.length) {
-      result.clipRanges = [{ start: Math.max(0, result.peakMoment - 30), end: result.peakMoment + 30, label: 'Best moment', score: result.viralityScore }]
+    const result = parseAnalysisJson(output.text)
+    const peakMoment = Number(result?.peakMoment)
+    const viralityScore = Number(result?.viralityScore)
+    if (!result || Array.isArray(result) || !Number.isFinite(peakMoment) || !Number.isFinite(viralityScore)) {
+      throw new Error('The provider response did not match the analysis contract.')
+    }
+    if (!Array.isArray(result.clipRanges) || result.clipRanges.length === 0) {
+      result.clipRanges = [{ start: Math.max(0, peakMoment - 30), end: peakMoment + 30, label: 'Best moment', score: viralityScore }]
     }
     return result
   } catch {
-    return { viralityScore: 70, reason: 'Analysis complete', peakMoment: 30, suggestedTitle: 'Viral Clip', hook: '', hashtags: [], clipRanges: [], shortScript: '', thumbnailIdea: '' }
+    throw createProviderError({ provider: normalized.value.provider, status: 502, code: 'MALFORMED_RESPONSE', message: 'YouTube analysis returned an invalid result.' })
   }
 }
 
-// ── YouTube transcript fetch ───────────────────────────────────
 async function fetchTranscript(videoId) {
   try {
     const { YoutubeTranscript } = require('youtube-transcript')
     const items = await YoutubeTranscript.fetchTranscript(videoId)
-    return items.map(i => i.text).join(' ')
-  } catch (e) {
+    return items.map((item) => item.text).join(' ')
+  } catch {
     return null
   }
 }
 
-// ── Video metadata via ytdl-core ───────────────────────────────
 async function getVideoInfo(url) {
   try {
     const ytdl = require('ytdl-core')
     const info = await ytdl.getInfo(url)
     const details = info.videoDetails
     return {
-      title:       details.title,
-      duration:    parseInt(details.lengthSeconds || 0),
-      author:      details.author?.name || '',
-      thumbnail:   details.thumbnails?.slice(-1)[0]?.url || '',
-      viewCount:   parseInt(details.viewCount || 0),
-      videoId:     details.videoId,
+      title: details.title,
+      duration: parseInt(details.lengthSeconds || 0),
+      author: details.author?.name || '',
+      thumbnail: details.thumbnails?.slice(-1)[0]?.url || '',
+      viewCount: parseInt(details.viewCount || 0),
+      videoId: details.videoId,
       description: details.description?.slice(0, 500) || '',
     }
-  } catch (e) {
+  } catch {
     return null
   }
 }
 
-// ── Voice synthesis via our /api/tts endpoint ─────────────────
-async function synthesizeVoice(transcript, gender = 'male') {
-  try {
-    const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'
-    const r = await fetch(`${baseUrl}/api/tts`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: transcript.slice(0, 2500), gender }),
-    })
-    if (!r.ok) return null
-    const ct = r.headers.get('Content-Type') || ''
-    if (!ct.includes('audio')) return null
-    return Buffer.from(await r.arrayBuffer())
-  } catch { return null }
+function providerForRoute(urlPath, requestedProvider) {
+  return urlPath === '/ai-dub' ? VOICE_PROVIDER : urlPath === '/analyze' ? requestedProvider || TEXT_PROVIDER : null
 }
 
-// ── Main handler ──────────────────────────────────────────────
-module.exports = async function handler(req, res) {
-  setCORS(res)
-  if (req.method === 'OPTIONS') return res.status(200).end()
+async function requireYouTubeLimit(req, res, user, scope, provider, dependencies) {
+  return requireRateLimit(req, res, {
+    user,
+    scope,
+    provider,
+    env: dependencies.env,
+    fetchImpl: dependencies.fetchImpl,
+    limiter: dependencies.rateLimiter,
+  })
+}
 
+async function handler(req, res, injectedDependencies = {}) {
+  const dependencies = {
+    env: injectedDependencies.env || process.env,
+    fetchImpl: injectedDependencies.fetchImpl || globalThis.fetch,
+    rateLimiter: injectedDependencies.rateLimiter,
+  }
   const urlPath = (req.url || '').split('?')[0].replace(/^\/api\/youtube/, '')
+  let provider = providerForRoute(urlPath, req.body?.provider)
+  const cors = await handleCors(req, res, { env: dependencies.env, provider })
+  if (cors.handled) return
+
+  if (req.method !== 'POST') {
+    return sendNormalizedError(res, { provider, status: 405, code: 'REQUEST_INVALID' })
+  }
+
+  const user = await requireAuthenticatedUser(req, res, { provider, env: dependencies.env, fetchImpl: dependencies.fetchImpl })
+  if (!user) return
 
   try {
-    // ── GET VIDEO INFO ────────────────────────────────────────
     if (urlPath === '/info' && req.method === 'POST') {
       const { url } = await parseBody(req)
-      const videoId = extractVideoId(url)
-      if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL. Supported formats: youtube.com/watch?v=ID, youtu.be/ID, youtube.com/shorts/ID' })
+      if (!extractVideoId(url)) return sendNormalizedError(res, { status: 400, code: 'REQUEST_INVALID' })
+      if (!await requireYouTubeLimit(req, res, user, 'youtube', null, dependencies)) return
       const info = await getVideoInfo(url)
+      const videoId = extractVideoId(url)
       if (!info) return res.status(200).json({ videoId, title: 'Video', duration: 0, thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`, author: '', viewCount: 0, description: '', limited: true })
       return res.status(200).json({ ...info, videoId })
     }
 
-    // ── FETCH TRANSCRIPT ──────────────────────────────────────
     if (urlPath === '/transcript' && req.method === 'POST') {
-      const { url, videoId: vid } = await parseBody(req)
-      const id = vid || extractVideoId(url)
-      if (!id) return res.status(400).json({ error: 'Invalid YouTube URL' })
-      const transcript = await fetchTranscript(id)
+      const { url, videoId: requestedVideoId } = await parseBody(req)
+      const videoId = requestedVideoId || extractVideoId(url)
+      if (!videoId) return sendNormalizedError(res, { status: 400, code: 'REQUEST_INVALID' })
+      if (!await requireYouTubeLimit(req, res, user, 'youtube', null, dependencies)) return
+      const transcript = await fetchTranscript(videoId)
       if (!transcript) return res.status(200).json({ transcript: null, message: 'No auto-captions found for this video. Paste the transcript manually for best results.' })
       return res.status(200).json({ transcript })
     }
 
-    // ── ANALYZE (single video with transcript) ────────────────
     if (urlPath === '/analyze' && req.method === 'POST') {
-      const { transcript, duration = 0, url } = await parseBody(req)
+      const { transcript, duration = 0, url, provider: requestedProvider, model } = await parseBody(req)
+      const selection = requestedProvider ? { provider: requestedProvider, model } : null
+      provider = selection?.provider || TEXT_PROVIDER
+      if (!await requireYouTubeLimit(req, res, user, 'youtube', provider, dependencies)) return
       let text = transcript
       if (!text && url) {
-        const id = extractVideoId(url)
-        if (id) text = await fetchTranscript(id)
+        const videoId = extractVideoId(url)
+        if (videoId) text = await fetchTranscript(videoId)
       }
-      if (!text?.trim()) return res.status(400).json({ error: 'Transcript required. Paste it manually or ensure the video has auto-generated captions.' })
-      const result = await analyzeWithGroq(text, duration)
+      if (!text?.trim()) return sendNormalizedError(res, { provider, status: 400, code: 'REQUEST_INVALID' })
+      const result = await analyzeTranscript(text, duration, { ...dependencies, selection })
       return res.status(200).json(result)
     }
 
-    // ── AI DUB ────────────────────────────────────────────────
     if (urlPath === '/ai-dub' && req.method === 'POST') {
       const { transcript, gender = 'male' } = await parseBody(req)
-      if (!transcript) return res.status(400).json({ error: 'Transcript required' })
-      const audio = await synthesizeVoice(transcript, gender)
-      if (!audio) return res.status(200).json({ fallback: true, message: 'Add ELEVENLABS_API_KEY for AI voice synthesis.' })
+      if (typeof transcript !== 'string' || !transcript.trim()) return sendNormalizedError(res, { provider: VOICE_PROVIDER, status: 400, code: 'REQUEST_INVALID' })
+      if (!await requireYouTubeLimit(req, res, user, 'tts', VOICE_PROVIDER, dependencies)) return
+      const audio = await synthesizeVoice({ text: transcript, gender, env: dependencies.env, fetchImpl: dependencies.fetchImpl })
       res.setHeader('Content-Type', 'audio/mpeg')
+      res.setHeader('Content-Length', audio.byteLength)
+      res.setHeader('Cache-Control', 'no-store')
       return res.status(200).send(audio)
     }
 
-    // ── GENERATE THUMBNAIL TEXT ───────────────────────────────
     if (urlPath === '/generate-thumbnail' && req.method === 'POST') {
       const { title, videoId, thumbnailUrl } = await parseBody(req)
-      // Return the best available thumbnail + text config (actual image overlay needs client-side canvas)
-      const thumb = thumbnailUrl || (videoId ? `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg` : null)
-      if (!thumb) return res.status(400).json({ error: 'No thumbnail source available' })
-      return res.status(200).json({ thumbnailUrl: thumb, overlayText: title, ready: true })
+      const thumbnail = thumbnailUrl || (videoId ? `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg` : null)
+      if (!thumbnail) return sendNormalizedError(res, { status: 400, code: 'REQUEST_INVALID' })
+      return res.status(200).json({ thumbnailUrl: thumbnail, overlayText: title, ready: true })
     }
 
-    // ── CLIP STREAM (direct YouTube stream via ytdl) ──────────
-    if (urlPath === '/clip-stream' && req.method === 'GET') {
-      const params  = new URLSearchParams((req.url || '').split('?')[1] || '')
-      const url     = params.get('url')
-      const videoId = params.get('videoId')
-      const target  = url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null)
-      if (!target) return res.status(400).json({ error: 'URL or videoId required' })
-      try {
-        const ytdl = require('ytdl-core')
-        if (!ytdl.validateURL(target)) return res.status(400).json({ error: 'Invalid YouTube URL' })
-        res.setHeader('Content-Type', 'video/mp4')
-        res.setHeader('Transfer-Encoding', 'chunked')
-        ytdl(target, { quality: '18', filter: 'videoandaudio' })
-          .on('error', () => res.status(500).end())
-          .pipe(res)
-      } catch (e) { return res.status(500).json({ error: 'Stream failed: ' + e.message }) }
-      return
-    }
-
-    return res.status(404).json({ error: `Route not found: ${urlPath}` })
-
-  } catch (e) {
-    console.error('[youtube api]', e)
-    return res.status(500).json({ error: e.message || 'Internal server error' })
+    return sendNormalizedError(res, { provider, status: 404, code: 'REQUEST_INVALID' })
+  } catch (error) {
+    console.error('[youtube api]', { route: urlPath, provider: provider || error?.provider, code: error?.code, status: error?.status })
+    return sendNormalizedError(res, {
+      provider: provider || error?.provider,
+      status: error?.status,
+      code: error?.code || 'PROVIDER_UNAVAILABLE',
+    })
   }
 }
+
+module.exports = handler

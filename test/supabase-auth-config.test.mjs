@@ -1,0 +1,289 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  getAuthRedirectUrl,
+  getSafeAuthErrorMessage,
+  getSetupScreenView,
+  getSupabaseConfig,
+  isSetupDiagnosticsEnabled,
+  SUPABASE_CONFIGURATION_ERROR,
+  withAuthRedirect,
+} from '../src/lib/supabaseConfig.js'
+import { createWorkspaceStore } from '../src/services/workspaceStore.js'
+
+const validEnvironment = Object.freeze({
+  VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co',
+  VITE_SUPABASE_ANON_KEY: 'public-anon-key',
+})
+
+function createStorage(initialValue = null) {
+  let value = initialValue
+  return {
+    getItem: () => value,
+    setItem: (_, nextValue) => { value = nextValue },
+    removeItem: () => { value = null },
+    get value() { return value },
+  }
+}
+
+function successfulResponse(body = {}) {
+  return { ok: true, json: async () => body }
+}
+
+function accessTokenWithExpiry(expiry) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return encode({ alg: 'none' }) + '.' + encode({ exp: expiry }) + '.signature'
+}
+
+test('Supabase configuration rejects missing, malformed, endpoint, and whitespace values', () => {
+  assert.equal(getSupabaseConfig({ VITE_SUPABASE_ANON_KEY: 'public-anon-key' }).valid, false)
+  assert.equal(getSupabaseConfig({ VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co', VITE_SUPABASE_ANON_KEY: '' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co/auth/v1' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co/rest/v1' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_URL: ' https://founderlab-test.supabase.co' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_ANON_KEY: 'public-anon-key ' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_ANON_KEY: 'undefined' }).valid, false)
+  assert.equal(getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_ANON_KEY: '"public-anon-key"' }).valid, false)
+})
+
+test('a valid Supabase configuration normalizes to the HTTPS project origin', () => {
+  const config = getSupabaseConfig({ ...validEnvironment, VITE_SUPABASE_URL: 'https://founderlab-test.supabase.co/' })
+  assert.deepEqual(config, {
+    valid: true,
+    url: 'https://founderlab-test.supabase.co',
+    anonKey: 'public-anon-key',
+  })
+})
+
+test('a valid Preview Supabase configuration proceeds to normal auth bootstrap', async () => {
+  const previewConfig = getSupabaseConfig({
+    VITE_SUPABASE_URL: 'https://founderlab-preview.supabase.co',
+    VITE_SUPABASE_ANON_KEY: 'public-anon-key',
+  })
+  const store = createWorkspaceStore({ config: previewConfig, storage: createStorage() })
+
+  assert.equal(previewConfig.valid, true)
+  assert.equal(await store.boot(), false)
+})
+
+test('production and preview unavailable states never expose configuration details', () => {
+  const restrictedTerms = [
+    '.env.local',
+    'VITE_SUPABASE_URL',
+    'VITE_SUPABASE_ANON_KEY',
+    'SUPABASE_URL',
+    'ANTHROPIC_API_KEY',
+    'GROQ_API_KEY',
+    'GEMINI_API_KEY',
+    'ELEVENLABS_API_KEY',
+    'RATE_LIMITER',
+  ]
+  for (const environment of [
+    { DEV: false, MODE: 'production' },
+    { DEV: false, MODE: 'production', VERCEL_ENV: 'preview' },
+  ]) {
+    const view = getSetupScreenView(environment)
+    assert.equal(isSetupDiagnosticsEnabled(environment), false)
+    assert.equal(view.title, 'FounderLab is temporarily unavailable')
+    assert.equal(view.message, 'Authentication could not start. Please try again shortly.')
+    assert.deepEqual(view.diagnostics, [])
+    const publicText = JSON.stringify(view)
+    for (const term of restrictedTerms) assert.equal(publicText.includes(term), false, term + ' must not reach public UI')
+  }
+})
+
+test('local development may show setup diagnostics without changing the public unavailable message', () => {
+  const view = getSetupScreenView({ DEV: true, MODE: 'development' })
+  assert.equal(isSetupDiagnosticsEnabled({ DEV: true }), true)
+  assert.equal(view.title, 'FounderLab is temporarily unavailable')
+  assert.equal(view.message, 'Authentication could not start. Please try again shortly.')
+  assert.equal(view.diagnostics.some((item) => item.includes('VITE_SUPABASE_URL')), true)
+})
+
+test('invalid Supabase configuration blocks every browser auth action before fetch', async () => {
+  let fetchCalls = 0
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig({ VITE_SUPABASE_URL: 'not a URL', VITE_SUPABASE_ANON_KEY: 'public-anon-key' }),
+    fetchImpl: async () => {
+      fetchCalls += 1
+      return successfulResponse()
+    },
+    storage: createStorage(),
+  })
+
+  for (const action of [
+    () => store.signIn('founder@example.test', 'safe-password'),
+    () => store.signUp('founder@example.test', 'safe-password'),
+    () => store.resetPassword('founder@example.test'),
+    () => store.resendVerification('founder@example.test'),
+  ]) {
+    await assert.rejects(action, new RegExp(SUPABASE_CONFIGURATION_ERROR.replace(/[.]/g, '\\.')))
+  }
+
+  assert.equal(fetchCalls, 0)
+})
+
+test('a valid configuration sends auth requests to the expected Supabase endpoint', async () => {
+  let capturedUrl = ''
+  let capturedOptions = null
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    fetchImpl: async (url, options) => {
+      capturedUrl = url
+      capturedOptions = options
+      return successfulResponse({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+    storage: createStorage(),
+  })
+
+  await store.signIn('founder@example.test', 'safe-password', false)
+  assert.equal(capturedUrl, 'https://founderlab-test.supabase.co/auth/v1/token?grant_type=password')
+  assert.equal(capturedOptions.headers.apikey, 'public-anon-key')
+  assert.deepEqual(JSON.parse(capturedOptions.body), { email: 'founder@example.test', password: 'safe-password' })
+  assert.equal(store.session.user_id, 'user-id')
+})
+
+test('optional providers and absent rate-limiter settings never affect browser authentication', async () => {
+  let authRequests = 0
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    fetchImpl: async () => {
+      authRequests += 1
+      return successfulResponse({
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+    storage: createStorage(),
+  })
+
+  await store.signIn('founder@example.test', 'safe-password')
+  assert.equal(authRequests, 1)
+  assert.equal(store.session.user_id, 'user-id')
+})
+
+test('email auth actions return to the current HTTPS preview origin', async () => {
+  const previewLocation = { origin: 'https://founderlab-ai01-git-phase-2-foun.example.vercel.app' }
+  const requests = []
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) })
+      return successfulResponse()
+    },
+    storage: createStorage(),
+    location: previewLocation,
+  })
+
+  await store.signUp('founder@example.test', 'safe-password')
+  await store.resetPassword('founder@example.test')
+  await store.resendVerification('founder@example.test')
+
+  assert.deepEqual(requests, [
+    {
+      url: 'https://founderlab-test.supabase.co/auth/v1/signup',
+      body: { email: 'founder@example.test', password: 'safe-password', redirect_to: previewLocation.origin },
+    },
+    {
+      url: 'https://founderlab-test.supabase.co/auth/v1/recover',
+      body: { email: 'founder@example.test', redirect_to: previewLocation.origin },
+    },
+    {
+      url: 'https://founderlab-test.supabase.co/auth/v1/resend',
+      body: { type: 'signup', email: 'founder@example.test', email_redirect_to: previewLocation.origin },
+    },
+  ])
+  assert.equal(getAuthRedirectUrl(previewLocation), previewLocation.origin)
+  assert.deepEqual(withAuthRedirect({ email: 'founder@example.test' }, 'redirect_to', previewLocation), {
+    email: 'founder@example.test',
+    redirect_to: previewLocation.origin,
+  })
+  assert.equal(getAuthRedirectUrl({ origin: 'http://localhost:5173' }), 'http://localhost:5173')
+  assert.equal(getAuthRedirectUrl({ origin: 'http://example.test' }), null)
+})
+
+test('safe auth error mapping hides browser URL exceptions', () => {
+  assert.equal(getSafeAuthErrorMessage(new TypeError('The string did not match the expected pattern.')), SUPABASE_CONFIGURATION_ERROR)
+})
+
+test('session restoration refreshes and persists a valid remembered session', async () => {
+  const storage = createStorage(JSON.stringify({ refresh_token: 'stored-refresh-token' }))
+  let refreshRequest = null
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    fetchImpl: async (url, options) => {
+      refreshRequest = { url, body: JSON.parse(options.body) }
+      return successfulResponse({
+        access_token: 'new-access-token',
+        refresh_token: 'new-refresh-token',
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+    storage,
+  })
+
+  assert.equal(await store.boot(), true)
+  assert.deepEqual(refreshRequest, {
+    url: 'https://founderlab-test.supabase.co/auth/v1/token?grant_type=refresh_token',
+    body: { refresh_token: 'stored-refresh-token' },
+  })
+  assert.equal(JSON.parse(storage.value).refresh_token, 'new-refresh-token')
+})
+
+test('an expired access token is refreshed before protected browser API calls use it', async () => {
+  const storage = createStorage()
+  const requests = []
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    storage,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) })
+      return successfulResponse({
+        access_token: 'fresh-access-token',
+        refresh_token: 'fresh-refresh-token',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        user: { id: 'user-id', email: 'founder@example.test' },
+      })
+    },
+  })
+  store.saveSession({
+    access_token: accessTokenWithExpiry(1),
+    refresh_token: 'expired-session-refresh-token',
+    user: { id: 'user-id', email: 'founder@example.test' },
+  })
+
+  assert.equal(await store.getActiveAccessToken(), 'fresh-access-token')
+  assert.deepEqual(requests, [{
+    url: 'https://founderlab-test.supabase.co/auth/v1/token?grant_type=refresh_token',
+    body: { refresh_token: 'expired-session-refresh-token' },
+  }])
+  assert.equal(JSON.parse(storage.value).access_token, 'fresh-access-token')
+})
+
+test('a refresh failure preserves the visible workspace session instead of logging the user out', async () => {
+  const storage = createStorage()
+  const store = createWorkspaceStore({
+    config: getSupabaseConfig(validEnvironment),
+    storage,
+    fetchImpl: async () => ({ ok: false, json: async () => ({ message: 'temporary auth outage' }) }),
+  })
+  store.saveSession({
+    access_token: accessTokenWithExpiry(1),
+    refresh_token: 'still-valid-refresh-token',
+    user: { id: 'user-id', email: 'founder@example.test' },
+  })
+
+  await assert.rejects(() => store.getActiveAccessToken())
+  assert.equal(store.session.user_id, 'user-id')
+  assert.equal(JSON.parse(storage.value).refresh_token, 'still-valid-refresh-token')
+})
+
+test('a genuinely signed-out workspace has no active access token', async () => {
+  const store = createWorkspaceStore({ config: getSupabaseConfig(validEnvironment), storage: createStorage() })
+  assert.equal(await store.getActiveAccessToken(), '')
+})

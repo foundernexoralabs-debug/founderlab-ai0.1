@@ -15,7 +15,7 @@ export async function downloadProjectZip(files, name) {
 }
 
 // Push files to a (new or existing) GitHub repo owned by the token holder.
-// token: the user's own GitHub personal access token (repo scope), stored client-side only.
+// The token is supplied by the active UI session and is never persisted locally.
 export async function pushToGithub({ files, repoName, token }) {
   if (!files?.length) throw new Error('Nothing to push yet')
   if (!token || !repoName?.trim()) throw new Error('Repo name and GitHub token are required')

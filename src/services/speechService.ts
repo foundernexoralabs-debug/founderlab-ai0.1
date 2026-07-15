@@ -4,6 +4,7 @@
  * API keys never touch the frontend — the proxy reads process.env server-side.
  */
 import { VoiceConfig, pickBrowserVoice, cleanForSpeech } from '@/lib/voiceService'
+import { authenticatedFetch } from '@/services/authenticatedFetch'
 
 let _browserVoices: SpeechSynthesisVoice[] = []
 
@@ -39,7 +40,7 @@ export function stopSpeech(): void {
 
 async function speakElevenLabs(config: VoiceConfig, text: string): Promise<boolean> {
   try {
-    const r = await fetch('/api/tts', {
+    const r = await authenticatedFetch('/api/tts', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ text: text.slice(0, 2500), gender: config.gender }),

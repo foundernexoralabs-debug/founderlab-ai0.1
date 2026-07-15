@@ -144,13 +144,24 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       var b64 = document.getElementById('fl-src').textContent;
       var source = decodeURIComponent(escape(atob(b64)));
       var out = Babel.transform(source, { presets: [['react',{runtime:'classic'}], 'typescript'], filename: 'bundle.tsx' }).code;
-      (0, eval)(out);
+      var executable = document.createElement('script');
+      executable.textContent = out;
+      document.body.appendChild(executable);
     } catch (e) {
-      document.getElementById('root').innerHTML =
-        '<div style="padding:60px;text-align:center;font-family:Inter,sans-serif;color:#eeeef8;">' +
-        '<p style="font-size:32px;margin-bottom:12px;">⚠️</p>' +
-        '<p style="margin-bottom:8px;">Preview could not render.</p>' +
-        '<p style="color:#8888b0;font-size:13px;">' + (e.message || e).toString().replace(/</g,'&lt;') + '</p></div>';
+      var root = document.getElementById('root');
+      var errorBox = document.createElement('div');
+      errorBox.style.cssText = 'padding:60px;text-align:center;font-family:Inter,sans-serif;color:#eeeef8;';
+      var icon = document.createElement('p');
+      icon.style.cssText = 'font-size:32px;margin-bottom:12px;';
+      icon.textContent = '⚠️';
+      var title = document.createElement('p');
+      title.style.cssText = 'margin-bottom:8px;';
+      title.textContent = 'Preview could not render.';
+      var detail = document.createElement('p');
+      detail.style.cssText = 'color:#8888b0;font-size:13px;';
+      detail.textContent = String(e.message || e);
+      errorBox.append(icon, title, detail);
+      root.replaceChildren(errorBox);
     }
   });
 </script>
