@@ -10,6 +10,7 @@ const ERROR_MESSAGES = {
   AUTHENTICATION_FAILED: 'could not authenticate with its server configuration. Check the server key and try again.',
   RATE_LIMITED: 'has reached FounderLab request protection. Wait briefly, then try again.',
   PROVIDER_RATE_LIMITED: 'has reached its provider request limit. Wait briefly, then try again.',
+  PROVIDER_REQUEST_TOO_LARGE: 'could not accept this generation request because it was too large. Simplify the brief and try again.',
   RATE_LIMIT_BACKEND_UNAVAILABLE: 'cannot run because AI request protection is unavailable for this deployment. Please try again later.',
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
   GEMINI_REQUEST_INVALID: 'rejected this request. Choose another Gemini model or check server-side Google AI access.',
@@ -37,7 +38,8 @@ export function classifyAIError({ provider, status, code, message } = {}) {
   let resolvedCode = code || ''
 
   if (!resolvedCode) {
-    if (status === 429 || /rate.?limit|too many requests/.test(detail)) resolvedCode = 'RATE_LIMITED'
+    if (status === 413 || /request (entity|body) too large|payload too large/.test(detail)) resolvedCode = 'PROVIDER_REQUEST_TOO_LARGE'
+    else if (status === 429 || /rate.?limit|too many requests/.test(detail)) resolvedCode = 'RATE_LIMITED'
     else if (status === 401 || status === 403 || /unauthori[sz]ed|forbidden|invalid api key/.test(detail)) resolvedCode = 'AUTHENTICATION_FAILED'
     else if (status === 404 || /model.*not found|unknown model|unsupported model/.test(detail)) resolvedCode = 'INVALID_MODEL'
     else if ([502, 503, 504].includes(status) || /service unavailable|provider unavailable/.test(detail)) resolvedCode = 'PROVIDER_UNAVAILABLE'
@@ -56,7 +58,7 @@ export function classifyAIError({ provider, status, code, message } = {}) {
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
       : resolvedCode === 'REQUEST_CANCELLED' ? 499
-      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' ? 400
+      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' || resolvedCode === 'PROVIDER_REQUEST_TOO_LARGE' ? 400
       : resolvedCode === 'RATE_LIMITED' || resolvedCode === 'PROVIDER_RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503
           : 502

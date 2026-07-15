@@ -1,6 +1,6 @@
 import { requestAIResult } from '../../services/aiProviderService.js'
 import { createBuilderProject, normalizeBuilderFile } from './builderProjectSchema.js'
-import { buildBuilderFilesPrompt, buildBuilderManifestPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, BuilderFormatError, parseStrictBuilderJson } from './builderPrompts.js'
+import { buildBuilderFilesPrompt, buildBuilderManifestPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, BuilderFormatError, normalizeBuilderPlan, parseStrictBuilderJson } from './builderPrompts.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest, validateBuilderPatch } from './builderValidation.js'
 import { appendBuilderVersion } from './builderVersions.js'
 
@@ -31,6 +31,7 @@ function event(stage, message, details = null, result = null) {
 }
 
 const GENERATION_MANIFEST_OPTIONS = Object.freeze({ maxFiles: BUILDER_MAX_GENERATION_FILE_COUNT })
+export const BUILDER_FILE_GENERATION_MAX_TOKENS = 5200
 const NON_RETRYABLE_REMOTE_CODES = new Set([
   'AUTHENTICATION_REQUIRED',
   'AUTHENTICATION_INVALID',
@@ -38,6 +39,7 @@ const NON_RETRYABLE_REMOTE_CODES = new Set([
   'CANCELLED',
   'INVALID_MODEL',
   'MISSING_CONFIGURATION',
+  'PROVIDER_REQUEST_TOO_LARGE',
   'PROVIDER_RATE_LIMITED',
   'RATE_LIMITED',
   'RATE_LIMIT_BACKEND_UNAVAILABLE',
@@ -48,23 +50,29 @@ function shouldRetryGeneration(error) {
 }
 
 export function createBuilderGenerationService({ request = requestAIResult } = {}) {
-  async function requestJson({ prompt, maxTokens, signal, label }) {
-    if (signal?.aborted) throw new BuilderGenerationError('CANCELLED', 'Generation was cancelled.', { retryable: false })
-    const result = requireResult(await request({
-      messages: [{ role: 'user', content: prompt }],
-      system: 'You are FounderLab Builder. Follow the JSON response contract exactly.',
-      maxTokens,
-      responseFormat: { type: 'json_object' },
-    }, { signal }), label)
-    if (signal?.aborted) throw new BuilderGenerationError('CANCELLED', 'Generation was cancelled.', { retryable: false })
-    try {
-      return { value: parseStrictBuilderJson(result.text, label), result }
-    } catch (error) {
-      if (error instanceof BuilderFormatError) {
-        throw new BuilderGenerationError(error.code, error.message, { retryable: true, cause: error })
+  async function requestJson({ prompt, maxTokens, signal, label, retries = 1, onRetry }) {
+    let lastFailure = null
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        if (signal?.aborted) throw new BuilderGenerationError('CANCELLED', 'Generation was cancelled.', { retryable: false })
+        const result = requireResult(await request({
+          messages: [{ role: 'user', content: prompt }],
+          system: 'You are FounderLab Builder. Follow the JSON response contract exactly.',
+          maxTokens,
+          responseFormat: { type: 'json_object' },
+        }, { signal }), label)
+        if (signal?.aborted) throw new BuilderGenerationError('CANCELLED', 'Generation was cancelled.', { retryable: false })
+        return { value: parseStrictBuilderJson(result.text, label), result }
+      } catch (error) {
+        const failure = error instanceof BuilderFormatError
+          ? new BuilderGenerationError(error.code, error.message, { retryable: true, cause: error })
+          : toGenerationError(error)
+        lastFailure = failure
+        if (attempt >= retries || !shouldRetryGeneration(failure)) break
+        onRetry?.(failure, attempt + 1)
       }
-      throw error
     }
+    throw lastFailure || new BuilderGenerationError('GENERATION_FAILED', `FounderLab could not complete the ${label}.`)
   }
 
   async function generateFiles({ brief, plan, manifest, files = [], targetPaths, signal, onActivity, repairInstructions = '' }) {
@@ -94,9 +102,10 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
               attempt ? 'The prior response was incomplete. Return every requested file as valid JSON.' : '',
             ].filter(Boolean).join(' '),
           }),
-          maxTokens: 7200,
+          maxTokens: BUILDER_FILE_GENERATION_MAX_TOKENS,
           signal,
           label: 'project files',
+          retries: 0,
         })
         const generatedRecords = Array.isArray(response.value.files) ? response.value.files : []
         const expected = new Map(missing.map((file) => [file.path, file]))
@@ -137,10 +146,11 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
   return {
     async plan({ brief, signal }) {
       const response = await requestJson({ prompt: buildBuilderPlanPrompt(brief), maxTokens: 1400, signal, label: 'project plan' })
-      if (!Array.isArray(response.value.pages) || !response.value.summary) {
+      const plan = normalizeBuilderPlan(response.value)
+      if (!plan.pages.length || !plan.summary) {
         throw new BuilderGenerationError('INVALID_PLAN', 'The AI plan was incomplete. Please retry generation.')
       }
-      return { plan: response.value, provider: response.result.provider, model: response.result.model }
+      return { plan, provider: response.result.provider, model: response.result.model }
     },
 
     async continueMissingFiles({ brief, plan, manifest, files = [], signal, onActivity, repairInstructions = '' }) {
@@ -156,10 +166,14 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
       }
       try {
         publish('understanding', 'Understanding your request')
-        const approvedPlan = plan || (await this.plan({ brief, signal })).plan
+        const approvedPlan = normalizeBuilderPlan(plan || (await this.plan({ brief, signal })).plan)
+        if (!approvedPlan.pages.length || !approvedPlan.summary) {
+          throw new BuilderGenerationError('INVALID_PLAN', 'The AI plan was incomplete. Please retry generation.')
+        }
         publish('planning', 'Project plan ready')
         const manifestResponse = await requestJson({
           prompt: buildBuilderManifestPrompt({ brief, plan: approvedPlan }), maxTokens: 1300, signal, label: 'file manifest',
+          onRetry: () => publish('retrying', 'Retrying the safe project structure'),
         })
         const manifestCheck = validateBuilderManifest(manifestResponse.value, GENERATION_MANIFEST_OPTIONS)
         if (!manifestCheck.valid) throw new BuilderGenerationError('INVALID_MANIFEST', manifestCheck.issues[0].message, { retryable: true })

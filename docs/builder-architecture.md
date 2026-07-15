@@ -83,7 +83,10 @@ retains the last successful version.
 ## Generation pipeline
 
 1. Normalize the user's brief and request an editable JSON plan.
-2. Validate the plan, then request a JSON file manifest.
+2. Bound the brief and every plan/manifest field before it is interpolated into a
+   later prompt, then request a JSON file manifest. This prevents an unusually
+   verbose plan from turning the first file-generation request into an upstream
+   request-size failure.
 3. Generate the small, bounded manifest (at most five files) in one structured
    provider response through the normalized provider service. This avoids a
    burst of per-file calls exhausting an upstream provider quota.
@@ -124,6 +127,14 @@ configurable with the server-only `FOUNDERLAB_PROVIDER_TIMEOUT_MS` within a
 provider-unavailable outcome rather than leaving the workspace in a false
 completed state.
 
+The initial file batch has a deliberately smaller output budget than a general
+chat response. It is a concise three-to-five-file static site, not an arbitrary
+repository. A transient plan or manifest failure gets one automatic retry;
+request-size, authentication, configuration, and rate-limit failures do not.
+An upstream HTTP 413 is returned as the specific, non-retryable
+`PROVIDER_REQUEST_TOO_LARGE` error rather than being hidden as a generic
+provider outage.
+
 ## Preview security
 
 New Builder projects use an iframe with `sandbox="allow-scripts"` and
@@ -141,6 +152,10 @@ clear scoped message with retry and deliberate AI-repair actions; a fallback
 ready signal can never mark the failed current version as ready. The visual
 preview is the default primary workspace surface. Files, versions, and raw code
 remain available for advanced editing without competing with the first result.
+The desktop canvas has a definite viewport height and hides its outer overflow;
+the rendered site owns its own iframe scroll position. This keeps the website
+framed stably while making it clear that the Builder shell itself is not the
+page being previewed.
 
 ## Deferred, intentionally
 

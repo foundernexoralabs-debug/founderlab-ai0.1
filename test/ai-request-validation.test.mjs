@@ -46,6 +46,7 @@ const aiHandler = require('../api/ai.js')
 const youtubeHandler = require('../api/youtube.js')
 const ttsHandler = require('../api/tts.js')
 const groqProvider = require('../api/ai/providers/groq.js')
+const { assertProviderResponse } = require('../api/ai/providerUtils.js')
 const { createTimedFetch, getProviderTimeoutMs } = require('../api/ai/providerRunner.js')
 const {
   authenticateRequest,
@@ -218,6 +219,8 @@ test('AI results normalize malformed output and premium failure categories witho
   assert.equal(createAIResult({ provider: 'groq', model: 'openai/gpt-oss-120b', text: '   ' }).error.code, 'EMPTY_RESPONSE')
   assert.equal(classifyAIError({ provider: 'gemini', status: 429 }).code, 'RATE_LIMITED')
   assert.equal(classifyAIError({ provider: 'groq', status: 429, code: 'PROVIDER_RATE_LIMITED' }).message, 'Groq has reached its provider request limit. Wait briefly, then try again.')
+  assert.equal(classifyAIError({ provider: 'groq', status: 413 }).code, 'PROVIDER_REQUEST_TOO_LARGE')
+  assert.equal(classifyAIError({ provider: 'groq', status: 413 }).retryable, false)
   assert.equal(classifyAIError({ provider: 'gemini', status: 503 }).code, 'PROVIDER_UNAVAILABLE')
   assert.equal(classifyAIError({ provider: 'anthropic', code: 'MISSING_CONFIGURATION' }).retryable, false)
   assert.equal(
@@ -234,6 +237,13 @@ test('AI results normalize malformed output and premium failure categories witho
   })
   assert.equal(normalized.error.code, 'INVALID_MODEL')
   assert.equal(normalized.error.message.includes('raw upstream text'), false)
+})
+
+test('provider responses preserve an upstream 413 as a safe non-retryable request-size error', () => {
+  assert.throws(
+    () => assertProviderResponse({ ok: false, status: 413 }, { error: { message: 'raw provider detail' } }, 'groq'),
+    (error) => error.code === 'PROVIDER_REQUEST_TOO_LARGE' && error.status === 413 && error.message === 'raw provider detail'
+  )
 })
 
 test('browser provider router preserves the stable API contract and sends the supplied model', async () => {
@@ -767,6 +777,26 @@ test('an upstream provider rate limit is normalized separately from FounderLab r
   assert.equal(limited.body.error.code, 'PROVIDER_RATE_LIMITED')
   assert.equal(limited.body.error.message, 'Groq has reached its provider request limit. Wait briefly, then try again.')
   assert.equal(JSON.stringify(limited.body).includes('raw quota detail'), false)
+})
+
+test('an upstream provider request-size failure is precise and does not leak upstream details', async () => {
+  const oversized = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('Build a landing page')] },
+  }), oversized, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-key' },
+    fetchImpl: authenticatedFetch(async () => jsonResponse({
+      ok: false,
+      status: 413,
+      body: { error: { message: 'raw request-size diagnostic must not reach the browser' } },
+    })),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(oversized.statusCode, 413)
+  assert.equal(oversized.body.error.code, 'PROVIDER_REQUEST_TOO_LARGE')
+  assert.equal(oversized.body.error.retryable, false)
+  assert.equal(JSON.stringify(oversized.body).includes('raw request-size diagnostic'), false)
 })
 
 test('authenticated provider availability exposes no keys and supports independent optional providers', async () => {

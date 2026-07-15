@@ -3,11 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
+import { BUILDER_FILE_GENERATION_MAX_TOKENS, createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
 import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from '../src/features/builder/builderFileOperations.js'
 import { createBuilderProject, normalizeBuilderProject } from '../src/features/builder/builderProjectSchema.js'
 import { createBuilderProjectRepository } from '../src/features/builder/builderProjectRepository.js'
-import { buildBuilderFilesPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt } from '../src/features/builder/builderPrompts.js'
+import { BUILDER_PROMPT_LIMITS, buildBuilderFilesPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, normalizeBuilderPlan } from '../src/features/builder/builderPrompts.js'
 import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, getLastWorkingPreviewFiles, inlineLocalSvgReferences } from '../src/features/builder/builderPreview.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
 import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
@@ -100,6 +100,29 @@ test('Builder prompts set a concrete premium landing-page quality bar without ex
   assert.match(filesPrompt, /complete, visually ordered page/i)
   assert.match(filesPrompt, /Avoid lorem ipsum/i)
   assert.match(filesPrompt, /never use package imports, web fonts, CDNs, external images/i)
+  assert.match(filesPrompt, /Build a composition, not a vertical stack/i)
+  assert.match(filesPrompt, /note summary, decisions, and action items/i)
+})
+
+test('Builder compacts long brief and plan context before a file-generation request', () => {
+  const oversized = 'A founder request. '.repeat(4000)
+  const plan = normalizeBuilderPlan({
+    name: 'N'.repeat(400),
+    summary: 'S'.repeat(4000),
+    pages: Array.from({ length: 12 }, (_, index) => ({ path: `pages/page-${index}.html`, title: 'T'.repeat(800), purpose: 'P'.repeat(1000) })),
+    sections: Array.from({ length: 20 }, () => 'Section '.repeat(200)),
+    brand: { visualDirection: 'D'.repeat(1000), colors: Array.from({ length: 16 }, () => '#123456') },
+  })
+  const prompt = buildBuilderFilesPrompt({
+    brief: oversized,
+    plan,
+    manifest: { entryFile: 'index.html', files: [{ path: 'index.html', role: 'entry' }, { path: 'styles.css', role: 'style' }, { path: 'app.js', role: 'script' }] },
+  })
+  assert.ok(oversized.length > BUILDER_PROMPT_LIMITS.briefCharacters)
+  assert.ok(prompt.length < 40000)
+  assert.match(prompt, /FounderLab compacted long context/)
+  assert.equal(plan.pages.length, BUILDER_PROMPT_LIMITS.pages)
+  assert.ok(plan.summary.length <= BUILDER_PROMPT_LIMITS.summaryCharacters)
 })
 
 test('Builder preview uses an opaque minimal sandbox and CSP without external network or generated parent access', () => {
@@ -155,6 +178,10 @@ test('Builder workspace makes the rendered website primary while keeping code av
   assert.match(workspaceSource, /View code/)
   assert.match(workspaceSource, /gridTemplateColumns: showCode \?/)
   assert.match(workspaceSource, /Showing your last working preview/)
+  assert.match(workspaceSource, /aria-label="Website preview canvas"/)
+  assert.match(workspaceSource, /Scroll inside preview/)
+  assert.match(workspaceSource, /height: '100vh'/)
+  assert.match(workspaceSource, /overflow: 'hidden'/)
   assert.doesNotMatch(workspaceSource, /function ProjectList/)
 })
 
@@ -257,9 +284,35 @@ test('Builder generation uses a bounded structured batch, creates structured fil
   assert.equal(project.preview.lastSuccessfulVersionId, null)
   assert.equal(requests.length, 3)
   assert.deepEqual(requests.at(-1).responseFormat, { type: 'json_object' })
+  assert.equal(requests.at(-1).maxTokens, BUILDER_FILE_GENERATION_MAX_TOKENS)
 
   const bad = createBuilderGenerationService({ request: async () => ({ ok: true, text: '```json\n{}\n```' }) })
   await assert.rejects(() => bad.plan({ brief: 'Bad format' }), (error) => error instanceof BuilderGenerationError && error.code === 'GENERATION_FORMAT_ERROR')
+})
+
+test('Builder retries transient planning failures once but never repeats an oversized provider request', async () => {
+  const successfulPlan = { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ name: 'Notes', summary: 'A meeting-notes landing page.', pages: [{ path: 'index.html', title: 'Home', purpose: 'Landing page' }] }) }
+  let transientCalls = 0
+  const retrying = createBuilderGenerationService({ request: async () => {
+    transientCalls += 1
+    return transientCalls === 1
+      ? { ok: false, error: { code: 'PROVIDER_UNAVAILABLE', message: 'Temporary upstream failure.', retryable: true } }
+      : successfulPlan
+  } })
+  const planned = await retrying.plan({ brief: 'Build a meeting notes website' })
+  assert.equal(transientCalls, 2)
+  assert.equal(planned.plan.pages[0].path, 'index.html')
+
+  let oversizedCalls = 0
+  const oversized = createBuilderGenerationService({ request: async () => {
+    oversizedCalls += 1
+    return { ok: false, error: { code: 'PROVIDER_REQUEST_TOO_LARGE', message: 'Request too large.', retryable: false } }
+  } })
+  await assert.rejects(
+    () => oversized.plan({ brief: 'Build a website' }),
+    (error) => error instanceof BuilderGenerationError && error.code === 'PROVIDER_REQUEST_TOO_LARGE'
+  )
+  assert.equal(oversizedCalls, 1)
 })
 
 test('A normalized provider failure is preserved safely by Builder generation', async () => {

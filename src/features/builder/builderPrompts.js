@@ -2,6 +2,89 @@ import { BUILDER_ENTRY_FILE, BUILDER_RUNTIME, BUILDER_TEMPLATE } from './builder
 
 const JSON_RULES = `Return exactly one valid JSON object. Do not use Markdown, code fences, commentary, or keys that were not requested.`
 
+export const BUILDER_PROMPT_LIMITS = Object.freeze({
+  briefCharacters: 24000,
+  nameCharacters: 96,
+  summaryCharacters: 480,
+  labelCharacters: 160,
+  pagePurposeCharacters: 240,
+  listItems: 8,
+  pages: 4,
+  colors: 6,
+})
+
+function compactText(value, limit) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text.length <= limit) return text
+  const start = Math.ceil(limit * 0.72)
+  const end = Math.max(0, limit - start - 42)
+  const suffix = end > 0 ? `\n[FounderLab compacted long context]\n${text.slice(-end).trim()}` : ''
+  return `${text.slice(0, start).trim()}${suffix}`
+}
+
+function compactList(value, limit = BUILDER_PROMPT_LIMITS.listItems, itemLimit = BUILDER_PROMPT_LIMITS.labelCharacters) {
+  return Array.isArray(value)
+    ? value.map((item) => compactText(item, itemLimit)).filter(Boolean).slice(0, limit)
+    : []
+}
+
+function compactBrand(value) {
+  return {
+    name: compactText(value?.name, BUILDER_PROMPT_LIMITS.nameCharacters),
+    tone: compactText(value?.tone, BUILDER_PROMPT_LIMITS.labelCharacters),
+    visualDirection: compactText(value?.visualDirection, BUILDER_PROMPT_LIMITS.labelCharacters),
+    colors: compactList(value?.colors, BUILDER_PROMPT_LIMITS.colors, 32),
+  }
+}
+
+function compactDesignSystem(value) {
+  return {
+    layout: compactText(value?.layout, BUILDER_PROMPT_LIMITS.labelCharacters),
+    typography: compactText(value?.typography, BUILDER_PROMPT_LIMITS.labelCharacters),
+    surfaces: compactText(value?.surfaces, BUILDER_PROMPT_LIMITS.labelCharacters),
+    accent: compactText(value?.accent, BUILDER_PROMPT_LIMITS.labelCharacters),
+    motion: compactText(value?.motion, BUILDER_PROMPT_LIMITS.labelCharacters),
+  }
+}
+
+export function compactBuilderBrief(brief) {
+  return compactText(brief, BUILDER_PROMPT_LIMITS.briefCharacters)
+}
+
+export function normalizeBuilderPlan(plan) {
+  const pages = Array.isArray(plan?.pages)
+    ? plan.pages.map((page) => ({
+      path: compactText(page?.path, BUILDER_PROMPT_LIMITS.labelCharacters),
+      title: compactText(page?.title, BUILDER_PROMPT_LIMITS.labelCharacters),
+      purpose: compactText(page?.purpose, BUILDER_PROMPT_LIMITS.pagePurposeCharacters),
+    })).filter((page) => page.path).slice(0, BUILDER_PROMPT_LIMITS.pages)
+    : []
+  return {
+    name: compactText(plan?.name, BUILDER_PROMPT_LIMITS.nameCharacters),
+    summary: compactText(plan?.summary, BUILDER_PROMPT_LIMITS.summaryCharacters),
+    projectType: compactText(plan?.projectType, 48) || 'website',
+    pages,
+    sections: compactList(plan?.sections),
+    components: compactList(plan?.components),
+    features: compactList(plan?.features),
+    brand: compactBrand(plan?.brand),
+    designSystem: compactDesignSystem(plan?.designSystem),
+    technicalStructure: compactText(plan?.technicalStructure, BUILDER_PROMPT_LIMITS.labelCharacters),
+  }
+}
+
+function compactBuilderManifest(manifest) {
+  return {
+    entryFile: compactText(manifest?.entryFile, BUILDER_PROMPT_LIMITS.labelCharacters),
+    files: Array.isArray(manifest?.files)
+      ? manifest.files.slice(0, 5).map((file) => ({
+        path: compactText(file?.path, BUILDER_PROMPT_LIMITS.labelCharacters),
+        role: compactText(file?.role, 48),
+      }))
+      : [],
+  }
+}
+
 const PREMIUM_WEBSITE_STANDARD = `
 Design for a credible, launch-ready modern SaaS website rather than a wireframe or a developer demo. Make decisive, appropriate design choices from the brief; do not ask the user to fill in missing basics.
 
@@ -11,6 +94,15 @@ Use a purposeful design system: a limited palette, high-contrast readable type, 
 
 The in-app runtime is dependency-free and offline. Use only local HTML, CSS, and JavaScript; never use package imports, web fonts, CDNs, external images, remote URLs, iframes, eval, Function, or network calls.`
 
+const PREMIUM_VISUAL_EXECUTION = `
+Visual execution standard:
+- Build a composition, not a vertical stack of interchangeable centered cards. Use a confident hero with a clear message column and a specific product moment created from real, semantic HTML/CSS.
+- For a SaaS landing page, make the first viewport earn attention: compact navigation, a sharp eyebrow/headline/value proposition, one primary CTA, and a visual product proof beside or beneath it. Let each later section answer a different question—value, workflow, trust, then conversion—instead of repeating generic feature tiles.
+- Establish a responsive max-width layout (around 1100–1200px), a distinct type scale, generous section rhythm, and an intentional contrast hierarchy. Use CSS custom properties so the system stays coherent.
+- Make primary actions obvious and repeat the CTA only where it naturally supports the journey. Give feature cards, proof, and workflow content different visual roles instead of repeating one card pattern.
+- If the product is an AI meeting-notes tool, show a believable note summary, decisions, and action items in the visual treatment—never an empty generic dashboard.
+- One restrained tonal treatment or soft gradient is enough; do not use decoration to hide weak hierarchy. Keep all content readable, accessible, and useful on a narrow screen.`
+
 export function buildBuilderPlanPrompt(brief) {
   return `${JSON_RULES}
 
@@ -18,7 +110,7 @@ You are the planning stage of FounderLab Builder. Infer sensible defaults and pr
 ${PREMIUM_WEBSITE_STANDARD}
 
 User brief:
-${brief}
+${compactBuilderBrief(brief)}
 
 Return this exact shape:
 {"name":"short project name","summary":"one concise sentence","projectType":"website|landing-page|dashboard|portfolio|storefront","pages":[{"path":"index.html","title":"Home","purpose":"..."}],"sections":["..."],"components":["..."],"features":["..."],"brand":{"name":"...","tone":"...","visualDirection":"...","colors":["#..."]},"designSystem":{"layout":"...","typography":"...","surfaces":"...","accent":"...","motion":"..."},"technicalStructure":"static HTML, CSS and optional JavaScript"}`
@@ -33,10 +125,10 @@ ${PREMIUM_WEBSITE_STANDARD}
 For a single-page landing page, prefer exactly index.html, styles.css, and app.js. Add a second page or an asset only when it creates a real user-facing benefit. Keep the manifest to five files or fewer so the full project can be generated reliably in one structured response.
 
 Brief:
-${brief}
+${compactBuilderBrief(brief)}
 
 Approved plan:
-${JSON.stringify(plan)}
+${JSON.stringify(normalizeBuilderPlan(plan))}
 
 Return exactly:
 {"entryFile":"index.html","files":[{"path":"index.html","role":"entry","purpose":"..."},{"path":"styles.css","role":"style","purpose":"..."},{"path":"app.js","role":"script","purpose":"..."}]}`
@@ -47,10 +139,11 @@ export function buildBuilderFilePrompt({ brief, plan, file, manifest, repairInst
 
 You are generating one file for a FounderLab Builder project. Produce complete content only for the requested path. The supported project has no dependencies, no imports, no external URLs, no network access, no iframe, no eval, and no Function constructor. Use semantic accessible responsive HTML, polished CSS, and small progressive-enhancement JavaScript where needed. Do not include script or link tags in HTML; styles.css and app.js are injected by the isolated runtime.
 ${PREMIUM_WEBSITE_STANDARD}
+${PREMIUM_VISUAL_EXECUTION}
 
-Brief: ${brief}
-Plan: ${JSON.stringify(plan)}
-Manifest: ${JSON.stringify(manifest)}
+Brief: ${compactBuilderBrief(brief)}
+Plan: ${JSON.stringify(normalizeBuilderPlan(plan))}
+Manifest: ${JSON.stringify(compactBuilderManifest(manifest))}
 Requested file: ${JSON.stringify(file)}
 ${repairInstructions ? `Repair instructions: ${repairInstructions}` : ''}
 
@@ -62,6 +155,7 @@ export function buildBuilderFilesPrompt({ brief, plan, manifest, repairInstructi
 
 You are generating every file in a small FounderLab Builder project in one cohesive response. Produce complete contents for each manifest file. The supported project has no dependencies, no imports, no external URLs, no network access, no iframe, no eval, and no Function constructor. Use semantic accessible responsive HTML, polished CSS, and small progressive-enhancement JavaScript where needed. Do not include script or link tags in HTML; styles.css and app.js are injected by the isolated runtime.
 ${PREMIUM_WEBSITE_STANDARD}
+${PREMIUM_VISUAL_EXECUTION}
 
 Generation quality bar:
 - index.html must contain a complete, visually ordered page—not a single hero or a text dump.
@@ -72,9 +166,9 @@ Generation quality bar:
 
 Keep this project intentionally small: return only the manifest files, and keep total generated source concise enough to fit in one response. Every manifest path must appear once, with complete content.
 
-Brief: ${brief}
-Plan: ${JSON.stringify(plan)}
-Manifest: ${JSON.stringify(manifest)}
+Brief: ${compactBuilderBrief(brief)}
+Plan: ${JSON.stringify(normalizeBuilderPlan(plan))}
+Manifest: ${JSON.stringify(compactBuilderManifest(manifest))}
 ${repairInstructions ? `Repair instructions: ${repairInstructions}` : ''}
 
 Return exactly: {"files":[{"path":"manifest file path","content":"complete file contents"}]}`
