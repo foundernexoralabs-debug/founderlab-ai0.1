@@ -928,7 +928,7 @@ test('Groq adapter preserves normalized options for structured internal AI reque
   assert.deepEqual(body.response_format, { type: 'json_object' })
   assert.equal(output.text, '{"viralityScore":88}')
   assert.equal(groqProvider.extractGroqText([{ type: 'text', text: 'CONNECTED' }]), 'CONNECTED')
-  assert.equal(groqProvider.extractGroqText([{ type: 'reasoning', text: '' }, { type: 'text', text: 'CONNECTED' }]), 'CONNECTED')
+  assert.equal(groqProvider.extractGroqText([{ type: 'reasoning', text: 'internal reasoning' }, { type: 'text', text: 'CONNECTED' }]), 'CONNECTED')
 
   await assert.rejects(
     groqProvider.execute({ request: { ...body }, env: {}, fetchImpl: async () => null }),

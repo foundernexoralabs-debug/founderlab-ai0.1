@@ -9,7 +9,7 @@ function extractGroqText(content) {
   if (!Array.isArray(content)) return ''
   return content.map((part) => {
     if (typeof part === 'string') return part
-    return typeof part?.text === 'string' ? part.text : ''
+    return part?.type === 'text' && typeof part.text === 'string' ? part.text : ''
   }).join('')
 }
 
