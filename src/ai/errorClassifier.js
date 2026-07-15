@@ -11,6 +11,8 @@ const ERROR_MESSAGES = {
   RATE_LIMITED: 'is temporarily busy. Please try again in a moment.',
   RATE_LIMIT_BACKEND_UNAVAILABLE: 'cannot run because AI request protection is unavailable for this deployment. Please try again later.',
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
+  GEMINI_REQUEST_INVALID: 'rejected this request. Choose another Gemini model or check server-side Google AI access.',
+  GEMINI_BILLING_OR_REGION_REQUIRED: 'requires Google AI Studio billing or a supported region before it can run.',
   NETWORK_FAILURE: 'could not be reached. Check your connection and try again.',
   MALFORMED_RESPONSE: 'returned an invalid response. Please try again.',
   EMPTY_RESPONSE: 'returned an empty response. Please try again.',
@@ -51,7 +53,7 @@ export function classifyAIError({ provider, status, code, message } = {}) {
     ? status
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
-      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' ? 400
+      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' ? 400
       : resolvedCode === 'RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503
           : 502

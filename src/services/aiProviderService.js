@@ -15,6 +15,7 @@ import {
 } from '../ai/providerPreferences.js'
 import { createAIErrorResult, toLegacyAIText } from '../ai/normalizeResponse.js'
 import { routeAIRequest } from '../ai/providerRouter.js'
+import { recordProviderConnectionResult } from '../ai/providerConnectionState.js'
 import { isElectronOllamaAvailable, probeOllama, requestOllama } from '../ai/providers/ollama.js'
 import { workspaceStore } from './workspaceStore.js'
 
@@ -25,6 +26,18 @@ export {
 }
 
 let providerAvailability = normalizeProviderAvailability()
+
+export const PROVIDER_CONNECTION_TEST_MAX_TOKENS = 256
+
+export function createProviderConnectionTestRequest({ provider, model } = {}) {
+  return {
+    provider,
+    model,
+    messages: [{ role: 'user', content: 'Say only: CONNECTED' }],
+    maxTokens: PROVIDER_CONNECTION_TEST_MAX_TOKENS,
+    connectionTest: true,
+  }
+}
 
 export function getProviderAvailability() {
   return providerAvailability
@@ -126,6 +139,7 @@ export async function requestAIResult({
   system = '',
   maxTokens = 1200,
   ollamaUrl,
+  connectionTest = false,
 } = {}, {
   fetchImpl = globalThis.fetch,
   electronBridge,
@@ -138,12 +152,16 @@ export async function requestAIResult({
   const resolvedModel = model || (provider === 'ollama'
     ? getOllamaModel() || resolveModel('ollama', '')
     : getProviderModel(provider))
+  const complete = (result) => {
+    recordProviderConnectionResult(provider, result, { connectionTest })
+    return result
+  }
   let activeAccessToken = ''
   if (provider !== 'ollama') {
     try {
       activeAccessToken = accessToken ?? await workspaceStore.getActiveAccessToken()
     } catch {
-      return createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' })
+      return complete(createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' }))
     }
   }
   const request = (token) => routeAIRequest({
@@ -164,14 +182,14 @@ export async function requestAIResult({
     try {
       refreshedAccessToken = await workspaceStore.getActiveAccessToken({ forceRefresh: true })
     } catch {
-      return createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' })
+      return complete(createAIErrorResult({ provider, model: resolvedModel, code: 'AUTHENTICATION_UNAVAILABLE' }))
     }
     if (refreshedAccessToken && refreshedAccessToken !== activeAccessToken) {
       activeAccessToken = refreshedAccessToken
       result = await request(activeAccessToken)
     }
   }
-  return result
+  return complete(result)
 }
 
 export async function ai(messages, system = '', maxTokens = 1200) {

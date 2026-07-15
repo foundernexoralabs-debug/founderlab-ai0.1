@@ -30,7 +30,12 @@ import { clearGithubToken, getGithubToken, setGithubToken } from '@/services/git
 import { authenticatedFetch } from '@/services/authenticatedFetch'
 import { getProvider } from '@/ai/providerRegistry'
 import { getProviderConfigurationState } from '@/ai/providerAvailability'
-import { getProviderConnectionState } from '@/ai/providerConnectionState'
+import {
+  getProviderConnectionState,
+  getProviderConnectionStatuses,
+  setProviderConnectionStatus,
+  subscribeProviderConnectionStatuses,
+} from '@/ai/providerConnectionState'
 import {
   ai,
   getAIProvider,
@@ -44,6 +49,7 @@ import {
   OLLAMA_MODEL_STORAGE_KEY,
   OLLAMA_URL_STORAGE_KEY,
   PROVIDERS,
+  createProviderConnectionTestRequest,
   requestAIResult,
   refreshProviderAvailability,
   setAIProvider as setAIProviderLS,
@@ -2827,6 +2833,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [ollamaDetectErr, setOllamaDetectErr] = useState('')
   // Shared test state
   const [testStatus, setTestStatus]   = useState(null) // { provider, state, message } | null
+  const [providerConnectionStatuses, setProviderConnectionStatuses] = useState(getProviderConnectionStatuses)
 
   const [np, setNp]         = useState('')
   const [cp, setCp]         = useState('')
@@ -2845,6 +2852,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     async function init() { setFbL(true); setFB(await sb.getFeedback()||[]); setFbL(false) }
     init()
   }, [])
+  useEffect(() => subscribeProviderConnectionStatuses(setProviderConnectionStatuses), [])
   useEffect(() => {
     let mounted = true
     refreshProviderAvailability().then(({ provider, providers }) => {
@@ -2963,6 +2971,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     const refreshed = await refreshProviderAvailability()
     setProviderAvailability(refreshed.providers)
     if (aiProv !== 'ollama' && getProviderConfigurationState(aiProv, refreshed.providers) === 'not_configured') {
+      setProviderConnectionStatus(aiProv, 'not_configured')
       setTestStatus({ provider:aiProv, state:'not_configured', message:`${PROVIDERS[aiProv]?.name || 'This provider'} is not configured on the server.` })
       return
     }
@@ -2976,12 +2985,10 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
         const reply = await ollamaChat([{role:'user',content:'Say only: CONNECTED'}], '', 10)
         setTestStatus({ provider:aiProv, state:'connected', message:`${ollamaModel||'model'} replied: "${reply.trim().slice(0,60)}"` })
       } else {
-        const result = await requestAIResult({
+        const result = await requestAIResult(createProviderConnectionTestRequest({
           provider: aiProv,
           model: modelMap[aiProv] || PROVIDERS[aiProv]?.default,
-          messages: [{ role:'user', content:'Say only: CONNECTED' }],
-          maxTokens: 20,
-        })
+        }))
         if (!result.ok) {
           setTestStatus({
             provider: aiProv,
@@ -3035,7 +3042,10 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
             {Object.values(PROVIDERS).map(p => {
               const active = aiProv === p.id
               const configuration = getProviderConfigurationState(p.id, providerAvailability)
-              const connection = getProviderConnectionState(configuration, testStatus?.provider === p.id ? testStatus.state : '')
+              const lastKnownState = providerConnectionStatuses[p.id] || ''
+              const isTesting = testStatus?.provider === p.id && testStatus.state === 'testing'
+              const fallbackTestState = testStatus?.provider === p.id && !lastKnownState ? testStatus.state : ''
+              const connection = getProviderConnectionState(configuration, isTesting ? 'testing' : lastKnownState || fallbackTestState)
               const configurationLabel = connection.label
               const configurationColor = connection.state === 'connected' ? C.green
                 : connection.state === 'testing' ? C.accent

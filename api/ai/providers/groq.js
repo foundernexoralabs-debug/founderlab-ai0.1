@@ -4,6 +4,15 @@ const {
   requireProviderKey,
 } = require('../providerUtils')
 
+function extractGroqText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    return typeof part?.text === 'string' ? part.text : ''
+  }).join('')
+}
+
 async function execute({ request, env, fetchImpl }) {
   const apiKey = requireProviderKey(env, 'GROQ_API_KEY', 'groq')
   const messages = request.system
@@ -26,10 +35,10 @@ async function execute({ request, env, fetchImpl }) {
   const data = await readProviderJson(response, 'groq')
   assertProviderResponse(response, data, 'groq')
   return {
-    text: data.choices?.[0]?.message?.content || '',
+    text: extractGroqText(data.choices?.[0]?.message?.content),
     usage: data.usage,
     finishReason: data.choices?.[0]?.finish_reason,
   }
 }
 
-module.exports = { execute }
+module.exports = { execute, extractGroqText }

@@ -16,13 +16,22 @@ import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
-import { getProviderConnectionState } from '../src/ai/providerConnectionState.js'
+import {
+  getProviderConnectionState,
+  getProviderConnectionStatus,
+  resetProviderConnectionStatuses,
+} from '../src/ai/providerConnectionState.js'
 import {
   getProviderConfigurationState,
   normalizeProviderAvailability,
   resolveConfiguredProvider,
 } from '../src/ai/providerAvailability.js'
-import { refreshProviderAvailability, requestAIResult } from '../src/services/aiProviderService.js'
+import {
+  createProviderConnectionTestRequest,
+  PROVIDER_CONNECTION_TEST_MAX_TOKENS,
+  refreshProviderAvailability,
+  requestAIResult,
+} from '../src/services/aiProviderService.js'
 import { workspaceStore } from '../src/services/workspaceStore.js'
 import {
   getAIProviderPreference,
@@ -325,6 +334,128 @@ test('provider connection labels distinguish configured, testing, connected, fai
   assert.deepEqual(getProviderConnectionState('local'), { state: 'local', label: 'Local only — test connection' })
 })
 
+test('provider connection checks use the same normalized path as Chat and preserve a known successful provider', async () => {
+  const previousSession = workspaceStore.session
+  workspaceStore.session = {
+    access_token: 'active-workspace-access-token',
+    refresh_token: 'refresh-token',
+    user_id: 'user-id',
+  }
+  resetProviderConnectionStatuses()
+
+  try {
+    const testRequest = createProviderConnectionTestRequest({
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+    })
+    assert.equal(testRequest.maxTokens, PROVIDER_CONNECTION_TEST_MAX_TOKENS)
+    assert.ok(testRequest.maxTokens > 20)
+
+    const testResult = await requestAIResult(testRequest, {
+      fetchImpl: async (_, options) => {
+        const body = JSON.parse(options.body)
+        assert.equal(body.max_tokens, PROVIDER_CONNECTION_TEST_MAX_TOKENS)
+        return jsonResponse({ body: {
+          ok: true,
+          provider: 'groq',
+          model: 'openai/gpt-oss-120b',
+          text: 'CONNECTED',
+        } })
+      },
+    })
+    assert.equal(testResult.ok, true)
+    assert.equal(testResult.text, 'CONNECTED')
+    assert.equal(getProviderConnectionStatus('groq'), 'connected')
+
+    const chatResult = await requestAIResult({
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      messages: [message('Hello from Chat')],
+      maxTokens: 2000,
+    }, {
+      fetchImpl: async (_, options) => {
+        assert.equal(JSON.parse(options.body).max_tokens, 2000)
+        return jsonResponse({ body: {
+          ok: true,
+          provider: 'groq',
+          model: 'openai/gpt-oss-120b',
+          text: 'A real Chat response',
+        } })
+      },
+    })
+    assert.equal(chatResult.ok, true)
+    assert.equal(getProviderConnectionStatus('groq'), 'connected')
+
+    const failedRetest = await requestAIResult(testRequest, {
+      fetchImpl: async () => jsonResponse({
+        ok: false,
+        status: 502,
+        body: {
+          ok: false,
+          provider: 'groq',
+          model: 'openai/gpt-oss-120b',
+          error: { code: 'EMPTY_RESPONSE', status: 502 },
+        },
+      }),
+    })
+    assert.equal(failedRetest.error.code, 'EMPTY_RESPONSE')
+    assert.equal(getProviderConnectionStatus('groq'), 'connected')
+  } finally {
+    workspaceStore.session = previousSession
+    resetProviderConnectionStatuses()
+  }
+})
+
+test('Gemini failures are provider-specific, sanitized, and isolated from a working Groq connection', async () => {
+  const previousSession = workspaceStore.session
+  workspaceStore.session = {
+    access_token: 'active-workspace-access-token',
+    refresh_token: 'refresh-token',
+    user_id: 'user-id',
+  }
+  resetProviderConnectionStatuses()
+
+  try {
+    const groqResult = await requestAIResult({
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      messages: [message()],
+    }, {
+      fetchImpl: async () => jsonResponse({ body: {
+        ok: true,
+        provider: 'groq',
+        model: 'openai/gpt-oss-120b',
+        text: 'Groq remains available',
+      } }),
+    })
+    assert.equal(groqResult.ok, true)
+
+    const geminiResult = await requestAIResult(createProviderConnectionTestRequest({
+      provider: 'gemini',
+      model: 'gemini-3.5-flash',
+    }), {
+      fetchImpl: async () => jsonResponse({
+        ok: false,
+        status: 400,
+        body: {
+          ok: false,
+          provider: 'gemini',
+          model: 'gemini-3.5-flash',
+          error: { code: 'GEMINI_REQUEST_INVALID', status: 400, message: 'upstream detail must not leak' },
+        },
+      }),
+    })
+    assert.equal(geminiResult.ok, false)
+    assert.equal(geminiResult.error.code, 'GEMINI_REQUEST_INVALID')
+    assert.equal(geminiResult.error.message.includes('upstream detail'), false)
+    assert.equal(getProviderConnectionStatus('gemini'), 'failed')
+    assert.equal(getProviderConnectionStatus('groq'), 'connected')
+  } finally {
+    workspaceStore.session = previousSession
+    resetProviderConnectionStatuses()
+  }
+})
+
 test('missing and invalid Supabase credentials are rejected before provider execution', async () => {
   const missing = await authenticateRequest(createRequest(), { env: TEST_ENV, fetchImpl: authenticatedFetch() })
   assert.deepEqual(missing, { ok: false, status: 401, code: 'AUTHENTICATION_REQUIRED' })
@@ -541,6 +672,54 @@ test('AI endpoint returns normalized missing-auth, CORS, rate-limit, and accepte
   assert.equal(accepted.headers['Access-Control-Allow-Origin'], 'https://app.founderlab.test')
 })
 
+test('Gemini uses the current GenerateContent contract and preserves a safe provider-specific 400', async () => {
+  const accepted = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: {
+      provider: 'gemini',
+      model: 'gemini-3.5-flash',
+      messages: [message('Say only: CONNECTED')],
+      system: 'Keep answers concise.',
+      max_tokens: 256,
+    },
+  }), accepted, {
+    env: { ...TEST_ENV, GEMINI_API_KEY: 'server-only-gemini-key' },
+    fetchImpl: authenticatedFetch(async (url, options) => {
+      assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent')
+      assert.equal(url.includes('key='), false)
+      assert.equal(options.headers['x-goog-api-key'], 'server-only-gemini-key')
+      const body = JSON.parse(options.body)
+      assert.deepEqual(body.systemInstruction, { parts: [{ text: 'Keep answers concise.' }] })
+      assert.equal(body.generationConfig.maxOutputTokens, 256)
+      return jsonResponse({ body: {
+        candidates: [{ content: { parts: [{ text: 'CONNECTED' }] }, finishReason: 'STOP' }],
+      } })
+    }),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(accepted.statusCode, 200)
+  assert.equal(accepted.body.text, 'CONNECTED')
+
+  const rejected = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { provider: 'gemini', model: 'gemini-3.5-flash', messages: [message()] },
+  }), rejected, {
+    env: { ...TEST_ENV, GEMINI_API_KEY: 'server-only-gemini-key' },
+    fetchImpl: authenticatedFetch(async () => jsonResponse({
+      ok: false,
+      status: 400,
+      body: { error: { status: 'INVALID_ARGUMENT', message: 'raw Gemini diagnostic must never reach a browser' } },
+    })),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(rejected.statusCode, 400)
+  assert.equal(rejected.body.error.code, 'GEMINI_REQUEST_INVALID')
+  assert.equal(rejected.body.error.message, 'Google Gemini rejected this request. Choose another Gemini model or check server-side Google AI access.')
+  assert.equal(JSON.stringify(rejected.body).includes('raw Gemini diagnostic'), false)
+})
+
 test('authenticated provider availability exposes no keys and supports independent optional providers', async () => {
   const noAnthropic = createResponseRecorder()
   await aiHandler(createRequest({
@@ -748,6 +927,8 @@ test('Groq adapter preserves normalized options for structured internal AI reque
   assert.equal(body.temperature, 0.2)
   assert.deepEqual(body.response_format, { type: 'json_object' })
   assert.equal(output.text, '{"viralityScore":88}')
+  assert.equal(groqProvider.extractGroqText([{ type: 'text', text: 'CONNECTED' }]), 'CONNECTED')
+  assert.equal(groqProvider.extractGroqText([{ type: 'reasoning', text: '' }, { type: 'text', text: 'CONNECTED' }]), 'CONNECTED')
 
   await assert.rejects(
     groqProvider.execute({ request: { ...body }, env: {}, fetchImpl: async () => null }),
