@@ -9,7 +9,7 @@ const ERROR_MESSAGES = {
   INVALID_MODEL: 'cannot use the selected model. Choose another model in Settings.',
   AUTHENTICATION_FAILED: 'could not authenticate with its server configuration. Check the server key and try again.',
   RATE_LIMITED: 'is temporarily busy. Please try again in a moment.',
-  RATE_LIMIT_BACKEND_UNAVAILABLE: 'is temporarily unavailable while request protection is being restored. Please try again.',
+  RATE_LIMIT_BACKEND_UNAVAILABLE: 'cannot run because AI request protection is unavailable for this deployment. Please try again later.',
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
   NETWORK_FAILURE: 'could not be reached. Check your connection and try again.',
   MALFORMED_RESPONSE: 'returned an invalid response. Please try again.',

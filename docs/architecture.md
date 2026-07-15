@@ -45,25 +45,22 @@ both are present, a request must match both values; this is the recommended
 configuration for branch Previews. Never allow all `*.vercel.app` origins.
 Localhost is accepted only when `NODE_ENV=development`.
 
-Production and Vercel preview traffic requires a durable rate limiter through
-`FOUNDERLAB_RATE_LIMITER_URL`. The API POSTs this JSON document, using the
-server-only `FOUNDERLAB_RATE_LIMITER_TOKEN` when supplied:
+Production and Vercel preview traffic uses direct Upstash Redis rate limiting
+through server-only `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+`@upstash/ratelimit` applies an atomic sliding-window limit to an identifier
+derived from the verified Supabase user ID; Redis keys are partitioned by the
+`ai`, `youtube`, and `tts` scopes. The default policies are 30 AI, 10 YouTube,
+and 20 TTS requests per 60 seconds. Rate-limit responses include retry-after
+information. Use a separate Upstash database for Preview and Production so
+test traffic cannot consume a production user's allowance.
 
-```json
-{
-  "subject": "verified-supabase-user-id",
-  "scope": "ai|youtube|tts",
-  "limit": 30,
-  "windowSeconds": 60
-}
-```
-
-The limiter must reply with `{ "allowed": boolean, "retryAfterSeconds": number }`.
-If it is absent or unavailable outside local development, FounderLab fails
-closed with a normalized 503 response instead of relying on per-instance
-serverless memory. In-memory limits are development-only. The only auth bypass
-is `FOUNDERLAB_DEV_AUTH_BYPASS=true` with `NODE_ENV=development`; it cannot
-activate in production.
+If Upstash is absent, malformed, or unavailable outside an explicitly enabled
+local-development fallback, FounderLab fails closed with normalized
+`RATE_LIMIT_BACKEND_UNAVAILABLE` (503) rather than relying on per-instance
+serverless memory. The optional in-memory fallback requires both
+`NODE_ENV=development` and `FOUNDERLAB_DEV_RATE_LIMIT_FALLBACK=true`. The only
+auth bypass is `FOUNDERLAB_DEV_AUTH_BYPASS=true` with `NODE_ENV=development`;
+it cannot activate in Preview or Production.
 
 All API failures use the internal result shape:
 
@@ -92,12 +89,13 @@ FounderLab has deliberately independent configuration groups:
   optional aliases. The shared server helper safely falls back to
   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, so the two browser values
   are the only Supabase variables that must be configured for a deployment.
-- **Required only to protect expensive API calls in production:** an
+- **Required only to protect expensive API calls in Preview and Production:** an
   allowed-origin configuration (`FOUNDERLAB_ALLOWED_ORIGINS` or
-  `FOUNDERLAB_PRODUCTION_ORIGIN`, plus preview controls where needed) and
-  `FOUNDERLAB_RATE_LIMITER_URL`. `FOUNDERLAB_RATE_LIMITER_TOKEN` is needed only
-  when the configured limiter expects authentication. These controls never
-  block sign-in or the core workspace.
+  `FOUNDERLAB_PRODUCTION_ORIGIN`, plus preview controls where needed),
+  `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN`. These controls
+  never block sign-in or the core workspace. The legacy
+  `FOUNDERLAB_RATE_LIMITER_URL` and `FOUNDERLAB_RATE_LIMITER_TOKEN` adapter is
+  no longer read by FounderLab.
 - **Optional providers:** `ANTHROPIC_API_KEY`, `GROQ_API_KEY`,
   `GEMINI_API_KEY`, and `ELEVENLABS_API_KEY`. Configure only the providers the
   deployment will use. Authentication and the rest of the workspace never

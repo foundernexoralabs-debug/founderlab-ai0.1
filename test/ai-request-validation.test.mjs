@@ -40,7 +40,9 @@ const groqProvider = require('../api/ai/providers/groq.js')
 const {
   authenticateRequest,
   enforceRequestLimit,
+  getRateLimitIdentifier,
   getSupabaseConfig: getServerSupabaseConfig,
+  getUpstashConfig,
   isAllowedCorsOrigin,
   resetInMemoryRateLimits,
 } = require('../api/_lib/apiSecurity.js')
@@ -398,9 +400,9 @@ test('CORS permits the production origin and only Preview hosts matching the con
   assert.equal(securitySource.includes("Access-Control-Allow-Origin', '*"), false)
 })
 
-test('rate protection uses verified user identity, returns retry data, and fails closed outside development without a durable backend', async () => {
+test('Upstash rate protection uses isolated identifiers, scopes, retry data, and fails closed without a durable backend', async () => {
   resetInMemoryRateLimits()
-  const developmentEnv = { ...TEST_ENV, FOUNDERLAB_RATE_LIMIT_AI_LIMIT: '1', FOUNDERLAB_RATE_LIMIT_AI_WINDOW_SECONDS: '60' }
+  const developmentEnv = { ...TEST_ENV, FOUNDERLAB_DEV_RATE_LIMIT_FALLBACK: 'true', FOUNDERLAB_RATE_LIMIT_AI_LIMIT: '1', FOUNDERLAB_RATE_LIMIT_AI_WINDOW_SECONDS: '60' }
   assert.equal((await enforceRequestLimit({ userId: 'verified-user-id', scope: 'ai', env: developmentEnv, now: 1000 })).allowed, true)
   const blocked = await enforceRequestLimit({ userId: 'verified-user-id', scope: 'ai', env: developmentEnv, now: 1001 })
   assert.equal(blocked.allowed, false)
@@ -414,6 +416,79 @@ test('rate protection uses verified user identity, returns retry data, and fails
     retryAfter: 0,
     durable: false,
   })
+
+  const upstashEnv = {
+    ...TEST_ENV,
+    NODE_ENV: 'production',
+    UPSTASH_REDIS_REST_URL: 'https://unit-test.upstash.io',
+    UPSTASH_REDIS_REST_TOKEN: 'server-only-upstash-token',
+  }
+  assert.deepEqual(getUpstashConfig(upstashEnv), {
+    url: 'https://unit-test.upstash.io',
+    token: 'server-only-upstash-token',
+  })
+  assert.equal(getUpstashConfig({ ...upstashEnv, UPSTASH_REDIS_REST_TOKEN: ' ' }), null)
+  assert.notEqual(getRateLimitIdentifier('verified-user-id'), getRateLimitIdentifier('another-user-id'))
+  assert.equal(getRateLimitIdentifier('verified-user-id').includes('verified-user-id'), false)
+
+  const counts = new Map()
+  const configuredPolicies = []
+  const upstashLimiterFactory = async ({ scope, policy }) => {
+    configuredPolicies.push({ scope, policy })
+    return { limit: async (identifier) => {
+      const key = scope + ':' + identifier
+      const count = (counts.get(key) || 0) + 1
+      counts.set(key, count)
+      return { success: count <= 1, reset: Date.now() + 12_000 }
+    } }
+  }
+  const firstUserAI = await enforceRequestLimit({ userId: 'verified-user-id', scope: 'ai', env: upstashEnv, upstashLimiterFactory })
+  const firstUserAIExceeded = await enforceRequestLimit({ userId: 'verified-user-id', scope: 'ai', env: upstashEnv, upstashLimiterFactory })
+  const secondUserAI = await enforceRequestLimit({ userId: 'another-user-id', scope: 'ai', env: upstashEnv, upstashLimiterFactory })
+  const firstUserYouTube = await enforceRequestLimit({ userId: 'verified-user-id', scope: 'youtube', env: upstashEnv, upstashLimiterFactory })
+  assert.deepEqual(firstUserAI, { allowed: true, retryAfter: 0, durable: true })
+  assert.equal(firstUserAIExceeded.allowed, false)
+  assert.equal(firstUserAIExceeded.durable, true)
+  assert.ok(firstUserAIExceeded.retryAfter >= 11 && firstUserAIExceeded.retryAfter <= 12)
+  assert.deepEqual(secondUserAI, { allowed: true, retryAfter: 0, durable: true })
+  assert.deepEqual(firstUserYouTube, { allowed: true, retryAfter: 0, durable: true })
+  assert.deepEqual(configuredPolicies, [
+    { scope: 'ai', policy: { limit: 30, windowSeconds: 60 } },
+    { scope: 'ai', policy: { limit: 30, windowSeconds: 60 } },
+    { scope: 'ai', policy: { limit: 30, windowSeconds: 60 } },
+    { scope: 'youtube', policy: { limit: 10, windowSeconds: 60 } },
+  ])
+
+  const malformed = await enforceRequestLimit({
+    userId: 'verified-user-id', scope: 'tts', env: upstashEnv,
+    upstashLimiterFactory: async () => ({ limit: async () => ({ success: true }) }),
+  })
+  assert.deepEqual(malformed, {
+    allowed: false,
+    status: 503,
+    code: 'RATE_LIMIT_BACKEND_UNAVAILABLE',
+    retryAfter: 0,
+    durable: false,
+  })
+
+  const genericOnly = await enforceRequestLimit({
+    userId: 'verified-user-id',
+    scope: 'ai',
+    env: { ...TEST_ENV, NODE_ENV: 'production', FOUNDERLAB_RATE_LIMITER_URL: 'https://legacy-limiter.example.test' },
+  })
+  assert.deepEqual(genericOnly, {
+    allowed: false,
+    status: 503,
+    code: 'RATE_LIMIT_BACKEND_UNAVAILABLE',
+    retryAfter: 0,
+    durable: false,
+  })
+
+  const securitySource = fs.readFileSync(path.join(repositoryRoot, 'api/_lib/apiSecurity.js'), 'utf8')
+  const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
+  assert.equal(securitySource.includes('FOUNDERLAB_RATE_LIMITER_URL'), false)
+  assert.equal(securitySource.includes('FOUNDERLAB_RATE_LIMITER_TOKEN'), false)
+  assert.equal(appSource.includes('UPSTASH_REDIS_REST_'), false)
 })
 
 test('AI endpoint returns normalized missing-auth, CORS, rate-limit, and accepted-auth contracts', async () => {

@@ -1,4 +1,5 @@
 const rateBuckets = new Map()
+const upstashLimiters = new Map()
 let responseModulePromise = null
 
 const RATE_LIMITS = Object.freeze({
@@ -21,6 +22,10 @@ function getHeader(req, name) {
 
 function isDevelopmentEnvironment(env = process.env) {
   return env.NODE_ENV === 'development' || env.VERCEL_ENV === 'development'
+}
+
+function isDevelopmentRateLimitFallbackEnabled(env = process.env) {
+  return isDevelopmentEnvironment(env) && env.FOUNDERLAB_DEV_RATE_LIMIT_FALLBACK === 'true'
 }
 
 function splitList(value) {
@@ -170,6 +175,53 @@ function getRateLimitPolicy(scope, env = process.env) {
   }
 }
 
+function getUpstashConfig(env = process.env) {
+  const url = String(env.UPSTASH_REDIS_REST_URL || '').trim()
+  const token = String(env.UPSTASH_REDIS_REST_TOKEN || '').trim()
+  if (!url || !token) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:') return null
+  } catch {
+    return null
+  }
+  return { url: url.replace(/\/$/, ''), token }
+}
+
+function getRateLimitIdentifier(userId) {
+  // Keep a raw Supabase user ID out of Redis keys and rate-limit analytics.
+  return 'user:' + require('node:crypto').createHash('sha256')
+    .update('founderlab-rate-limit:v1:' + String(userId || ''))
+    .digest('base64url')
+}
+
+async function createUpstashRateLimiter({ config, scope, policy }) {
+  const [{ Redis }, { Ratelimit }] = await Promise.all([
+    import('@upstash/redis'),
+    import('@upstash/ratelimit'),
+  ])
+  const redis = new Redis({ url: config.url, token: config.token })
+  return new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(policy.limit, policy.windowSeconds + ' s'),
+    analytics: false,
+    prefix: 'founderlab:rate-limit:v1:' + scope,
+  })
+}
+
+async function getUpstashRateLimiter({ config, scope, policy }) {
+  const cacheKey = [config.url, scope, policy.limit, policy.windowSeconds].join('|')
+  if (!upstashLimiters.has(cacheKey)) {
+    upstashLimiters.set(cacheKey, createUpstashRateLimiter({ config, scope, policy }))
+  }
+  try {
+    return await upstashLimiters.get(cacheKey)
+  } catch (error) {
+    upstashLimiters.delete(cacheKey)
+    throw error
+  }
+}
+
 function enforceInMemoryRateLimit({ userId, scope, policy, now = Date.now() }) {
   const key = scope + ':' + userId
   const windowMs = policy.windowSeconds * 1000
@@ -190,36 +242,34 @@ function enforceInMemoryRateLimit({ userId, scope, policy, now = Date.now() }) {
   }
 }
 
-async function callDurableRateLimiter({ userId, scope, policy, env, fetchImpl }) {
-  const response = await fetchImpl(env.FOUNDERLAB_RATE_LIMITER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(env.FOUNDERLAB_RATE_LIMITER_TOKEN ? { Authorization: 'Bearer ' + env.FOUNDERLAB_RATE_LIMITER_TOKEN } : {}),
-    },
-    body: JSON.stringify({ subject: userId, scope, limit: policy.limit, windowSeconds: policy.windowSeconds }),
-  })
-  if (!response.ok) throw new Error('Rate limiter rejected the request.')
-  const result = await response.json()
-  if (typeof result?.allowed !== 'boolean') throw new Error('Rate limiter returned an invalid response.')
+async function callUpstashRateLimiter({ userId, scope, policy, env, limiterFactory }) {
+  const config = getUpstashConfig(env)
+  if (!config) throw new Error('Upstash is not configured.')
+  const limiter = limiterFactory
+    ? await limiterFactory({ config, scope, policy })
+    : await getUpstashRateLimiter({ config, scope, policy })
+  const result = await limiter.limit(getRateLimitIdentifier(userId))
+  if (typeof result?.success !== 'boolean' || !Number.isFinite(result?.reset)) {
+    throw new Error('Upstash returned an invalid rate-limit response.')
+  }
   return {
-    allowed: result.allowed,
-    retryAfter: Math.max(0, Number(result.retryAfterSeconds) || 0),
+    allowed: result.success,
+    retryAfter: result.success ? 0 : Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)),
     durable: true,
   }
 }
 
-async function enforceRequestLimit({ userId, scope, env = process.env, fetchImpl = globalThis.fetch, limiter, now } = {}) {
+async function enforceRequestLimit({ userId, scope, env = process.env, limiter, upstashLimiterFactory, now } = {}) {
   const policy = getRateLimitPolicy(scope, env)
   try {
     if (limiter) return await limiter({ userId, scope, policy })
-    if (env.FOUNDERLAB_RATE_LIMITER_URL && typeof fetchImpl === 'function') {
-      return await callDurableRateLimiter({ userId, scope, policy, env, fetchImpl })
+    if (getUpstashConfig(env)) {
+      return await callUpstashRateLimiter({ userId, scope, policy, env, limiterFactory: upstashLimiterFactory })
     }
-    if (!isDevelopmentEnvironment(env)) {
-      return { allowed: false, status: 503, code: 'RATE_LIMIT_BACKEND_UNAVAILABLE', retryAfter: 0, durable: false }
+    if (isDevelopmentRateLimitFallbackEnabled(env)) {
+      return enforceInMemoryRateLimit({ userId, scope, policy, now })
     }
-    return enforceInMemoryRateLimit({ userId, scope, policy, now })
+    return { allowed: false, status: 503, code: 'RATE_LIMIT_BACKEND_UNAVAILABLE', retryAfter: 0, durable: false }
   } catch {
     return { allowed: false, status: 503, code: 'RATE_LIMIT_BACKEND_UNAVAILABLE', retryAfter: 0, durable: false }
   }
@@ -247,14 +297,17 @@ async function requireRateLimit(req, res, { user, scope, provider, model, env, f
 
 function resetInMemoryRateLimits() {
   rateBuckets.clear()
+  upstashLimiters.clear()
 }
 
 module.exports = {
   applyCorsHeaders,
   authenticateRequest,
   enforceRequestLimit,
+  getRateLimitIdentifier,
   getSupabaseConfig,
   getRateLimitPolicy,
+  getUpstashConfig,
   handleCors,
   isAllowedCorsOrigin,
   requireAuthenticatedUser,
