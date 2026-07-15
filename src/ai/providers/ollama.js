@@ -46,7 +46,7 @@ export async function requestOllama({
   maxTokens,
   temperature,
   ollamaUrl,
-}, { fetchImpl = globalThis.fetch, electronBridge } = {}) {
+}, { fetchImpl = globalThis.fetch, electronBridge, signal } = {}) {
   const base = (ollamaUrl || 'http://localhost:11434').replace(/\/$/, '')
   const fullMessages = system ? [{ role: 'system', content: system }, ...messages] : messages
   const bridge = resolveElectronBridge(electronBridge)
@@ -77,7 +77,7 @@ export async function requestOllama({
         stream: false,
         options: { num_predict: maxTokens, ...(temperature !== undefined && { temperature }) },
       }),
-      signal: AbortSignal.timeout(120000),
+      signal: signal || AbortSignal.timeout(120000),
     })
     const data = await response.json().catch(() => null)
     if (!response.ok) {
@@ -97,6 +97,6 @@ export async function requestOllama({
       finishReason: data?.done_reason,
     })
   } catch (error) {
-    return createAIErrorResult({ provider: 'ollama', model, code: error?.name === 'TimeoutError' ? 'PROVIDER_UNAVAILABLE' : 'NETWORK_FAILURE', message: error?.message })
+    return createAIErrorResult({ provider: 'ollama', model, code: error?.name === 'AbortError' ? 'REQUEST_CANCELLED' : error?.name === 'TimeoutError' ? 'PROVIDER_UNAVAILABLE' : 'NETWORK_FAILURE', message: error?.message })
   }
 }

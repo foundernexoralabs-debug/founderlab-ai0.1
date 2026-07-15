@@ -144,6 +144,7 @@ export async function requestAIResult({
   fetchImpl = globalThis.fetch,
   electronBridge,
   accessToken,
+  signal,
 } = {}) {
   if (!provider) {
     return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
@@ -175,6 +176,7 @@ export async function requestAIResult({
     fetchImpl,
     electronBridge,
     accessToken: token,
+    signal,
   })
   let result = await request(activeAccessToken)
   if (provider !== 'ollama' && result.error?.code === 'AUTHENTICATION_INVALID' && accessToken === undefined) {

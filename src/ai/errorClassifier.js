@@ -16,6 +16,7 @@ const ERROR_MESSAGES = {
   NETWORK_FAILURE: 'could not be reached. Check your connection and try again.',
   MALFORMED_RESPONSE: 'returned an invalid response. Please try again.',
   EMPTY_RESPONSE: 'returned an empty response. Please try again.',
+  REQUEST_CANCELLED: 'request was cancelled.',
   REQUEST_INVALID: 'could not process this request. Check the selected model and input, then try again.',
   UNKNOWN: 'could not complete this request. Please try again.',
 }
@@ -53,6 +54,7 @@ export function classifyAIError({ provider, status, code, message } = {}) {
     ? status
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
+      : resolvedCode === 'REQUEST_CANCELLED' ? 499
       : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' ? 400
       : resolvedCode === 'RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503

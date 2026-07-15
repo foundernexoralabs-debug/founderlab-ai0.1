@@ -46,6 +46,7 @@ const aiHandler = require('../api/ai.js')
 const youtubeHandler = require('../api/youtube.js')
 const ttsHandler = require('../api/tts.js')
 const groqProvider = require('../api/ai/providers/groq.js')
+const { createTimedFetch, getProviderTimeoutMs } = require('../api/ai/providerRunner.js')
 const {
   authenticateRequest,
   enforceRequestLimit,
@@ -249,6 +250,19 @@ test('browser provider router preserves the stable API contract and sends the su
   assert.equal(requestBody.max_tokens, 200)
   assert.equal(result.ok, true)
   assert.equal(result.text, 'Consistent result')
+})
+
+test('server provider execution uses a bounded fetch timeout without exposing provider details', async () => {
+  assert.equal(getProviderTimeoutMs({}), 60000)
+  assert.equal(getProviderTimeoutMs({ FOUNDERLAB_PROVIDER_TIMEOUT_MS: '1' }), 5000)
+  const timedFetch = createTimedFetch(async (_url, options) => new Promise((_, reject) => {
+    options.signal.addEventListener('abort', () => {
+      const error = new Error('aborted')
+      error.name = 'AbortError'
+      reject(error)
+    })
+  }), 1)
+  await assert.rejects(() => timedFetch('https://provider.example.test'), (error) => error.code === 'PROVIDER_UNAVAILABLE' && error.status === 504 && error.message === 'Provider request timed out.')
 })
 
 test('an active workspace session is used by both Chat and provider-status requests', async () => {

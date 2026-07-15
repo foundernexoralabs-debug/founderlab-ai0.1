@@ -1,0 +1,190 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
+import { createBuilderProject, normalizeBuilderProject } from '../src/features/builder/builderProjectSchema.js'
+import { createBuilderProjectRepository } from '../src/features/builder/builderProjectRepository.js'
+import { buildBuilderPatchPrompt } from '../src/features/builder/builderPrompts.js'
+import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX } from '../src/features/builder/builderPreview.js'
+import { validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
+import { appendBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
+import { routeAIRequest } from '../src/ai/providerRouter.js'
+
+const NOW = '2026-07-15T12:00:00.000Z'
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const validFiles = [
+  { path: 'index.html', content: '<main><h1>FounderLab</h1><a href="pages/about.html">About</a></main>' },
+  { path: 'styles.css', content: 'body { margin: 0; }' },
+  { path: 'app.js', content: 'document.body.dataset.ready = "true"' },
+  { path: 'pages/about.html', content: '<main><h1>About</h1></main>' },
+]
+
+test('Builder project schema supplies safe defaults and migrates a legacy Builder record without touching unrelated project types', () => {
+  const project = createBuilderProject({ ownerId: 'user-1', prompt: 'Build a founder site', now: NOW })
+  assert.equal(project.schemaVersion, 2)
+  assert.equal(project.ownerId, 'user-1')
+  assert.equal(project.entryFile, 'index.html')
+  assert.deepEqual(project.files, [])
+
+  const migrated = normalizeBuilderProject({ id: 'legacy-1', type: 'builder', desc: 'Old project', files: validFiles }, { ownerId: 'user-1', now: NOW })
+  assert.equal(migrated.migrated, true)
+  assert.equal(migrated.project.status, 'legacy')
+  assert.equal(migrated.project.files.length, validFiles.length)
+  assert.equal(normalizeBuilderProject({ id: 'code-1', type: 'code', files: [] }, { ownerId: 'user-1', now: NOW }).project, null)
+})
+
+test('the active Builder route uses the extracted workspace and does not expose old deployment controls', () => {
+  const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
+  const workspaceSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/builder/BuilderWorkspace.jsx'), 'utf8')
+  assert.match(appSource, /import \{ BuilderWorkspace \} from '@\/features\/builder\/BuilderWorkspace'/)
+  assert.match(appSource, /case 'builder':\s+return <BuilderWorkspace user=\{user\} \/>/)
+  assert.doesNotMatch(workspaceSource, /Push to GitHub|Deploy to Vercel|githubToken|localStorage/)
+})
+
+test('Builder validation rejects path traversal, duplicate paths, oversized unsafe runtime features, and missing entry files', () => {
+  const traversal = validateBuilderFiles([{ path: '../secrets.html', content: '<main>no</main>' }])
+  assert.equal(traversal.valid, false)
+  assert.equal(traversal.issues.some((item) => item.code === 'INVALID_PATH'), true)
+
+  const duplicate = validateBuilderFiles([{ path: 'index.html', content: '<main>one</main>' }, { path: 'index.html', content: '<main>two</main>' }])
+  assert.equal(duplicate.issues.some((item) => item.code === 'DUPLICATE_PATH'), true)
+
+  const unsafe = validateBuilderFiles([{ path: 'index.html', content: '<script>window.parent.document.body</script>' }])
+  assert.equal(unsafe.issues.some((item) => item.code === 'PARENT_ACCESS'), true)
+  assert.equal(unsafe.issues.some((item) => item.code === 'EMBEDDED_DOCUMENT') || unsafe.issues.some((item) => item.code === 'PARENT_ACCESS'), true)
+  assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main>Built for parent company teams</main>' }]).valid, true)
+  assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<script>document.body.dataset.x = "1"</script>' }]).issues.some((item) => item.code === 'INLINE_RUNTIME_TAG'), true)
+
+  const manifest = validateBuilderManifest({ files: [{ path: 'styles.css' }] })
+  assert.equal(manifest.valid, false)
+  assert.equal(manifest.issues.some((item) => item.code === 'ENTRY_FILE_REQUIRED'), true)
+})
+
+test('scoped Builder edits include only the selected file content so valid large projects stay within request bounds', () => {
+  const prompt = buildBuilderPatchPrompt({
+    request: 'Improve the heading',
+    selectedPath: 'index.html',
+    project: { files: [{ path: 'index.html', content: '<main>Selected</main>' }, { path: 'styles.css', content: 'x'.repeat(64000) }] },
+  })
+  assert.match(prompt, /Selected/)
+  assert.doesNotMatch(prompt, /x{100}/)
+  assert.ok(prompt.length < 10000)
+})
+
+test('Builder preview uses an opaque minimal sandbox and CSP without external network or generated parent access', () => {
+  const preview = buildBuilderPreviewDocument(validFiles)
+  assert.equal(preview.ok, true)
+  assert.equal(BUILDER_PREVIEW_SANDBOX, 'allow-scripts')
+  assert.match(BUILDER_PREVIEW_CSP, /default-src 'none'/)
+  assert.match(BUILDER_PREVIEW_CSP, /connect-src 'none'/)
+  assert.match(preview.srcDoc, /Content-Security-Policy/)
+  assert.doesNotMatch(preview.srcDoc, /https?:\/\//)
+  assert.doesNotMatch(preview.srcDoc, /eval\s*\(/)
+
+  const escapedTitle = buildBuilderPreviewDocument([{ path: 'index.html', content: '<title>One & Two</title><main>Safe</main>' }])
+  assert.match(escapedTitle.srcDoc, /<title>One &amp; Two<\/title>/)
+
+  const rejected = buildBuilderPreviewDocument([{ path: 'index.html', content: '<img src="https://example.test/a.png">' }])
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.validation.issues.some((item) => item.code === 'EXTERNAL_NETWORK'), true)
+})
+
+test('Builder versions are immutable, bounded by a current pointer, and restore into a recoverable new version', () => {
+  const base = { ...createBuilderProject({ ownerId: 'user-1', now: NOW }), files: validFiles, versions: [] }
+  const first = appendBuilderVersion(base, { files: validFiles, origin: 'generation', summary: 'Initial', changedPaths: ['index.html'], now: NOW })
+  const changed = validFiles.map((file) => file.path === 'index.html' ? { ...file, content: '<main>Changed</main>' } : file)
+  const second = appendBuilderVersion(first, { files: changed, origin: 'manual-edit', summary: 'Changed headline', changedPaths: ['index.html'], now: '2026-07-15T13:00:00.000Z' })
+  assert.equal(first.files[0].content.includes('Changed'), false)
+  assert.equal(second.versions.length, 2)
+  const restored = restoreBuilderVersion(second, first.currentVersionId, { now: '2026-07-15T14:00:00.000Z' })
+  assert.equal(restored.restored, true)
+  assert.equal(restored.project.files[0].content.includes('FounderLab'), true)
+  assert.equal(restored.project.versions.at(-1).origin, 'restore')
+})
+
+test('Builder repository preserves Code AI records and reports an honest remote persistence result', async () => {
+  let saved = null
+  const repository = createBuilderProjectRepository({
+    load: async () => [{ id: 'code-1', type: 'code', name: 'Keep Code AI' }],
+    save: async (_key, value) => { saved = value; return { localSaved: true, cloudSaved: false, remoteAttempted: true } },
+    now: () => NOW,
+  })
+  const project = { ...createBuilderProject({ ownerId: 'user-1', prompt: 'Build', now: NOW }), files: validFiles }
+  const result = await repository.save(project, 'user-1')
+  assert.equal(result.saved, false)
+  assert.equal(result.locallyRecovered, true)
+  assert.equal(saved.some((record) => record.type === 'code'), true)
+  assert.equal(saved.some((record) => record.type === 'builder-project'), true)
+})
+
+test('Builder repository duplicates a valid project as a new recoverable project version', async () => {
+  const writes = []
+  const source = appendBuilderVersion({ ...createBuilderProject({ ownerId: 'user-1', now: NOW }), files: validFiles, validation: { valid: true, issues: [], checkedAt: NOW } }, { files: validFiles, origin: 'generation', summary: 'Initial', validation: { valid: true, issues: [], checkedAt: NOW }, now: NOW })
+  const repository = createBuilderProjectRepository({
+    load: async () => [],
+    save: async (_key, value) => { writes.push(value); return { localSaved: true, cloudSaved: true, remoteAttempted: true } },
+    now: () => NOW,
+  })
+  const result = await repository.duplicate(source, 'user-1')
+  assert.equal(result.saved, true)
+  assert.notEqual(result.project.id, source.id)
+  assert.equal(result.project.files.length, validFiles.length)
+  assert.equal(result.project.versions.length, 1)
+  assert.equal(writes[0][0].name, `${source.name} copy`)
+})
+
+test('Malformed persisted Builder files remain recoverable but cannot be treated as a ready preview project', async () => {
+  const corrupted = { ...createBuilderProject({ ownerId: 'user-1', now: NOW }), id: 'corrupted-builder', status: 'ready', files: [{ path: '../unsafe.html', content: '<main>Unsafe</main>' }] }
+  const repository = createBuilderProjectRepository({ load: async () => [corrupted], now: () => NOW })
+  const [project] = await repository.list('user-1')
+  assert.equal(project.status, 'error')
+  assert.equal(project.preview.status, 'error')
+  assert.equal(project.recovery.errorCode, 'PERSISTED_PROJECT_INVALID')
+  assert.equal(project.validation.issues.some((item) => item.code === 'INVALID_PATH'), true)
+})
+
+test('Builder generation consumes strict normalized AI responses, creates structured files, and rejects prose/fenced output', async () => {
+  const responses = [
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ name: 'Founders', summary: 'A site for founders.', projectType: 'website', pages: [{ path: 'index.html', title: 'Home', purpose: 'Home' }], sections: ['Hero'], components: [], features: [], brand: { visualDirection: 'Calm', colors: ['#111827'] } }) },
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ entryFile: 'index.html', files: [{ path: 'index.html', role: 'entry', purpose: 'Home' }, { path: 'styles.css', role: 'style', purpose: 'Styles' }, { path: 'app.js', role: 'script', purpose: 'Interaction' }] }) },
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'index.html', content: '<main><h1>Founders</h1></main>' }) },
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'styles.css', content: 'body { margin: 0; }' }) },
+    { ok: true, provider: 'groq', model: 'model', text: JSON.stringify({ path: 'app.js', content: 'document.body.dataset.ready = "true"' }) },
+  ]
+  const service = createBuilderGenerationService({ request: async () => responses.shift() })
+  const project = await service.generate({ brief: 'Build a founder site', ownerId: 'user-1' })
+  assert.equal(project.status, 'ready')
+  assert.equal(project.validation.valid, true)
+  assert.equal(project.versions[0].provider, 'groq')
+  assert.equal(project.files.length, 3)
+
+  const bad = createBuilderGenerationService({ request: async () => ({ ok: true, text: '```json\n{}\n```' }) })
+  await assert.rejects(() => bad.plan({ brief: 'Bad format' }), (error) => error instanceof BuilderGenerationError && error.code === 'GENERATION_FORMAT_ERROR')
+})
+
+test('A normalized provider failure is preserved safely by Builder generation', async () => {
+  const service = createBuilderGenerationService({ request: async () => ({ ok: false, error: { code: 'RATE_LIMITED', message: 'Groq is temporarily busy.', retryable: true } }) })
+  await assert.rejects(() => service.plan({ brief: 'Build a site' }), (error) => error instanceof BuilderGenerationError && error.code === 'RATE_LIMITED' && error.message === 'Groq is temporarily busy.')
+})
+
+test('Builder continuation retries only a missing file and cancellation remains a normalized request outcome', async () => {
+  const manifest = { entryFile: 'index.html', files: [{ path: 'index.html', role: 'entry' }, { path: 'styles.css', role: 'style' }] }
+  const replies = [
+    { ok: true, provider: 'groq', model: 'model', text: '{"path":"index.html","content":"<main>Recovered</main>"}' },
+    { ok: true, provider: 'groq', model: 'model', text: 'not json' },
+    { ok: true, provider: 'groq', model: 'model', text: '{"path":"styles.css","content":"body { margin: 0; }"}' },
+  ]
+  const service = createBuilderGenerationService({ request: async () => replies.shift() })
+  const continued = await service.continueMissingFiles({ brief: 'Build', plan: { summary: 'Build', pages: [] }, manifest, files: [] })
+  assert.deepEqual(continued.addedPaths, ['index.html', 'styles.css'])
+  assert.equal(continued.files.length, 2)
+
+  const aborted = await routeAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [{ role: 'user', content: 'Build' }] }, {
+    fetchImpl: async () => { const error = new Error('cancelled'); error.name = 'AbortError'; throw error },
+  })
+  assert.equal(aborted.ok, false)
+  assert.equal(aborted.error.code, 'REQUEST_CANCELLED')
+  assert.equal(aborted.error.status, 499)
+})
