@@ -10,6 +10,7 @@ import {
   setOllamaModel,
 } from '@/services/aiProviderService'
 import { setProviderConnectionStatus } from '@/ai/providerConnectionState'
+import { getOllamaDiagnostics, recordOllamaDiagnostic } from '@/ai/providers/ollama'
 
 const INITIAL_INSPECTION = Object.freeze({
   ok: false,
@@ -37,25 +38,79 @@ function colorForState(color) {
   return color === 'green' ? [C.greenM, C.green] : color === 'red' ? ['rgba(239,68,68,.08)', C.red] : color === 'accent' ? [C.accentM, C.accent] : [C.yellowM, C.yellow]
 }
 
+function diagnosticValue(value, fallback = 'Not reached') {
+  if (value === true) return 'Yes'
+  if (value === false) return 'No'
+  if (value === null || value === undefined || value === '') return fallback
+  return String(value)
+}
+
+function LocalConnectionTrace({ diagnostics }) {
+  const requestTraces = [diagnostics.discovery, diagnostics['connection-test'], diagnostics.chat].filter(Boolean)
+  const latestRequest = requestTraces.reduce((latest, trace) => !latest || trace.sequence > latest.sequence ? trace : latest, null) || {}
+  const panel = diagnostics.panel || {}
+  const providerStatus = diagnostics['provider-status'] || {}
+  const rows = [
+    ['Latest panel event', diagnosticValue(panel.event, 'Waiting for Refresh')],
+    ['Latest request flow', diagnosticValue(latestRequest.flow, 'Waiting for Refresh')],
+    ['Request started', diagnosticValue(latestRequest.requestStarted, 'Not yet')],
+    ['Target host', diagnosticValue(latestRequest.requestHost)],
+    ['HTTP response', latestRequest.responseReceived ? `HTTP ${diagnosticValue(latestRequest.httpStatus, 'unknown')}` : 'No response reached'],
+    ['JSON parsed', diagnosticValue(latestRequest.jsonParsed)],
+    ['Model list empty', diagnosticValue(latestRequest.modelListEmpty)],
+    ['Stopped before response', diagnosticValue(latestRequest.browserBlockedBeforeResponse)],
+    ['Failure boundary', diagnosticValue(latestRequest.failureStep, 'None')],
+    ['Discovery result applied', diagnosticValue(panel.discoveryResultApplied)],
+    ['State discarded after success', diagnosticValue(panel.successDiscarded)],
+    ['Provider changed during status refresh', diagnosticValue(providerStatus.selectedProviderChangedDuringRefresh)],
+  ]
+  return (
+    <details open style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+      <summary style={{ color: C.t2, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>Temporary local connection trace</summary>
+      <p style={{ margin: '7px 0 9px', color: C.t3, fontSize: 11, lineHeight: 1.5 }}>This temporary debug trace records the local request boundary without storing prompts, response bodies, credentials, or raw browser errors.</p>
+      <dl style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) minmax(0, 1.4fr)', gap: '5px 12px', margin: 0, fontSize: 11, lineHeight: 1.45 }}>
+        {rows.map(([label, value]) => <div key={label} style={{ display: 'contents' }}><dt style={{ color: C.t3 }}>{label}</dt><dd style={{ margin: 0, color: C.t2, overflowWrap: 'anywhere' }}>{value}</dd></div>)}
+      </dl>
+    </details>
+  )
+}
+
 /** A self-contained local-only provider surface; cloud providers never enter it. */
-export function OllamaProviderPanel() {
+export function OllamaProviderPanel({ providerAvailability }) {
   const [inspection, setInspection] = useState(INITIAL_INSPECTION)
   const [selectedModel, setSelectedModel] = useState(getOllamaModel)
   const [testing, setTesting] = useState(false)
   const [testState, setTestState] = useState('')
   const [testMessage, setTestMessage] = useState('')
+  const [diagnostics, setDiagnostics] = useState(getOllamaDiagnostics)
   const attempt = useRef(0)
+  const syncDiagnostics = useCallback(() => setDiagnostics(getOllamaDiagnostics()), [])
 
   const detect = useCallback(async () => {
     const requestId = ++attempt.current
+    recordOllamaDiagnostic('panel', { event: 'refresh-started', discoveryResultApplied: null, successDiscarded: false })
+    syncDiagnostics()
     setTesting(false)
     setTestState('')
     setTestMessage('')
     setInspection({ ...INITIAL_INSPECTION, state: 'detecting' })
     setProviderConnectionStatus('ollama', 'detecting')
     const result = await discoverLocalOllama()
-    if (requestId !== attempt.current) return
+    if (requestId !== attempt.current) {
+      recordOllamaDiagnostic('panel', {
+        event: 'discovery-result-discarded',
+        discoveryResultApplied: false,
+        successDiscarded: Boolean(result.ok),
+      })
+      return
+    }
     setInspection(result)
+    recordOllamaDiagnostic('panel', {
+      event: 'discovery-result-applied',
+      discoveryResultApplied: true,
+      successDiscarded: false,
+    })
+    syncDiagnostics()
     if (!result.ok) {
       setProviderConnectionStatus('ollama', 'unavailable')
       return
@@ -69,12 +124,16 @@ export function OllamaProviderPanel() {
     if (model !== remembered) setOllamaModel(model)
     setSelectedModel(model)
     setProviderConnectionStatus('ollama', 'ready')
-  }, [])
+  }, [syncDiagnostics])
 
   useEffect(() => {
     void detect()
     return () => { attempt.current += 1 }
   }, [detect])
+
+  useEffect(() => {
+    syncDiagnostics()
+  }, [providerAvailability, syncDiagnostics])
 
   const chooseModel = (model) => {
     setSelectedModel(model)
@@ -86,6 +145,8 @@ export function OllamaProviderPanel() {
 
   const testConnection = async () => {
     if (!selectedModel || !inspection.models.some((model) => model.id === selectedModel)) return
+    recordOllamaDiagnostic('panel', { event: 'connection-test-started' })
+    syncDiagnostics()
     setTesting(true)
     setTestState('')
     setTestMessage('')
@@ -97,14 +158,20 @@ export function OllamaProviderPanel() {
       })
       if (result.ok) {
         setTestState('connected')
+        recordOllamaDiagnostic('panel', { event: 'connection-test-succeeded' })
+        syncDiagnostics()
         return
       }
       setTestState('failed')
       setTestMessage(result.error?.message || '')
+      recordOllamaDiagnostic('panel', { event: 'connection-test-failed' })
+      syncDiagnostics()
     } catch {
       setProviderConnectionStatus('ollama', 'failed')
       setTestState('failed')
       setTestMessage('Local Ollama could not complete the connection test. Try refreshing the local connection.')
+      recordOllamaDiagnostic('panel', { event: 'connection-test-threw' })
+      syncDiagnostics()
     } finally {
       setTesting(false)
     }
@@ -141,6 +208,8 @@ export function OllamaProviderPanel() {
         <Button onClick={testConnection} disabled={testing || !inspection.ok || !selectedModel || !inspection.models.some((model) => model.id === selectedModel)} variant="secondary" size="sm">{testing ? <><Spinner size={12} color={C.accent} /> Testing</> : 'Test connection'}</Button>
         {inspection.models.length > 0 && <span style={{ color: C.t3, fontSize: 11 }}>Tests the selected model with a real local response.</span>}
       </div>
+
+      <LocalConnectionTrace diagnostics={diagnostics} />
 
       {(inspection.state === 'unavailable' || inspection.state === 'no_models') && (
         <details style={{ paddingTop: 2 }}>

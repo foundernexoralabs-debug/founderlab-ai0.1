@@ -3081,7 +3081,7 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
               )
             })()}
 
-            {aiProv === 'ollama' && <OllamaProviderPanel />}
+            {aiProv === 'ollama' && <OllamaProviderPanel providerAvailability={providerAvailability} />}
           </Card>
 
           {/* ── Cloud connection test ── */}

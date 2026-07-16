@@ -18,7 +18,7 @@ import {
 import { createAIErrorResult, toLegacyAIText } from '../ai/normalizeResponse.js'
 import { routeAIRequest } from '../ai/providerRouter.js'
 import { recordProviderConnectionResult } from '../ai/providerConnectionState.js'
-import { discoverOllama } from '../ai/providers/ollama.js'
+import { discoverOllama, recordOllamaDiagnostic } from '../ai/providers/ollama.js'
 import { workspaceStore } from './workspaceStore.js'
 
 export {
@@ -93,6 +93,14 @@ export async function refreshProviderAvailability({
     // never unmounts Local Ollama and discards its visible result.
     const currentPreferredProvider = getAIProviderPreference() || preferredProvider
     const provider = resolveConfiguredProvider(currentPreferredProvider, providerAvailability)
+    if (preferredProvider === 'ollama' || currentPreferredProvider === 'ollama') {
+      recordOllamaDiagnostic('provider-status', {
+        selectedProviderAtStart: preferredProvider || 'none',
+        selectedProviderAtCompletion: currentPreferredProvider || 'none',
+        selectedProviderChangedDuringRefresh: preferredProvider !== currentPreferredProvider,
+        resolvedProvider: provider || 'none',
+      })
+    }
     if (provider && provider !== currentPreferredProvider) setAIProviderPreference(provider)
     return { provider, providers: providerAvailability }
   } catch {
@@ -188,6 +196,7 @@ export async function requestAIResult({
     fetchImpl,
     electronBridge,
     permissionQuery,
+    diagnosticFlow: provider === 'ollama' ? (connectionTest ? 'connection-test' : 'chat') : undefined,
     accessToken: token,
   })
   let result = await request(activeAccessToken)

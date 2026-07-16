@@ -16,7 +16,7 @@ import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
-import { discoverOllama, normalizeOllamaModels } from '../src/ai/providers/ollama.js'
+import { discoverOllama, getOllamaDiagnostics, normalizeOllamaModels, recordOllamaDiagnostic } from '../src/ai/providers/ollama.js'
 import {
   getProviderConnectionState,
   getProviderConnectionStatus,
@@ -339,6 +339,13 @@ test('provider availability keeps a Local Ollama selection made while status ref
 
     assert.equal(status.provider, 'ollama')
     assert.equal(getAIProviderPreference(), 'ollama')
+    assert.deepEqual(getOllamaDiagnostics()['provider-status'], {
+      flow: 'provider-status',
+      selectedProviderAtStart: 'groq',
+      selectedProviderAtCompletion: 'ollama',
+      selectedProviderChangedDuringRefresh: true,
+      resolvedProvider: 'ollama',
+    })
   } finally {
     if (originalStorage === undefined) delete globalThis.localStorage
     else Object.defineProperty(globalThis, 'localStorage', originalStorage)
@@ -390,6 +397,19 @@ test('Ollama discovery only reports a real readable local models response', asyn
   assert.equal(unavailable.ok, false)
   assert.equal(unavailable.state, 'unavailable')
   assert.equal(unavailable.models.length, 0)
+  assert.deepEqual(unavailable.diagnostic, {
+    flow: 'discovery',
+    requestStarted: true,
+    requestHost: 'localhost:11434',
+    requestPath: '/api/tags',
+    responseReceived: false,
+    httpStatus: null,
+    jsonParsed: null,
+    modelListEmpty: null,
+    browserBlockedBeforeResponse: true,
+    permissionState: 'not-supported',
+    failureStep: 'fetch-before-response',
+  })
 
   const noModels = await discoverOllama('http://localhost:11434', {
     fetchImpl: async (url, options) => {
@@ -403,6 +423,9 @@ test('Ollama discovery only reports a real readable local models response', asyn
   })
   assert.equal(noModels.ok, true)
   assert.equal(noModels.state, 'no_models')
+  assert.equal(noModels.diagnostic.httpStatus, 200)
+  assert.equal(noModels.diagnostic.jsonParsed, true)
+  assert.equal(noModels.diagnostic.modelListEmpty, true)
 
   const discovered = await discoverOllama('http://localhost:11434', {
     fetchImpl: async () => jsonResponse({ body: {
@@ -416,6 +439,16 @@ test('Ollama discovery only reports a real readable local models response', asyn
   assert.equal(discovered.state, 'models_available')
   assert.deepEqual(discovered.models.map((model) => model.id), ['gemma3:latest', 'qwen3:8b'])
   assert.equal(discovered.models[0].parameterSize, '4.3B')
+  assert.equal(discovered.diagnostic.requestHost, 'localhost:11434')
+  assert.equal(discovered.diagnostic.responseReceived, true)
+  assert.equal(discovered.diagnostic.modelListEmpty, false)
+
+  const malformed = await discoverOllama('http://localhost:11434', {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('not exposed') } }),
+  })
+  assert.equal(malformed.error.code, 'MALFORMED_RESPONSE')
+  assert.equal(malformed.diagnostic.jsonParsed, false)
+  assert.equal(malformed.diagnostic.failureStep, 'json-parse')
 })
 
 test('Ollama model discovery preserves a valid model.model value and tagged names', () => {
@@ -482,6 +515,9 @@ test('Ollama test and Chat route directly to localhost without cloud authenticat
     }, { fetchImpl })
     assert.equal(tested.ok, true)
     assert.equal(getProviderConnectionStatus('ollama'), 'connected')
+    assert.equal(tested.diagnostic.flow, 'connection-test')
+    assert.equal(tested.diagnostic.httpStatus, 200)
+    assert.equal(tested.diagnostic.jsonParsed, true)
 
     const chat = await requestAIResult({
       provider: 'ollama',
@@ -492,6 +528,8 @@ test('Ollama test and Chat route directly to localhost without cloud authenticat
     }, { fetchImpl })
     assert.equal(chat.ok, true)
     assert.equal(chat.text, 'CONNECTED')
+    assert.equal(chat.diagnostic.flow, 'chat')
+    assert.equal(chat.diagnostic.responseReceived, true)
     assert.equal(calls.length, 2)
   } finally {
     resetProviderConnectionStatuses()
@@ -555,6 +593,9 @@ test('Ollama retains a browser local-access category without exposing browser in
   })
   assert.equal(denied.ok, false)
   assert.equal(denied.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
+  assert.equal(denied.diagnostic.requestStarted, false)
+  assert.equal(denied.diagnostic.browserBlockedBeforeResponse, true)
+  assert.equal(denied.diagnostic.failureStep, 'local-network-permission')
 
   const blocked = await requestAIResult({
     ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
@@ -566,6 +607,10 @@ test('Ollama retains a browser local-access category without exposing browser in
   assert.equal(blocked.ok, false)
   assert.equal(blocked.error.code, 'OLLAMA_BROWSER_ACCESS_BLOCKED')
   assert.equal(blocked.error.message.includes('browser refused local request'), false)
+  assert.equal(blocked.diagnostic.flow, 'connection-test')
+  assert.equal(blocked.diagnostic.responseReceived, false)
+  assert.equal(blocked.diagnostic.browserBlockedBeforeResponse, true)
+  assert.equal(blocked.diagnostic.failureStep, 'fetch-before-response')
 
   const deniedTest = await requestAIResult({
     ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
@@ -576,6 +621,14 @@ test('Ollama retains a browser local-access category without exposing browser in
   })
   assert.equal(deniedTest.ok, false)
   assert.equal(deniedTest.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
+
+  const discarded = recordOllamaDiagnostic('panel', {
+    event: 'discovery-result-discarded',
+    discoveryResultApplied: false,
+    successDiscarded: true,
+  })
+  assert.equal(discarded.successDiscarded, true)
+  assert.equal(getOllamaDiagnostics().panel.discoveryResultApplied, false)
 })
 
 test('Ollama is presented as a first-class local provider without stale CORS setup guidance', () => {
@@ -587,6 +640,9 @@ test('Ollama is presented as a first-class local provider without stale CORS set
   assert.match(panelSource, /Local · Free/)
   assert.match(panelSource, /Models available/)
   assert.match(panelSource, /Test connection/)
+  assert.match(panelSource, /Temporary local connection trace/)
+  assert.match(panelSource, /Target host/)
+  assert.match(panelSource, /State discarded after success/)
   assert.match(panelSource, /local app/)
   assert.doesNotMatch(appSource, /OLLAMA_ORIGINS=\*/)
   assert.doesNotMatch(panelSource, /OLLAMA_ORIGINS/)

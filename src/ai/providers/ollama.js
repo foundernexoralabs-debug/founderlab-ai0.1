@@ -5,6 +5,59 @@ export const OLLAMA_DISCOVERY_TIMEOUT_MS = 5000
 export const OLLAMA_CHAT_TIMEOUT_MS = 120000
 export const OLLAMA_LOOPBACK_ADDRESS_SPACE = 'loopback'
 
+const ollamaDiagnostics = new Map()
+let ollamaDiagnosticSequence = 0
+
+function diagnosticHost(value) {
+  try {
+    return new URL(value).host
+  } catch {
+    return ''
+  }
+}
+
+function createDiagnostic(flow, base, path) {
+  return {
+    flow,
+    requestStarted: false,
+    requestHost: diagnosticHost(base),
+    requestPath: path || '',
+    responseReceived: false,
+    httpStatus: null,
+    jsonParsed: null,
+    modelListEmpty: null,
+    browserBlockedBeforeResponse: false,
+    permissionState: 'not-checked',
+    failureStep: '',
+  }
+}
+
+/**
+ * This intentionally stores a small, in-memory trace only. It never includes
+ * prompts, response bodies, cookies, credentials, or browser exception text.
+ * It is used by the temporary Local Ollama debug panel in this branch.
+ */
+export function recordOllamaDiagnostic(flow, update = {}) {
+  const previous = ollamaDiagnostics.get(flow) || { flow }
+  const next = { ...previous, ...update, flow }
+  Object.defineProperty(next, 'sequence', { value: ++ollamaDiagnosticSequence, enumerable: false })
+  Object.freeze(next)
+  ollamaDiagnostics.set(flow, next)
+  return next
+}
+
+export function getOllamaDiagnostics() {
+  return Object.freeze(Object.fromEntries(ollamaDiagnostics))
+}
+
+function completeInspection(inspection, diagnostic) {
+  return Object.freeze({ ...inspection, diagnostic: recordOllamaDiagnostic('discovery', diagnostic) })
+}
+
+function completeRequest(result, flow, diagnostic) {
+  return Object.freeze({ ...result, diagnostic: recordOllamaDiagnostic(flow, diagnostic) })
+}
+
 function resolveElectronBridge(bridge) {
   if (bridge) return bridge
   if (typeof window === 'undefined') return null
@@ -112,28 +165,86 @@ export function isElectronOllamaAvailable(bridge) {
  */
 export async function discoverOllama(base, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery } = {}) {
   const url = normalizeOllamaUrl(base)
-  if (!url || typeof fetchImpl !== 'function') return unavailableInspection('OLLAMA_UNAVAILABLE')
+  const diagnostic = createDiagnostic('discovery', url || base, '/api/tags')
+  if (!url || typeof fetchImpl !== 'function') {
+    return completeInspection(unavailableInspection('OLLAMA_UNAVAILABLE'), {
+      ...diagnostic,
+      failureStep: !url ? 'url-validation' : 'fetch-unavailable',
+    })
+  }
 
   const bridge = resolveElectronBridge(electronBridge)
   try {
     if (bridge?.isElectron) {
       const result = await bridge.ollama.probe(url)
-      return result?.running ? availableInspection(result.models) : unavailableInspection()
+      return completeInspection(result?.running ? availableInspection(result.models) : unavailableInspection(), {
+        ...diagnostic,
+        requestStarted: true,
+        responseReceived: Boolean(result),
+        jsonParsed: Boolean(result),
+        modelListEmpty: Array.isArray(result?.models) ? result.models.length === 0 : null,
+        permissionState: 'electron-bridge',
+        failureStep: result?.running ? '' : 'electron-probe',
+      })
     }
     const permissionState = await getLoopbackPermissionState(permissionQuery)
-    if (permissionState === 'denied') return unavailableInspection('OLLAMA_BROWSER_ACCESS_DENIED')
+    if (permissionState === 'denied') {
+      return completeInspection(unavailableInspection('OLLAMA_BROWSER_ACCESS_DENIED'), {
+        ...diagnostic,
+        browserBlockedBeforeResponse: true,
+        permissionState,
+        failureStep: 'local-network-permission',
+      })
+    }
     const response = await fetchImpl(url + '/api/tags', localOllamaFetchOptions({
       method: 'GET',
       headers: { Accept: 'application/json' },
       signal: timeoutSignal(OLLAMA_DISCOVERY_TIMEOUT_MS),
     }))
-    if (!response.ok) return unavailableInspection('OLLAMA_UNAVAILABLE')
-    const data = await response.json().catch(() => null)
-    if (!data || !Array.isArray(data.models)) return unavailableInspection('MALFORMED_RESPONSE')
-    return availableInspection(data.models)
+    const responseDiagnostic = {
+      ...diagnostic,
+      requestStarted: true,
+      responseReceived: true,
+      httpStatus: Number.isFinite(response?.status) ? response.status : null,
+      permissionState: permissionState || 'not-supported',
+    }
+    if (!response.ok) {
+      return completeInspection(unavailableInspection('OLLAMA_UNAVAILABLE'), {
+        ...responseDiagnostic,
+        failureStep: 'http-response',
+      })
+    }
+    let data
+    try {
+      data = await response.json()
+    } catch {
+      return completeInspection(unavailableInspection('MALFORMED_RESPONSE'), {
+        ...responseDiagnostic,
+        jsonParsed: false,
+        failureStep: 'json-parse',
+      })
+    }
+    if (!data || !Array.isArray(data.models)) {
+      return completeInspection(unavailableInspection('MALFORMED_RESPONSE'), {
+        ...responseDiagnostic,
+        jsonParsed: true,
+        failureStep: 'model-list',
+      })
+    }
+    return completeInspection(availableInspection(data.models), {
+      ...responseDiagnostic,
+      jsonParsed: true,
+      modelListEmpty: data.models.length === 0,
+    })
   } catch (error) {
     const permissionState = await getLoopbackPermissionState(permissionQuery)
-    return unavailableInspection(localRequestFailureCode(error, permissionState))
+    return completeInspection(unavailableInspection(localRequestFailureCode(error, permissionState)), {
+      ...diagnostic,
+      requestStarted: true,
+      browserBlockedBeforeResponse: true,
+      permissionState: permissionState || 'not-supported',
+      failureStep: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'fetch-before-response',
+    })
   }
 }
 
@@ -147,11 +258,22 @@ export async function requestOllama({
   maxTokens,
   temperature,
   ollamaUrl,
-}, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery } = {}) {
+}, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery, diagnosticFlow = 'chat' } = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
   const selectedModel = normalizeOllamaModelName(model)
-  if (!base) return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_INVALID_URL' })
-  if (!selectedModel) return createAIErrorResult({ provider: 'ollama', code: 'OLLAMA_MODEL_REQUIRED' })
+  const diagnostic = createDiagnostic(diagnosticFlow, base || ollamaUrl, '/api/chat')
+  if (!base) {
+    return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_INVALID_URL' }), diagnosticFlow, {
+      ...diagnostic,
+      failureStep: 'url-validation',
+    })
+  }
+  if (!selectedModel) {
+    return completeRequest(createAIErrorResult({ provider: 'ollama', code: 'OLLAMA_MODEL_REQUIRED' }), diagnosticFlow, {
+      ...diagnostic,
+      failureStep: 'model-selection',
+    })
+  }
   const fullMessages = system ? [{ role: 'system', content: system }, ...(messages || [])] : messages || []
   const bridge = resolveElectronBridge(electronBridge)
 
@@ -159,25 +281,49 @@ export async function requestOllama({
     if (bridge?.isElectron) {
       const response = await bridge.ollama.chat({ url: base, model: selectedModel, messages: fullMessages, max: maxTokens, temperature })
       if (!response?.ok) {
-        return createAIErrorResult({
+        return completeRequest(createAIErrorResult({
           provider: 'ollama',
           model: selectedModel,
           code: response?.status === 404 ? 'OLLAMA_MODEL_UNAVAILABLE' : 'OLLAMA_UNAVAILABLE',
+        }), diagnosticFlow, {
+          ...diagnostic,
+          requestStarted: true,
+          responseReceived: Boolean(response),
+          httpStatus: Number.isFinite(response?.status) ? response.status : null,
+          jsonParsed: Boolean(response?.data),
+          permissionState: 'electron-bridge',
+          failureStep: 'electron-response',
         })
       }
-      return createAIResult({
+      return completeRequest(createAIResult({
         provider: 'ollama',
         model: selectedModel,
         text: response.data?.message?.content || '',
         usage: response.data?.eval_count ? { outputTokens: response.data.eval_count } : null,
         finishReason: response.data?.done_reason,
+      }), diagnosticFlow, {
+        ...diagnostic,
+        requestStarted: true,
+        responseReceived: true,
+        jsonParsed: true,
+        permissionState: 'electron-bridge',
       })
     }
 
-    if (typeof fetchImpl !== 'function') return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_UNAVAILABLE' })
+    if (typeof fetchImpl !== 'function') {
+      return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_UNAVAILABLE' }), diagnosticFlow, {
+        ...diagnostic,
+        failureStep: 'fetch-unavailable',
+      })
+    }
     const permissionState = await getLoopbackPermissionState(permissionQuery)
     if (permissionState === 'denied') {
-      return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_BROWSER_ACCESS_DENIED' })
+      return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_BROWSER_ACCESS_DENIED' }), diagnosticFlow, {
+        ...diagnostic,
+        browserBlockedBeforeResponse: true,
+        permissionState,
+        failureStep: 'local-network-permission',
+      })
     }
     const response = await fetchImpl(base + '/api/chat', localOllamaFetchOptions({
       method: 'POST',
@@ -190,16 +336,36 @@ export async function requestOllama({
       }),
       signal: timeoutSignal(OLLAMA_CHAT_TIMEOUT_MS),
     }))
-    const data = await response.json().catch(() => null)
+    const responseDiagnostic = {
+      ...diagnostic,
+      requestStarted: true,
+      responseReceived: true,
+      httpStatus: Number.isFinite(response?.status) ? response.status : null,
+      permissionState: permissionState || 'not-supported',
+    }
+    let data
+    try {
+      data = await response.json()
+    } catch {
+      return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'MALFORMED_RESPONSE' }), diagnosticFlow, {
+        ...responseDiagnostic,
+        jsonParsed: false,
+        failureStep: 'json-parse',
+      })
+    }
     if (!response.ok) {
-      return createAIErrorResult({
+      return completeRequest(createAIErrorResult({
         provider: 'ollama',
         model: selectedModel,
         status: response.status,
         code: response.status === 404 ? 'OLLAMA_MODEL_UNAVAILABLE' : response.status === 429 ? 'RATE_LIMITED' : 'OLLAMA_UNAVAILABLE',
+      }), diagnosticFlow, {
+        ...responseDiagnostic,
+        jsonParsed: true,
+        failureStep: 'http-response',
       })
     }
-    return createAIResult({
+    return completeRequest(createAIResult({
       provider: 'ollama',
       model: selectedModel,
       // `/api/chat` returns message.content. `response` is retained as a
@@ -207,12 +373,22 @@ export async function requestOllama({
       text: typeof data?.message?.content === 'string' ? data.message.content : data?.response || '',
       usage: data?.eval_count ? { outputTokens: data.eval_count } : null,
       finishReason: data?.done_reason,
+    }), diagnosticFlow, {
+      ...responseDiagnostic,
+      jsonParsed: true,
     })
   } catch (error) {
-    return createAIErrorResult({
+    const permissionState = await getLoopbackPermissionState(permissionQuery)
+    return completeRequest(createAIErrorResult({
       provider: 'ollama',
       model: selectedModel,
-      code: localRequestFailureCode(error, await getLoopbackPermissionState(permissionQuery)),
+      code: localRequestFailureCode(error, permissionState),
+    }), diagnosticFlow, {
+      ...diagnostic,
+      requestStarted: true,
+      browserBlockedBeforeResponse: true,
+      permissionState: permissionState || 'not-supported',
+      failureStep: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'fetch-before-response',
     })
   }
 }

@@ -6,6 +6,7 @@ export async function routeAIRequest(input, {
   fetchImpl = globalThis.fetch,
   electronBridge,
   permissionQuery,
+  diagnosticFlow,
   accessToken,
 } = {}) {
   const normalized = normalizeAIRequest(input, {
@@ -25,7 +26,7 @@ export async function routeAIRequest(input, {
 
   const request = normalized.value
   if (request.provider === 'ollama') {
-    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery })
+    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow })
   }
 
   if (typeof fetchImpl !== 'function') {
