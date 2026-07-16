@@ -1,6 +1,14 @@
-export const LIVE_CALL_TURN_DELAY_MS = 950
+// A browser final result already represents a meaningful pause. Keep only a
+// short guard window so FounderLab feels responsive without sending a phrase
+// while the caller is still correcting a very short fragment.
+export const LIVE_CALL_TURN_DELAY_MS = 500
+export const LIVE_CALL_SHORT_TURN_DELAY_MS = 800
 export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
+export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 6
+export const LIVE_CALL_TURN_CONTEXT_LIMIT = 8
+export const LIVE_CALL_CONTEXT_CHARACTER_LIMIT = 9000
+export const LIVE_CALL_MAX_OUTPUT_TOKENS = 160
 
 /**
  * A Live Call is a focused state machine, separate from text-chat composing.
@@ -36,7 +44,7 @@ export const LIVE_CALL_COPY = Object.freeze({
   connecting: Object.freeze({ title: 'Connecting', detail: 'Preparing your microphone.' }),
   ready: Object.freeze({ title: 'Ready', detail: 'Your live call is ready when you are.' }),
   listening: Object.freeze({ title: 'Listening', detail: 'Speak naturally. FounderLab will take the next turn after a short pause.' }),
-  thinking: Object.freeze({ title: 'Thinking', detail: 'Putting together a concise answer.' }),
+  thinking: Object.freeze({ title: 'Thinking', detail: 'I’ve got that — shaping a focused answer.' }),
   speaking: Object.freeze({ title: 'Responding', detail: 'Speak to interrupt, or stop the response at any time.' }),
   interrupted: Object.freeze({ title: 'I’m listening', detail: 'FounderLab paused so you can continue.' }),
   muted: Object.freeze({ title: 'Mic muted', detail: 'Unmute when you are ready to continue.' }),
@@ -68,6 +76,20 @@ export function shouldQueueLiveCallTurn({ active = false, muted = false, isFinal
   return active === true && muted !== true && isFinal === true && typeof transcript === 'string' && transcript.trim().length > 0
 }
 
+/**
+ * Final speech results arrive after the browser has already detected a pause.
+ * Substantive turns can therefore move quickly; a tiny unfinished fragment
+ * gets a little more room for a natural correction.
+ */
+export function getLiveCallTurnDelay(transcript = '') {
+  const text = typeof transcript === 'string' ? transcript.trim() : ''
+  const wordCount = text ? text.split(/\s+/).length : 0
+  const soundsComplete = /[.!?…]$/.test(text)
+  return wordCount <= 2 && !soundsComplete
+    ? LIVE_CALL_SHORT_TURN_DELAY_MS
+    : LIVE_CALL_TURN_DELAY_MS
+}
+
 export function getLiveCallCopy(phase) {
   return LIVE_CALL_COPY[phase] || LIVE_CALL_COPY.error
 }
@@ -80,6 +102,44 @@ export function canInterruptLiveCall({ active = false, muted = false, phase = ''
 /** The call UI needs a compact caption, never a duplicate message thread. */
 export function getLiveCallTranscriptPreview(value) {
   return truncateLiveCallText(value, 140)
+}
+
+function normalizeLiveCallContextMessage(message) {
+  if (!message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string') return null
+  const content = message.content.trim()
+  if (!content) return null
+  return {
+    role: message.role,
+    content: content.length > 3000 ? `${content.slice(0, 2999).trim()}…` : content,
+    ...(message.role === 'user' && message.source === 'voice' ? { source: 'voice' } : {}),
+  }
+}
+
+/**
+ * Live Call needs continuity, not an ever-growing text-chat payload. Bound
+ * historical context keeps provider work and first-word latency predictable
+ * while retaining the current call’s most recent exchanges.
+ */
+export function buildLiveCallRequestContext(conversationMessages = [], liveTurns = []) {
+  const history = (Array.isArray(conversationMessages) ? conversationMessages : [])
+    .slice(-LIVE_CALL_HISTORY_MESSAGE_LIMIT)
+    .map(normalizeLiveCallContextMessage)
+    .filter(Boolean)
+  const callTurns = (Array.isArray(liveTurns) ? liveTurns : [])
+    .slice(-LIVE_CALL_TURN_CONTEXT_LIMIT)
+    .map(normalizeLiveCallContextMessage)
+    .filter(Boolean)
+  const candidates = [...history, ...callTurns]
+  const kept = []
+  let characters = 0
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const message = candidates[index]
+    // Always retain the newest turn; older context yields first.
+    if (kept.length && characters + message.content.length > LIVE_CALL_CONTEXT_CHARACTER_LIMIT) continue
+    kept.unshift(message)
+    characters += message.content.length
+  }
+  return kept
 }
 
 export function truncateLiveCallText(value, limit = LIVE_CALL_MAX_SPOKEN_LENGTH) {

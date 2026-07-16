@@ -38,8 +38,8 @@ import {
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
-import { canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
-import { createLiveCallResponsePlan, createVoiceResponsePlan } from './voiceResponseUtils'
+import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, LIVE_CALL_MAX_OUTPUT_TOKENS, shouldQueueLiveCallTurn } from './liveCallUtils'
+import { createLiveCallResponsePlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
 
 function uniqueMessageId() {
@@ -367,7 +367,7 @@ export function ChatWorkspace({ user }) {
       stopTTS()
       setActiveTTS(null)
       setLiveCallPhase('interrupted', { transcript, note: '', error: '' })
-      if (isFinal) queueLiveCallTurn()
+      if (isFinal) queueLiveCallTurn(transcript)
       return
     }
 
@@ -375,7 +375,7 @@ export function ChatWorkspace({ user }) {
     call.transcript = transcript
     setLiveCallPhase('listening', { transcript, error: '' })
     if (shouldQueueLiveCallTurn({ active: call.active, muted: call.muted, isFinal, transcript })) {
-      queueLiveCallTurn()
+      queueLiveCallTurn(transcript)
     } else if (!isFinal) {
       // New interim speech means the caller is still talking, so do not send a
       // previously finalised fragment halfway through their thought.
@@ -447,12 +447,12 @@ export function ChatWorkspace({ user }) {
     return beginLiveCallListening({ connecting: true })
   }
 
-  function queueLiveCallTurn() {
+  function queueLiveCallTurn(transcript) {
     clearLiveCallTurnTimer()
     liveCallRef.current.turnTimer = setTimeout(() => {
       liveCallRef.current.turnTimer = null
       sendLiveCallTurn()
-    }, LIVE_CALL_TURN_DELAY_MS)
+    }, getLiveCallTurnDelay(transcript || liveCallRef.current.transcript))
   }
 
   async function beginLiveCallInterruptionMonitor(turn) {
@@ -760,16 +760,13 @@ export function ChatWorkspace({ user }) {
     setSending(true)
     setErrorState(null)
 
-    const callMessages = [
-      ...(Array.isArray(conversationMessages) ? conversationMessages : []),
-      ...(Array.isArray(liveTurns) ? liveTurns : []),
-    ]
+    const callMessages = buildLiveCallRequestContext(conversationMessages, liveTurns)
     const result = await requestAIResult({
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(callMessages, providerId),
       system: getLiveCallSystemPrompt(getChatRequestContext(callMessages)),
-      maxTokens: 240,
+      maxTokens: LIVE_CALL_MAX_OUTPUT_TOKENS,
       localOllamaAllowed: true,
     }, { signal: controller.signal })
 
@@ -790,7 +787,7 @@ export function ChatWorkspace({ user }) {
       message: {
         id: uniqueMessageId(),
         role: 'assistant',
-        content: result.text,
+        content: normalizeLiveCallResponseText(result.text),
         provider: result.provider || providerId,
         model: result.model || modelId,
         ts: ts(),

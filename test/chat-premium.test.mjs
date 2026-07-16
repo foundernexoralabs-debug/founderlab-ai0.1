@@ -17,15 +17,24 @@ import {
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
-import { createLiveCallResponsePlan, createVoiceResponsePlan, MAX_LIVE_CALL_SPEECH_LENGTH } from '../src/features/chat/voiceResponseUtils.js'
 import {
+  createLiveCallResponsePlan,
+  createVoiceResponsePlan,
+  MAX_LIVE_CALL_SPEECH_LENGTH,
+  normalizeLiveCallResponseText,
+} from '../src/features/chat/voiceResponseUtils.js'
+import {
+  buildLiveCallRequestContext,
   canInterruptLiveCall,
   createLiveCallRecap,
   EMPTY_LIVE_CALL,
   getLiveCallCopy,
   getLiveCallProviderSupport,
   getLiveCallTranscriptPreview,
+  getLiveCallTurnDelay,
+  LIVE_CALL_MAX_OUTPUT_TOKENS,
   LIVE_CALL_PHASES,
+  LIVE_CALL_SHORT_TURN_DELAY_MS,
   LIVE_CALL_TURN_DELAY_MS,
   shouldQueueLiveCallTurn,
   truncateLiveCallText,
@@ -320,7 +329,9 @@ test('Voice sessions keep short answers conversational while preserving dense de
 
 test('Live Call uses one bounded turn model and accurately describes local and cloud provider support', () => {
   assert.equal(EMPTY_LIVE_CALL.phase, 'idle')
-  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 700 && LIVE_CALL_TURN_DELAY_MS <= 1500, true)
+  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 400 && LIVE_CALL_TURN_DELAY_MS <= 650, true)
+  assert.equal(getLiveCallTurnDelay('Help me shape the launch message.'), LIVE_CALL_TURN_DELAY_MS)
+  assert.equal(getLiveCallTurnDelay('Hmm'), LIVE_CALL_SHORT_TURN_DELAY_MS)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: 'Help me plan a launch.' }), true)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: true, isFinal: true, transcript: 'Do not send.' }), false)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: false, transcript: 'Still speaking' }), false)
@@ -370,13 +381,34 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   const longPlan = createLiveCallResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test a sharper headline\n- Measure conversion\n\nUse this detail to plan the rest of the week. '.repeat(8))
   assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
   assert.equal(longPlan.mode, 'call-summary')
-  assert.match(longPlan.spokenText, /after the call/i)
+  assert.doesNotMatch(longPlan.spokenText, /after the call/i)
+  assert.match(longPlan.spokenText, /next useful step now/i)
+  assert.equal(normalizeLiveCallResponseText('We can expand after the call.'), 'We can expand now.')
 
   const simpleAnswer = createLiveCallResponsePlan('Start with the audience that already feels the problem most sharply.')
   assert.equal(simpleAnswer.mode, 'call-conversational')
   assert.match(simpleAnswer.spokenText, /audience/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
-  assert.match(getLiveCallSystemPrompt(), /one to three short sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /two to four concise sentences/i)
+})
+
+test('Live Call bounds context for faster turns without dropping the newest spoken request', () => {
+  const history = Array.from({ length: 10 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    content: `Saved context ${index}`,
+  }))
+  const liveTurns = Array.from({ length: 10 }, (_, index) => ({
+    role: index === 9 ? 'user' : index % 2 ? 'assistant' : 'user',
+    content: index === 9 ? 'The newest live request must remain available.' : `Live turn ${index}`,
+    ...(index === 9 ? { source: 'voice' } : {}),
+  }))
+  const context = buildLiveCallRequestContext(history, liveTurns)
+  assert.equal(context.length <= 14, true)
+  assert.equal(context.some((message) => message.content === 'Saved context 0'), false)
+  assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
+  assert.equal(context.at(-1)?.source, 'voice')
+  assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 9000, true)
+  assert.equal(LIVE_CALL_MAX_OUTPUT_TOKENS, 160)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -518,7 +550,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(liveCallUtilsSource, /shouldQueueLiveCallTurn/)
   assert.match(liveCallUtilsSource, /canInterruptLiveCall/)
   assert.match(workspaceSource, /beginLiveCallInterruptionMonitor/)
-  assert.match(workspaceSource, /maxTokens: 240/)
+  assert.match(workspaceSource, /LIVE_CALL_MAX_OUTPUT_TOKENS/)
+  assert.match(workspaceSource, /buildLiveCallRequestContext/)
   assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)

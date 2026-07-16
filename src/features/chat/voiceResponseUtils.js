@@ -3,6 +3,14 @@ import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTex
 const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
 export const MAX_LIVE_CALL_SPEECH_LENGTH = 280
 
+/** Keep the active call in the present instead of deferring useful help. */
+export function normalizeLiveCallResponseText(value = '') {
+  return String(value || '')
+    .replace(/\b(?:after|once|when)\s+(?:this\s+|the\s+)?call\s+(?:ends|is over|is finished)\b/gi, 'now')
+    .replace(/\bafter\s+(?:this\s+|the\s+)?call\b/gi, 'now')
+    .trim()
+}
+
 function shortenAtSentence(text, limit = MAX_CONVERSATIONAL_SPEECH_LENGTH) {
   if (text.length <= limit) return text
   const clipped = text.slice(0, limit + 1)
@@ -78,7 +86,7 @@ export function createVoiceResponsePlan(content = '') {
  * plan protects the caller from an essay being read back to them.
  */
 export function createLiveCallResponsePlan(content = '') {
-  const source = typeof content === 'string' ? content.trim() : ''
+  const source = normalizeLiveCallResponseText(content)
   if (!source) return { spokenText: '', mode: 'none', note: '' }
 
   const profile = getSpeechContentProfile(source)
@@ -86,14 +94,14 @@ export function createLiveCallResponsePlan(content = '') {
   const spokenBase = cleanTextForSpeech(withoutCode)
   if (!spokenBase) {
     return {
-      spokenText: 'I have the technical detail ready. I can walk you through it after the call.',
+      spokenText: 'I have the technical detail ready. I can walk you through the key change now.',
       mode: 'call-summary',
       note: 'A concise call summary is playing.',
     }
   }
 
   const needsSummary = profile.hasCode || profile.hasStructuredContent || profile.hasReferences || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
-  const suffix = needsSummary ? ' I can expand on that after the call.' : ''
+  const suffix = needsSummary ? ' I can walk through the next useful step now.' : ''
   const limit = Math.max(150, MAX_LIVE_CALL_SPEECH_LENGTH - suffix.length)
   const overview = profile.hasStructuredContent
     ? createStructuredOverview(source, spokenBase, limit)
