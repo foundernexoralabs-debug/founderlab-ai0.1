@@ -1,18 +1,20 @@
-import { DEFAULT_VOICE_CONFIG } from '@/lib/voiceService'
+import { DEFAULT_VOICE_PREFERENCE, normalizeVoiceConfig } from '@/lib/voicePreferencesUtils'
 
 const VOICE_STORAGE_KEY = 'fl_voice_config'
 
+export { normalizeVoiceConfig }
+
 export function getVoiceConfig() {
   try {
-    return { ...DEFAULT_VOICE_CONFIG, ...JSON.parse(localStorage.getItem(VOICE_STORAGE_KEY) || '{}') }
+    return normalizeVoiceConfig({ ...DEFAULT_VOICE_PREFERENCE, ...JSON.parse(localStorage.getItem(VOICE_STORAGE_KEY) || '{}') })
   } catch {
-    return { ...DEFAULT_VOICE_CONFIG }
+    return normalizeVoiceConfig(DEFAULT_VOICE_PREFERENCE)
   }
 }
 
 export function persistVoiceConfig(config) {
   try {
-    localStorage.setItem(VOICE_STORAGE_KEY, JSON.stringify(config))
+    localStorage.setItem(VOICE_STORAGE_KEY, JSON.stringify(normalizeVoiceConfig(config)))
   } catch {
     // Voice preferences are optional; the in-memory configuration still works.
   }

@@ -10,6 +10,7 @@ import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } 
 import { ChatComposer } from './ChatComposer'
 import { ChatHistory } from './ChatHistory'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
+import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
 import {
   CHAT_STARTER_PROMPTS,
   CHAT_SYSTEM_PROMPT,
@@ -33,7 +34,7 @@ export function ChatWorkspace({ user }) {
   const [sending, setSending] = useState(false)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [historyOpen, setHistoryOpen] = useState(true)
+  const [historyOpen, setHistoryOpen] = useState(() => getChatUIPreferences().historyOpen)
   const [renamingId, setRenamingId] = useState(null)
   const [renameValue, setRenameValue] = useState('')
   const [editingMessageId, setEditingMessageId] = useState(null)
@@ -47,8 +48,8 @@ export function ChatWorkspace({ user }) {
   const requestSequenceRef = useRef(0)
   const messageEndRef = useRef(null)
 
-  const { listening, transcript, setTranscript, start: startRecognition, stop: stopRecognition } = useSpeechRecognition()
-  const { speak, stop: stopTTS, elAvailable } = useTextToSpeech(voiceConfig)
+  const { listening, transcript, setTranscript, voiceInputState, start: startRecognition, stop: stopRecognition } = useSpeechRecognition()
+  const { speaking, speak, stop: stopTTS, activeProvider: activeVoiceProvider, elAvailable } = useTextToSpeech(voiceConfig)
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) || null
   const messages = activeConversation?.messages || []
   const selectedProvider = useMemo(() => {
@@ -98,6 +99,13 @@ export function ChatWorkspace({ user }) {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false)
   }, [])
 
+  function changeHistoryOpen(next) {
+    setHistoryOpen(next)
+    if (typeof window === 'undefined' || !window.matchMedia('(max-width: 760px)').matches) {
+      persistChatUIPreferences({ historyOpen: next })
+    }
+  }
+
   useEffect(() => () => {
     clearTimeout(saveTimerRef.current)
     requestAbortRef.current?.abort()
@@ -130,13 +138,13 @@ export function ChatWorkspace({ user }) {
     setPendingImage(null)
     setEditingMessageId(null)
     setErrorState(null)
-    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false)
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) changeHistoryOpen(false)
   }
 
   function selectConversation(conversationId) {
     setActiveId(conversationId)
     setEditingMessageId(null)
-    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false)
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) changeHistoryOpen(false)
   }
 
   function beginEdit(message) {
@@ -342,7 +350,7 @@ export function ChatWorkspace({ user }) {
       return
     }
     setActiveTTS(message.id)
-    Promise.resolve(speak(message.content)).finally(() => setActiveTTS(null))
+    Promise.resolve(speak(message.content)).finally(() => setActiveTTS((current) => current === message.id ? null : current))
   }
 
   function changeVoiceConfig(change) {
@@ -356,7 +364,7 @@ export function ChatWorkspace({ user }) {
 
   return (
     <div className="fl-chat-shell" style={{ background: C.bg }}>
-      {historyOpen && <button type="button" className="fl-chat-mobile-backdrop" aria-label="Close chat history" onClick={() => setHistoryOpen(false)} />}
+      {historyOpen && <button type="button" className="fl-chat-mobile-backdrop" aria-label="Close chat history" onClick={() => changeHistoryOpen(false)} />}
       <ChatHistory
         conversations={conversations}
         activeId={activeId}
@@ -378,7 +386,7 @@ export function ChatWorkspace({ user }) {
 
       <main className="fl-chat-main" aria-label="FounderLab Chat">
         <header style={{ minHeight: 57, display: 'flex', alignItems: 'center', gap: 10, padding: '11px 20px', borderBottom: `1px solid ${C.border}`, background: `${C.bg}dd`, backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', flexShrink: 0, zIndex: 2 }}>
-          <button type="button" onClick={() => setHistoryOpen((open) => !open)} aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'} aria-expanded={historyOpen} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.t2, cursor: 'pointer', borderRadius: 8, padding: '5px 7px', fontSize: 14, lineHeight: 1 }}>☰</button>
+          <button type="button" onClick={() => changeHistoryOpen(!historyOpen)} aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'} aria-expanded={historyOpen} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.t2, cursor: 'pointer', borderRadius: 8, padding: '5px 7px', fontSize: 14, lineHeight: 1 }}>☰</button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: C.t1, fontSize: 14, fontWeight: 680 }}>{activeConversation?.title || 'FounderLab Chat'}</div>
             {activeConversation && <div style={{ color: C.t3, fontSize: 10.5, marginTop: 2 }}>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
@@ -386,6 +394,14 @@ export function ChatWorkspace({ user }) {
           {activeConversation?.messages.length > 0 && <button type="button" onClick={clearConversation} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.t2, cursor: 'pointer', borderRadius: 8, padding: '5px 8px', fontSize: 11, fontFamily: 'inherit' }}>Clear</button>}
           {elAvailable === true && <span title="Premium voice is available" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 7px', borderRadius: 99, background: C.greenM, border: '1px solid rgba(16,185,129,.22)', color: C.green, fontSize: 10, fontWeight: 700 }}>● Voice</span>}
         </header>
+
+        {activeTTS && speaking && (
+          <div className="fl-chat-playback-dock" role="status" aria-live="polite">
+            <span aria-hidden="true" className="fl-chat-playback-wave">◌</span>
+            <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'Browser voice' : 'Starting playback'}</span>
+            <button type="button" onClick={() => { stopTTS(); setActiveTTS(null) }}>Stop</button>
+          </div>
+        )}
 
         {!activeId ? (
           <section style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'grid', placeItems: 'center', padding: 28 }} aria-labelledby="chat-welcome-title">
@@ -411,7 +427,7 @@ export function ChatWorkspace({ user }) {
             </div>
           </>
         )}
-        <ChatComposer input={input} onInput={setInput} onSend={send} sending={sending} onStop={stopGenerating} pendingImage={pendingImage} onPendingImage={setPendingImage} listening={listening} onMic={() => listening ? stopRecognition() : startRecognition((text) => setInput(text))} provider={selectedProvider} editing={Boolean(editingMessageId)} onCancelEdit={cancelEdit} onOpenProviders={() => flNavigate('settings')} />
+        <ChatComposer input={input} onInput={setInput} onSend={send} sending={sending} onStop={stopGenerating} pendingImage={pendingImage} onPendingImage={setPendingImage} listening={listening} voiceInputState={voiceInputState} onMic={() => ['listening', 'resuming'].includes(voiceInputState) ? stopRecognition() : startRecognition(undefined, { initialTranscript: input })} provider={selectedProvider} editing={Boolean(editingMessageId)} onCancelEdit={cancelEdit} onOpenProviders={() => flNavigate('settings')} />
       </main>
     </div>
   )

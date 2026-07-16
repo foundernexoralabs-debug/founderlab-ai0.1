@@ -1,5 +1,6 @@
 // Voice configuration types and constants
 import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
+import { DEFAULT_VOICE_PREFERENCE } from '@/lib/voicePreferencesUtils'
 
 export const BROWSER_VOICES = {
   male:   ['Microsoft Ryan Online (Natural) - English (United Kingdom)', 'Microsoft Ryan - English (United Kingdom)', 'Google UK English Male', 'Daniel', 'Arthur'],
@@ -23,9 +24,7 @@ export interface VoiceConfig {
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
-  provider: 'browser',
-  gender:   'male',
-  speed:    0,
+  ...DEFAULT_VOICE_PREFERENCE,
 }
 
 export function pickBrowserVoice(gender: Gender, voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {

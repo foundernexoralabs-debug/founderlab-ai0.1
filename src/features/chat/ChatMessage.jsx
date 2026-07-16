@@ -23,7 +23,7 @@ function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 10, color: C.t3, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>Voice</span>
         {[
-          { id: 'elevenlabs', label: 'ElevenLabs', available: elevenLabsAvailable !== false },
+          { id: 'elevenlabs', label: elevenLabsAvailable === true ? 'ElevenLabs' : 'ElevenLabs unavailable', available: elevenLabsAvailable === true },
           { id: 'browser', label: 'Browser', available: true },
         ].map((voice) => (
           <button key={voice.id} type="button" disabled={!voice.available} onClick={() => onVoiceChange({ provider: voice.id })} style={{
@@ -80,31 +80,31 @@ export function ChatMessage({
   }
 
   return (
-    <article className="fl-chat-message" aria-label={assistant ? 'FounderLab response' : 'Your message'}>
-      <div aria-hidden="true" style={{
-        width: 32, height: 32, flex: '0 0 32px', borderRadius: 10, display: 'grid', placeItems: 'center',
-        color: '#fff', fontSize: assistant ? 13 : 12, fontWeight: assistant ? 500 : 700,
-        background: assistant ? `linear-gradient(135deg, ${C.accent}, #a855f7)` : 'linear-gradient(135deg, #64748b, #475569)',
-        boxShadow: assistant ? '0 3px 12px rgba(99,102,241,.3)' : 'none',
-      }}>{assistant ? '✦' : (user?.email?.[0]?.toUpperCase() || 'U')}</div>
+    <article className={`fl-chat-message ${assistant ? 'is-assistant' : 'is-user'}`} aria-label={assistant ? 'FounderLab response' : 'Your message'}>
+      <div aria-hidden="true" className="fl-chat-avatar" style={{
+        color: '#fff', fontSize: assistant ? 14 : 11, fontWeight: assistant ? 500 : 750,
+        background: assistant ? `linear-gradient(135deg, ${C.accent}, #a855f7)` : 'linear-gradient(135deg, #1f2937, #475569)',
+      }}>{assistant ? '✦' : (user?.email?.split('@')[0]?.split(/[._-]/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'U')}</div>
 
-      <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minHeight: 18, marginBottom: 5, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.055em', textTransform: 'uppercase', color: assistant ? C.t2 : C.t3 }}>{assistant ? 'FounderLab' : 'You'}</span>
-          {assistant && message.provider && (
-            <span title={`${provider.name} · ${provider.model}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 7px', borderRadius: 99, background: provider.local ? 'rgba(16,185,129,.1)' : C.accentM, border: `1px solid ${provider.local ? 'rgba(16,185,129,.22)' : C.borderFocus}`, color: provider.local ? C.green : C.accent, fontSize: 10, fontWeight: 650 }}>
-              {provider.local ? 'Local' : 'Cloud'} · {provider.name.replace('Local ', '')}
-            </span>
-          )}
-          {time && <time style={{ color: C.t3, fontSize: 10 }}>{time}</time>}
+      <div className="fl-chat-message-body">
+        <div className="fl-chat-message-card">
+          <div className="fl-chat-message-meta">
+            <span style={{ fontSize: 10.5, fontWeight: 750, letterSpacing: '.06em', textTransform: 'uppercase', color: assistant ? C.t2 : '#c7d2fe' }}>{assistant ? 'FounderLab' : 'You'}</span>
+            {assistant && message.provider && (
+              <span title={`${provider.name} · ${provider.model}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 7px', borderRadius: 99, background: provider.local ? 'rgba(16,185,129,.1)' : C.accentM, border: `1px solid ${provider.local ? 'rgba(16,185,129,.22)' : C.borderFocus}`, color: provider.local ? C.green : C.accent, fontSize: 10, fontWeight: 650 }}>
+                {provider.local ? 'Local' : 'Cloud'} · {provider.name.replace('Local ', '')}
+              </span>
+            )}
+            {time && <time style={{ color: assistant ? C.t3 : 'rgba(224,231,255,.62)', fontSize: 10 }}>{time}</time>}
+          </div>
+
+          {message.image && <img src={message.image} alt={assistant ? 'Referenced attachment' : 'Attached by you'} style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 11, display: 'block', objectFit: 'cover', border: `1px solid ${C.border}`, marginBottom: 10 }} />}
+          <div className="fl-chat-message-content">
+            {assistant ? renderMsg(message.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>}
+          </div>
         </div>
 
-        {message.image && <img src={message.image} alt="Attached by you" style={{ maxWidth: 320, maxHeight: 240, borderRadius: 12, display: 'block', objectFit: 'cover', border: `1px solid ${C.border}`, marginBottom: 9 }} />}
-        <div style={{ maxWidth: assistant ? 790 : 680, color: C.t1, fontSize: 15, lineHeight: 1.68 }}>
-          {assistant ? renderMsg(message.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>}
-        </div>
-
-        <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 9, flexWrap: 'wrap' }}>
+        <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 7, flexWrap: 'wrap' }}>
           <ActionButton label="Copy" icon="⧉" onClick={() => onCopy(message.content)} />
           {assistant ? <>
             <ActionButton label={ttsActive ? 'Stop reading' : 'Read aloud'} icon={ttsActive ? '■' : '◖'} active={ttsActive} onClick={() => onReadAloud(message)} />
@@ -126,9 +126,9 @@ export function ChatMessage({
 
 export function ChatTypingIndicator({ provider, onStop }) {
   return (
-    <div className="fl-chat-message" aria-live="polite" aria-label={`${provider.name} is responding`}>
-      <div aria-hidden="true" style={{ width: 32, height: 32, flex: '0 0 32px', borderRadius: 10, display: 'grid', placeItems: 'center', color: '#fff', fontSize: 13, background: `linear-gradient(135deg, ${C.accent}, #a855f7)` }}>✦</div>
-      <div style={{ paddingTop: 2 }}>
+    <div className="fl-chat-message is-assistant" aria-live="polite" aria-label={`${provider.name} is responding`}>
+      <div aria-hidden="true" className="fl-chat-avatar" style={{ color: '#fff', fontSize: 13, background: `linear-gradient(135deg, ${C.accent}, #a855f7)` }}>✦</div>
+      <div className="fl-chat-message-body" style={{ paddingTop: 2 }}>
         <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.055em', textTransform: 'uppercase', color: C.t2, marginBottom: 8 }}>FounderLab · {provider.local ? 'Local Ollama' : provider.name}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div aria-hidden="true" style={{ display: 'flex', alignItems: 'center', gap: 5, height: 16 }}>

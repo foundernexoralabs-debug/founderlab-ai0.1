@@ -4,6 +4,14 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
+import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
+import { normalizeVoiceConfig } from '../src/lib/voicePreferencesUtils.js'
+import {
+  appendVoiceTranscript,
+  shouldResumeVoiceInput,
+  VOICE_INPUT_RESTART_DELAY_MS,
+  voiceInputStatusCopy,
+} from '../src/hooks/speechRecognitionUtils.js'
 import {
   CHAT_STARTER_PROMPTS,
   createConversation,
@@ -113,10 +121,44 @@ test('Chat cancellation signal reaches the normalized protected cloud request pa
   assert.equal(result.text, 'Plan')
 })
 
+test('Voice input preserves a draft across brief pauses and only stops for explicit or meaningful failures', () => {
+  assert.equal(appendVoiceTranscript('A typed opening', 'and a dictated follow-up'), 'A typed opening and a dictated follow-up')
+  assert.equal(appendVoiceTranscript('First sentence.', 'Second sentence'), 'First sentence. Second sentence')
+  assert.equal(shouldResumeVoiceInput({ desired: true, error: 'no-speech' }), true)
+  assert.equal(shouldResumeVoiceInput({ desired: true, error: '' }), true)
+  assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
+  assert.equal(shouldResumeVoiceInput({ desired: true, error: 'not-allowed' }), false)
+  assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 500, true)
+  assert.match(voiceInputStatusCopy('listening'), /brief pauses/i)
+  assert.match(voiceInputStatusCopy('resuming'), /still listening/i)
+})
+
+test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
+  const storage = new Map()
+  const browserStorage = { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, String(value)) }
+  assert.deepEqual(getChatUIPreferences(browserStorage), { historyOpen: true })
+  assert.equal(persistChatUIPreferences({ historyOpen: false }, browserStorage), true)
+  assert.deepEqual(getChatUIPreferences(browserStorage), { historyOpen: false })
+  storage.set('fl_chat_ui_preferences', '{bad json')
+  assert.deepEqual(getChatUIPreferences(browserStorage), { historyOpen: true })
+})
+
+test('Voice preferences persist only safe, predictable playback choices', () => {
+  assert.deepEqual(normalizeVoiceConfig({ provider: 'elevenlabs', gender: 'female', speed: 24.7 }), {
+    provider: 'elevenlabs', gender: 'female', speed: 25,
+  })
+  assert.deepEqual(normalizeVoiceConfig({ provider: 'unknown', gender: 'other', speed: 999 }), {
+    provider: 'browser', gender: 'male', speed: 50,
+  })
+  assert.deepEqual(normalizeVoiceConfig(null), { provider: 'browser', gender: 'male', speed: 0 })
+})
+
 test('Chat feature modules preserve local routing, cancellable requests, and responsive history behavior', () => {
   const workspaceSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatWorkspace.jsx'), 'utf8')
   const css = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatPremium.css'), 'utf8')
   const composerSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatComposer.jsx'), 'utf8')
+  const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
+  const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
   assert.match(workspaceSource, /signal: controller\.signal/)
   assert.match(workspaceSource, /getChatErrorPresentation/)
@@ -124,6 +166,19 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
+  assert.match(composerSource, /brief pauses are okay/i)
+  assert.match(composerSource, /Finish voice input/)
+  assert.match(composerSource, /Retry voice input/)
+  assert.match(workspaceSource, /fl-chat-playback-dock/)
+  assert.match(css, /fl-chat-message\.is-user/)
+  assert.match(css, /justify-content: flex-end/)
+  assert.match(css, /fl-chat-message-card/)
+  assert.match(recognitionSource, /recognition\.continuous = true/)
+  assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
+  assert.match(speechSource, /let activeAudio/)
+  assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)
+  assert.match(speechSource, /let playbackGeneration = 0/)
+  assert.match(speechSource, /generation !== playbackGeneration/)
   assert.match(css, /@media \(max-width: 760px\)/)
   assert.match(css, /fl-chat-history\.is-closed/)
 })

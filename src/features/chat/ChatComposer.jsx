@@ -15,6 +15,7 @@ export function ChatComposer({
   pendingImage,
   onPendingImage,
   listening,
+  voiceInputState = 'idle',
   onMic,
   provider,
   editing,
@@ -24,6 +25,15 @@ export function ChatComposer({
   const fileRef = useRef(null)
   const textRef = useRef(null)
   const canSend = Boolean(input.trim() || pendingImage) && !sending
+  const recording = ['listening', 'resuming'].includes(voiceInputState)
+  const voiceError = voiceInputState === 'error'
+  const voiceStatus = voiceInputState === 'listening'
+    ? 'Listening — brief pauses are okay.'
+    : voiceInputState === 'resuming'
+      ? 'Still listening — ready when you are.'
+      : voiceInputState === 'error'
+        ? 'Voice input stopped. Your draft is still here.'
+        : ''
 
   useEffect(() => {
     const textarea = textRef.current
@@ -59,10 +69,17 @@ export function ChatComposer({
             <button type="button" onClick={() => onPendingImage(null)} aria-label="Remove image" style={{ background: 'transparent', border: 'none', color: C.t2, cursor: 'pointer', fontSize: 17 }}>×</button>
           </div>
         )}
+        {voiceStatus && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, padding: '8px 10px', background: listening ? 'rgba(239,68,68,.09)' : voiceError ? 'rgba(239,68,68,.08)' : C.accentM, border: `1px solid ${listening || voiceError ? 'rgba(239,68,68,.32)' : C.borderFocus}`, borderRadius: 9, color: listening || voiceError ? '#fca5a5' : C.t2, fontSize: 12 }}>
+            <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: listening || voiceError ? C.red : C.accent, boxShadow: `0 0 0 4px ${listening || voiceError ? 'rgba(239,68,68,.13)' : C.accentM}` }} />
+            <span style={{ flex: 1 }}>{voiceStatus}</span>
+            <button type="button" onClick={onMic} style={{ background: 'transparent', border: 'none', color: C.t1, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>{voiceError ? 'Try again' : 'Finish'}</button>
+          </div>
+        )}
         <div
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => { event.preventDefault(); attachFile(event.dataTransfer.files?.[0]) }}
-          style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${listening ? C.red : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
+          style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${recording ? (listening ? C.red : C.borderFocus) : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
           <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display: 'none' }} onChange={(event) => { attachFile(event.target.files?.[0]); event.target.value = '' }} />
           <button type="button" onClick={() => fileRef.current?.click()} title="Attach image" aria-label="Attach image" style={{ background: pendingImage ? C.accentM : 'transparent', border: `1px solid ${pendingImage ? C.borderFocus : 'transparent'}`, borderRadius: 10, color: pendingImage ? C.accent : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>⌁</button>
           <textarea
@@ -79,11 +96,11 @@ export function ChatComposer({
               if (event.key === 'Escape' && sending) onStop()
             }}
             rows={1}
-            placeholder={listening ? 'Listening… speak now' : 'Message FounderLab'}
+            placeholder={recording ? (listening ? 'Listening… keep speaking when you are ready' : 'Waiting for your next phrase…') : 'Message FounderLab'}
             aria-label="Message FounderLab"
             style={{ flex: 1, minWidth: 0, minHeight: 24, maxHeight: 200, overflowY: 'auto', resize: 'none', background: 'transparent', border: 'none', color: C.t1, outline: 'none', padding: '9px 3px', fontFamily: 'inherit', fontSize: 15, lineHeight: 1.55 }}
           />
-          <button type="button" onClick={onMic} title={listening ? 'Stop voice input' : 'Voice input'} aria-label={listening ? 'Stop voice input' : 'Voice input'} style={{ background: listening ? C.redM : 'transparent', border: `1px solid ${listening ? C.red : 'transparent'}`, borderRadius: 10, color: listening ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : '◉'}</button>
+          <button type="button" onClick={onMic} title={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} aria-label={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
           {sending ? (
             <button type="button" onClick={onStop} title="Stop generating" aria-label="Stop generating" style={{ background: C.red, border: 'none', borderRadius: 10, color: '#fff', cursor: 'pointer', padding: '9px 12px', fontSize: 12, boxShadow: '0 3px 12px rgba(239,68,68,.25)' }}>■</button>
           ) : (
@@ -97,7 +114,7 @@ export function ChatComposer({
             <span>{provider.name}</span>
             <span style={{ opacity: .72, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{provider.model}</span>
           </button>
-          <span style={{ color: C.t3, fontSize: 10.5 }}>Enter to send · Shift+Enter for a new line</span>
+          <span style={{ color: C.t3, fontSize: 10.5 }}>{recording ? 'Press Finish when you are done' : 'Enter to send · Shift+Enter for a new line'}</span>
         </div>
       </div>
     </div>
