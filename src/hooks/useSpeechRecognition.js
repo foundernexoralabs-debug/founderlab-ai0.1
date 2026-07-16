@@ -31,6 +31,10 @@ export function useSpeechRecognition() {
   const onUpdateRef = useRef(null)
 
   const stop = useCallback(() => {
+    // Invalidate both an active recognition instance and a microphone
+    // permission request that has not resolved yet (for example, after a
+    // short press-and-hold is released quickly).
+    sessionRef.current += 1
     desiredRef.current = false
     clearTimeout(restartTimerRef.current)
     restartTimerRef.current = null
@@ -57,6 +61,7 @@ export function useSpeechRecognition() {
     }
     if (desiredRef.current) return true
 
+    const session = ++sessionRef.current
     let stream
     try {
       stream = await getMicrophoneStream()
@@ -65,8 +70,8 @@ export function useSpeechRecognition() {
       return false
     }
     stream.getTracks().forEach((track) => track.stop())
+    if (session !== sessionRef.current) return false
 
-    const session = ++sessionRef.current
     desiredRef.current = true
     onUpdateRef.current = onUpdate
     confirmedTranscriptRef.current = typeof initialTranscript === 'string' ? initialTranscript.trim() : ''

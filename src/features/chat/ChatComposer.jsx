@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { C } from '@/app/theme'
 import { toast } from '@/app/toast'
 import { ACCEPTED_IMAGE_TYPES, fileToBase64 } from '@/lib/files'
@@ -6,6 +6,8 @@ import { ACCEPTED_IMAGE_TYPES, fileToBase64 } from '@/lib/files'
 function WaveformBars() {
   return <span aria-hidden="true" style={{ display: 'flex', alignItems: 'center', gap: 2, height: 14 }}>{[0, 1, 2, 3, 4].map((index) => <i key={index} style={{ width: 2, background: C.red, borderRadius: 1, animation: `flChatWave .9s ease-in-out ${index * .1}s infinite` }} />)}</span>
 }
+
+const HOLD_TO_DICTATE_DELAY_MS = 180
 
 export function ChatComposer({
   input,
@@ -17,7 +19,8 @@ export function ChatComposer({
   onPendingImage,
   listening,
   voiceInputState = 'idle',
-  onMic,
+  onVoiceStart,
+  onVoiceFinish,
   provider,
   editing,
   onCancelEdit,
@@ -25,11 +28,18 @@ export function ChatComposer({
 }) {
   const fileRef = useRef(null)
   const textRef = useRef(null)
+  const actionMenuRef = useRef(null)
+  const holdTimerRef = useRef(null)
+  const heldToDictateRef = useRef(false)
+  const pointerIdRef = useRef(null)
+  const pressedWhileRecordingRef = useRef(false)
+  const suppressVoiceClickRef = useRef(false)
+  const [actionMenuOpen, setActionMenuOpen] = useState(false)
   const canSend = Boolean(input.trim() || pendingImage) && !sending
   const recording = ['listening', 'resuming'].includes(voiceInputState)
   const voiceError = voiceInputState === 'error'
   const voiceStatus = voiceInputState === 'listening'
-    ? 'Listening — pause naturally; I’ll keep your place.'
+    ? 'Listening — pause naturally, correct yourself, or keep typing.'
     : voiceInputState === 'resuming'
       ? 'Keeping your place — continue when you are ready.'
       : voiceInputState === 'error'
@@ -42,6 +52,24 @@ export function ChatComposer({
     textarea.style.height = 'auto'
     textarea.style.height = `${Math.min(200, textarea.scrollHeight)}px`
   }, [input])
+
+  useEffect(() => {
+    if (!actionMenuOpen) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!actionMenuRef.current?.contains(event.target)) setActionMenuOpen(false)
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setActionMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [actionMenuOpen])
+
+  useEffect(() => () => clearTimeout(holdTimerRef.current), [])
 
   async function attachFile(file) {
     if (!file || !file.type.startsWith('image/')) {
@@ -57,6 +85,52 @@ export function ChatComposer({
     } catch {
       toast('FounderLab could not read that image. Please try another file.', 'error')
     }
+  }
+
+  function openImagePicker() {
+    setActionMenuOpen(false)
+    fileRef.current?.click()
+  }
+
+  function toggleVoiceInput() {
+    if (recording) onVoiceFinish()
+    else onVoiceStart()
+  }
+
+  function releaseVoicePointer(event, { cancelled = false } = {}) {
+    if (pointerIdRef.current !== event.pointerId) return
+    clearTimeout(holdTimerRef.current)
+    holdTimerRef.current = null
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {}
+    const heldToDictate = heldToDictateRef.current
+    const wasRecording = pressedWhileRecordingRef.current
+    pointerIdRef.current = null
+    heldToDictateRef.current = false
+    pressedWhileRecordingRef.current = false
+    if (heldToDictate || wasRecording) {
+      if (!cancelled || heldToDictate) onVoiceFinish()
+      suppressVoiceClickRef.current = true
+      return
+    }
+    if (!cancelled) {
+      onVoiceStart()
+      suppressVoiceClickRef.current = true
+    }
+  }
+
+  function beginVoicePointer(event) {
+    if (event.button !== 0) return
+    pointerIdRef.current = event.pointerId
+    pressedWhileRecordingRef.current = recording
+    heldToDictateRef.current = false
+    try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch {}
+    if (recording) return
+    clearTimeout(holdTimerRef.current)
+    holdTimerRef.current = setTimeout(() => {
+      if (pointerIdRef.current !== event.pointerId) return
+      heldToDictateRef.current = true
+      onVoiceStart()
+    }, HOLD_TO_DICTATE_DELAY_MS)
   }
 
   return (
@@ -80,7 +154,7 @@ export function ChatComposer({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, padding: '8px 10px', background: listening ? 'rgba(239,68,68,.09)' : voiceError ? 'rgba(239,68,68,.08)' : C.accentM, border: `1px solid ${listening || voiceError ? 'rgba(239,68,68,.32)' : C.borderFocus}`, borderRadius: 9, color: listening || voiceError ? '#fca5a5' : C.t2, fontSize: 12 }}>
             <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: listening || voiceError ? C.red : C.accent, boxShadow: `0 0 0 4px ${listening || voiceError ? 'rgba(239,68,68,.13)' : C.accentM}` }} />
             <span style={{ flex: 1 }}>{voiceStatus}</span>
-            <button type="button" onClick={onMic} style={{ background: 'transparent', border: 'none', color: C.t1, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>{voiceError ? 'Try again' : 'Finish'}</button>
+            <button type="button" onClick={voiceError ? onVoiceStart : onVoiceFinish} style={{ background: 'transparent', border: 'none', color: C.t1, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>{voiceError ? 'Try again' : 'Finish'}</button>
           </div>
         )}
         <div
@@ -88,7 +162,17 @@ export function ChatComposer({
           onDrop={(event) => { event.preventDefault(); attachFile(event.dataTransfer.files?.[0]) }}
           style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${recording ? (listening ? C.red : C.borderFocus) : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
           <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display: 'none' }} onChange={(event) => { attachFile(event.target.files?.[0]); event.target.value = '' }} />
-          <button type="button" className="fl-chat-composer-attachment" onClick={() => fileRef.current?.click()} title="Add an image (up to 5 MB)" aria-label="Add an image" style={{ background: pendingImage ? C.accentM : 'transparent', border: `1px solid ${pendingImage ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 16, lineHeight: 0 }}>+</span><span className="fl-chat-composer-attachment-label">Image</span></button>
+          <div ref={actionMenuRef} className="fl-chat-composer-action-menu-anchor">
+            <button type="button" className="fl-chat-composer-attachment" onClick={() => setActionMenuOpen((open) => !open)} title="Add to message" aria-label="Add to message" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
+            {actionMenuOpen && (
+              <div className="fl-chat-composer-action-menu" role="menu" aria-label="Add to message">
+                <button type="button" role="menuitem" onClick={openImagePicker}>
+                  <span aria-hidden="true">◫</span>
+                  <span><strong>Add image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
+                </button>
+              </div>
+            )}
+          </div>
           <textarea
             ref={textRef}
             value={input}
@@ -107,7 +191,7 @@ export function ChatComposer({
             aria-label="Message FounderLab"
             style={{ flex: 1, minWidth: 0, minHeight: 24, maxHeight: 200, overflowY: 'auto', resize: 'none', background: 'transparent', border: 'none', color: C.t1, outline: 'none', padding: '9px 3px', fontFamily: 'inherit', fontSize: 15, lineHeight: 1.55 }}
           />
-          <button type="button" className="fl-chat-composer-voice" onClick={onMic} title={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} aria-label={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
+          <button type="button" className="fl-chat-composer-voice" onPointerDown={beginVoicePointer} onPointerUp={releaseVoicePointer} onPointerCancel={(event) => releaseVoicePointer(event, { cancelled: true })} onClick={() => { if (suppressVoiceClickRef.current) { suppressVoiceClickRef.current = false; return } toggleVoiceInput() }} title={recording ? 'Finish dictation' : voiceError ? 'Retry dictation' : 'Tap to dictate · hold while speaking'} aria-label={recording ? 'Finish dictation' : voiceError ? 'Retry dictation' : 'Start dictation'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
           {sending ? (
             <button type="button" onClick={onStop} title="Stop generating" aria-label="Stop generating" style={{ background: C.red, border: 'none', borderRadius: 10, color: '#fff', cursor: 'pointer', padding: '9px 12px', fontSize: 12, boxShadow: '0 3px 12px rgba(239,68,68,.25)' }}>■</button>
           ) : (
@@ -121,7 +205,7 @@ export function ChatComposer({
             <span>{provider.name}</span>
             <span style={{ opacity: .72, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{provider.model}</span>
           </button>
-          <span style={{ color: C.t3, fontSize: 10.5 }}>{recording ? 'Press Finish when you are done' : 'Enter to send · Shift+Enter for a new line'}</span>
+          <span style={{ color: C.t3, fontSize: 10.5 }}>{recording ? 'Tap to finish · you can keep typing' : 'Tap mic to dictate · hold to talk · Enter to send · Shift+Enter for a new line'}</span>
         </div>
       </div>
     </div>

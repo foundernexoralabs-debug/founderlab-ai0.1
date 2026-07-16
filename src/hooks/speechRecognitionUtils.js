@@ -36,6 +36,29 @@ export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegm
 }
 
 /**
+ * Keep live recognition from clobbering a user who starts typing while
+ * dictation is still active. Appended typed text stays appended; if the user
+ * edits the dictated portion itself, preserve that edit and only append a
+ * safely identifiable new spoken delta.
+ */
+export function mergeLiveTranscript(current = '', previousTranscript = '', nextTranscript = '') {
+  const currentText = typeof current === 'string' ? current : ''
+  const previous = typeof previousTranscript === 'string' ? previousTranscript : ''
+  const next = typeof nextTranscript === 'string' ? nextTranscript : ''
+  if (!next) return currentText
+  if (currentText === previous) return next
+  if (previous && currentText.startsWith(previous)) {
+    return `${next}${currentText.slice(previous.length)}`
+  }
+  if (!previous) return appendVoiceTranscript(next, currentText)
+  if (next.startsWith(previous)) {
+    const spokenDelta = next.slice(previous.length).trim()
+    return spokenDelta ? appendVoiceTranscript(currentText, spokenDelta) : currentText
+  }
+  return currentText
+}
+
+/**
  * Browser speech recognition often emits `no-speech` after a natural pause.
  * That is not a user decision to finish dictating, so a live session should
  * quietly resume while explicit stops and meaningful errors must not restart.

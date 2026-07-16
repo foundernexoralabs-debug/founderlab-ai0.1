@@ -5,6 +5,7 @@ import { copyText, flConsumeHandoff, flNavigate, ts, uid } from '@/lib/appUtils'
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
 import { useTextToSpeech } from '@/hooks/useTextToSpeech'
 import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
+import { mergeLiveTranscript } from '@/hooks/speechRecognitionUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
 import { getAIProvider, getProviderModel, requestAIResult } from '@/services/aiProviderService'
 import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } from '@/services/workspaceStore'
@@ -48,10 +49,10 @@ export function ChatWorkspace({ user }) {
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const conversationScrollRef = useRef(null)
+  const liveDictationRef = useRef({ active: false, lastTranscript: '' })
 
   const {
     listening,
-    transcript,
     clearVoiceDraft,
     hasRecognizedSpeech,
     voiceInputState,
@@ -91,10 +92,6 @@ export function ChatWorkspace({ user }) {
     initialise()
     return () => { alive = false }
   }, [])
-
-  useEffect(() => {
-    if (transcript) setInput(transcript)
-  }, [transcript])
 
   useEffect(() => {
     persistVoiceConfig(voiceConfig)
@@ -171,6 +168,28 @@ export function ChatWorkspace({ user }) {
     setPendingImage(null)
   }
 
+  function startDictation() {
+    const initialTranscript = input
+    liveDictationRef.current = { active: true, lastTranscript: initialTranscript }
+    return startRecognition((nextTranscript) => {
+      setInput((current) => {
+        const liveDictation = liveDictationRef.current
+        if (!liveDictation.active) return current
+        const next = mergeLiveTranscript(current, liveDictation.lastTranscript, nextTranscript)
+        liveDictation.lastTranscript = nextTranscript
+        return next
+      })
+    }, { initialTranscript }).then((started) => {
+      if (!started) liveDictationRef.current.active = false
+      return started
+    })
+  }
+
+  function finishDictation() {
+    liveDictationRef.current.active = false
+    stopRecognition()
+  }
+
   async function requestAssistantReply({ conversationId, conversationMessages, providerId, modelId }) {
     const requestSequence = ++requestSequenceRef.current
     const controller = new AbortController()
@@ -222,6 +241,7 @@ export function ChatWorkspace({ user }) {
     const modelId = getProviderModel(providerId)
     const image = pendingImage
     const source = hasRecognizedSpeech ? 'voice' : undefined
+    liveDictationRef.current.active = false
     setInput('')
     setPendingImage(null)
     clearVoiceDraft()
@@ -439,7 +459,7 @@ export function ChatWorkspace({ user }) {
             </div>
           </>
         )}
-        <ChatComposer input={input} onInput={setInput} onSend={send} sending={sending} onStop={stopGenerating} pendingImage={pendingImage} onPendingImage={setPendingImage} listening={listening} voiceInputState={voiceInputState} onMic={() => ['listening', 'resuming'].includes(voiceInputState) ? stopRecognition() : startRecognition(undefined, { initialTranscript: input })} provider={selectedProvider} editing={Boolean(editingMessageId)} onCancelEdit={cancelEdit} onOpenProviders={() => flNavigate('settings')} />
+        <ChatComposer input={input} onInput={setInput} onSend={send} sending={sending} onStop={stopGenerating} pendingImage={pendingImage} onPendingImage={setPendingImage} listening={listening} voiceInputState={voiceInputState} onVoiceStart={startDictation} onVoiceFinish={finishDictation} provider={selectedProvider} editing={Boolean(editingMessageId)} onCancelEdit={cancelEdit} onOpenProviders={() => flNavigate('settings')} />
       </main>
     </div>
   )

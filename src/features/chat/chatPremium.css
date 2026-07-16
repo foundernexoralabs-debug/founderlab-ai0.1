@@ -127,6 +127,7 @@
 .fl-chat-message.is-speaking .fl-chat-message-card {
   border-color: rgba(52,211,153,.42);
   box-shadow: 0 12px 30px rgba(16,185,129,.12);
+  animation: flChatSpeakingGlow 1.8s ease-in-out infinite;
 }
 
 .fl-chat-message.is-speaking .fl-chat-avatar {
@@ -228,6 +229,68 @@
   flex: 0 0 auto;
 }
 
+.fl-chat-composer-action-menu-anchor {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.fl-chat-composer-action-menu {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 9px);
+  width: min(250px, calc(100vw - 42px));
+  padding: 6px;
+  border: 1px solid rgba(148,163,184,.24);
+  border-radius: 12px;
+  background: rgba(20,20,39,.98);
+  box-shadow: 0 18px 42px rgba(0,0,0,.38);
+  backdrop-filter: blur(14px);
+  animation: flChatPopoverIn .14s ease both;
+}
+
+.fl-chat-composer-action-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #e6e6f2;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.fl-chat-composer-action-menu button:hover,
+.fl-chat-composer-action-menu button:focus-visible {
+  border-color: rgba(165,180,252,.35);
+  background: rgba(99,102,241,.13);
+  outline: none;
+}
+
+.fl-chat-composer-action-menu button > span:first-child {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(99,102,241,.18);
+  color: #c7d2fe;
+  font-size: 14px;
+}
+
+.fl-chat-composer-action-menu strong,
+.fl-chat-composer-action-menu small {
+  display: block;
+}
+
+.fl-chat-composer-action-menu strong { font-size: 11.5px; }
+.fl-chat-composer-action-menu small { margin-top: 2px; color: #9898b0; font-size: 10px; }
+
 .fl-chat-composer-attachment:hover,
 .fl-chat-composer-attachment:focus-visible,
 .fl-chat-composer-voice:hover,
@@ -305,6 +368,11 @@
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+@keyframes flChatSpeakingGlow {
+  0%, 100% { border-color: rgba(52,211,153,.3); box-shadow: 0 11px 26px rgba(16,185,129,.08); }
+  50% { border-color: rgba(52,211,153,.58); box-shadow: 0 14px 34px rgba(16,185,129,.18); }
+}
+
 @keyframes flChatTyping {
   0%, 60%, 100% { opacity: .32; transform: scale(.85); }
   30% { opacity: 1; transform: scale(1); }
@@ -318,6 +386,17 @@
 @keyframes flChatPlaybackPulse {
   0%, 100% { transform: scale(.75); opacity: .55; }
   50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fl-chat-message,
+  .fl-chat-message.is-speaking .fl-chat-message-card,
+  .fl-chat-playback-wave,
+  .fl-chat-composer-action-menu,
+  .fl-chat-voice-popover {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 @media (max-width: 760px) {
@@ -357,5 +436,5 @@
   .fl-chat-playback-dock { padding: 7px 16px; }
   .fl-chat-message-actions { opacity: 1; transform: none; }
   .fl-chat-voice-popover { left: auto; right: 0; }
-  .fl-chat-composer-attachment-label { display: none; }
+  .fl-chat-composer-action-menu { left: 0; right: auto; }
 }

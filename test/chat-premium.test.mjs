@@ -10,6 +10,7 @@ import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
   commitInterimTranscript,
+  mergeLiveTranscript,
   shouldResumeVoiceInput,
   VOICE_INPUT_RESTART_DELAY_MS,
   voiceInputStatusCopy,
@@ -145,6 +146,9 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
     applyFinalSpeechPhrase(['Typed opening'], 'I mean add a clearer CTA', 1),
     ['Typed opening', 'add a clearer CTA'],
   )
+  assert.equal(mergeLiveTranscript('Launch plan', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA')
+  assert.equal(mergeLiveTranscript('Launch plan please', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA please')
+  assert.equal(mergeLiveTranscript('Manual revision', 'Launch plan', 'Launch plan with a stronger CTA'), 'Manual revision with a stronger CTA')
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'no-speech' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: '' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
@@ -193,9 +197,12 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
   assert.match(composerSource, /pause naturally/i)
-  assert.match(composerSource, /Finish voice input/)
-  assert.match(composerSource, /Retry voice input/)
-  assert.match(composerSource, /Add an image/)
+  assert.match(composerSource, /Finish dictation/)
+  assert.match(composerSource, /Retry dictation/)
+  assert.match(composerSource, /Add image/)
+  assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
+  assert.match(composerSource, /onPointerDown/)
+  assert.match(composerSource, /role="menu"/)
   assert.match(messageSource, /document\.addEventListener\('pointerdown'/)
   assert.match(messageSource, /event\.key === 'Escape'/)
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
@@ -205,6 +212,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-message-card/)
   assert.match(recognitionSource, /recognition\.continuous = true/)
   assert.match(recognitionSource, /applyFinalSpeechPhrase/)
+  assert.match(recognitionSource, /sessionRef\.current \+= 1/)
   assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
   assert.match(speechSource, /let activeAudio/)
   assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)
@@ -213,6 +221,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /height: 100dvh/)
   assert.match(css, /scrollbar-gutter: stable/)
   assert.match(css, /fl-chat-voice-popover/)
+  assert.match(css, /fl-chat-composer-action-menu/)
+  assert.match(css, /flChatSpeakingGlow/)
   assert.match(css, /margin-left: auto/)
   assert.match(css, /@media \(max-width: 760px\)/)
   assert.match(css, /fl-chat-history\.is-closed/)
