@@ -19,6 +19,11 @@ import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '.
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
 import { createVoiceResponsePlan } from '../src/features/chat/voiceResponseUtils.js'
 import {
+  buildChatHandoffPayload,
+  getAssistantControlActions,
+  getChatControlActions,
+} from '../src/features/chat/chatControlCenterUtils.js'
+import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
   commitInterimTranscript,
@@ -29,6 +34,7 @@ import {
 } from '../src/hooks/speechRecognitionUtils.js'
 import {
   CHAT_SYSTEM_PROMPT,
+  CHAT_CONTROL_CENTER_PROMPT,
   CHAT_STARTER_PROMPTS,
   createConversation,
   filterConversations,
@@ -158,7 +164,8 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
   assert.match(CHAT_SYSTEM_PROMPT, /Choose the response shape/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
-  assert.equal(getChatSystemPrompt(), CHAT_SYSTEM_PROMPT)
+  assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
+  assert.match(getChatSystemPrompt(), /FounderLab workflow guidance/i)
   assert.deepEqual(getChatRequestContext([
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', source: 'voice', content: 'The investor launch.' },
@@ -175,6 +182,33 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', content: 'The investor launch.' },
   ])), /likely answer or correction/i)
+})
+
+test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
+  assert.deepEqual(getChatControlActions('Can you turn this into a task?').map((action) => action.id), ['create-task'])
+  assert.deepEqual(getChatControlActions('Save this in Notes and use this idea in Builder.').map((action) => action.id), ['save-note', 'builder'])
+  assert.deepEqual(getChatControlActions('Help me create an app for investor onboarding.').map((action) => action.id), ['builder'])
+  assert.deepEqual(getChatControlActions('Prepare this implementation for GitHub.').map((action) => action.id), ['github'])
+  assert.deepEqual(getChatControlActions('Use this idea for YouTube content.').map((action) => action.id), ['youtube'])
+  assert.deepEqual(getChatControlActions('What time is it in London?'), [])
+  assert.deepEqual(getChatControlActions('What is GitHub and how does an API work?'), [])
+
+  const actions = getAssistantControlActions([
+    { role: 'user', content: 'Turn this into a task and prepare it for GitHub.' },
+    { role: 'assistant', content: 'Here is a safe implementation plan.' },
+  ], 1)
+  assert.deepEqual(actions.map((action) => action.id), ['create-task', 'github'])
+  assert.match(actions[1].request, /GitHub/i)
+
+  const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
+  assert.match(builderPayload.desc, /FounderLab Chat brief/)
+  assert.match(builderPayload.desc, /Create an onboarding app/)
+  const boundedPayload = buildChatHandoffPayload('code', { request: 'x'.repeat(3000), response: 'y'.repeat(6000) })
+  assert.equal(boundedPayload.desc.length <= 6200, true)
+  const githubPayload = buildChatHandoffPayload('github', { request: 'Prepare this for GitHub', response: 'Add tests first.' })
+  assert.match(githubPayload.desc, /Do not push anything until the user explicitly confirms/i)
+  assert.deepEqual(buildChatHandoffPayload('youtube', { request: 'Create founder content' }), { title: 'Create founder content' })
+  assert.equal(buildChatHandoffPayload('unknown', { request: 'No action' }), null)
 })
 
 test('Chat turns normalized provider errors into scoped, recoverable UI states without raw details', () => {
@@ -320,7 +354,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const scrollSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/useConversationScroll.js'), 'utf8')
   const messageSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatMessage.jsx'), 'utf8')
   const confirmationSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatConfirmDialog.jsx'), 'utf8')
+  const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
   const voiceSessionSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatVoiceSession.jsx'), 'utf8')
+  const controlActionsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatControlActions.jsx'), 'utf8')
+  const controlUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatControlCenterUtils.js'), 'utf8')
   const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
   const speechTextSource = fs.readFileSync(path.join(repositoryRoot, 'src/lib/speechTextUtils.js'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
@@ -335,6 +372,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /ChatHistory/)
   assert.match(workspaceSource, /ChatConfirmDialog/)
   assert.match(workspaceSource, /createVoiceResponsePlan/)
+  assert.match(workspaceSource, /continueFromChat/)
+  assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
   assert.match(workspaceSource, /finishRequested/)
@@ -367,6 +406,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
   assert.match(messageSource, /Best available browser voice/)
   assert.match(messageSource, /getChatUserInitials/)
+  assert.match(messageSource, /ChatControlActions/)
+  assert.match(controlActionsSource, /Continue in FounderLab/)
+  assert.match(controlActionsSource, /completedActions/)
+  assert.match(controlActionsSource, /mountedRef/)
+  assert.match(controlUtilsSource, /Do not push anything until the user explicitly confirms/)
+  assert.match(controlUtilsSource, /getChatControlActions/)
+  assert.match(appSource, /flConsumeHandoff\('youtube'\)/)
+  assert.match(appSource, /Content brief ready from Chat/)
   assert.match(voiceSessionSource, /fl-chat-voice-dock/)
   assert.match(voiceSessionSource, /Cancel/)
   assert.match(voiceSessionSource, /Review/)

@@ -549,6 +549,16 @@ function YouTubeAIPage({ user }) {
   const [dubStatus,     setDubStatus]    = useState(null)
   const [dubScript,     setDubScript]    = useState('')
 
+  // Chat can pass a bounded content brief here. It is only a prefilled topic;
+  // YouTube AI still requires the user to choose and run an actual analysis.
+  useEffect(() => {
+    const handoff = flConsumeHandoff('youtube')
+    if (typeof handoff?.title !== 'string' || !handoff.title.trim()) return
+    setTitle(handoff.title.trim())
+    setActive('strategy')
+    toast('Content brief ready from Chat', 'success')
+  }, [])
+
   const videoId = url.match(/(?:v=|youtu\.be\/|\/shorts\/)([A-Za-z0-9_-]{11})/)?.[1]
   const wc      = trans.trim().split(/\s+/).filter(Boolean).length
 

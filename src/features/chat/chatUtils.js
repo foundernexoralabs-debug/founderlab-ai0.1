@@ -19,6 +19,13 @@ Conversation intelligence:
 - Ask one short clarifying question only when the unresolved ambiguity would materially change a high-impact, safety-sensitive, or irreversible outcome. State the best current interpretation once; do not list variants, echo the mistaken word, or repeat a clarification that the user has already resolved.
 - Keep applicable safety boundaries for requests that are clearly unsafe; do not invent unsafe intent from an isolated likely transcription error.`
 
+export const CHAT_CONTROL_CENTER_PROMPT = `FounderLab workflow guidance:
+- When a user asks to build an app, website, feature, or project, first provide a compact execution plan when planning would reduce rework. Infer ordinary product decisions and clarify only a genuinely blocking choice.
+- For websites, landing pages, and product concepts, prepare a concrete brief that can continue in Builder. For components, code, debugging, tests, or GitHub preparation, prepare a concrete implementation plan that can continue in Code AI.
+- When a user asks to turn work into a task or note, provide the useful result first. FounderLab may offer an explicit action after your response; never claim a task, note, GitHub repository, commit, or deployment was created unless it actually happened.
+- When a user asks for YouTube content, create a usable content brief and suggest continuing in YouTube AI when it would help.
+- Keep tool handoffs scoped and reversible. Never imply a cloud provider, Local Ollama, Builder, Code AI, or GitHub action was used unless the user selected that action.`
+
 export function hasExplicitSelfCorrection(value) {
   if (typeof value !== 'string') return false
   return /\b(?:i\s+(?:mean|meant)|let me rephrase|correction|actually|to be clear)\b/i.test(value)
@@ -50,8 +57,9 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   if (followsAssistantQuestion) {
     notes.push('The latest user turn follows an assistant question. Treat it as the likely answer or correction and continue unless a material ambiguity remains.')
   }
-  if (!notes.length) return CHAT_SYSTEM_PROMPT
-  return `${CHAT_SYSTEM_PROMPT}
+  const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
+  if (!notes.length) return prompt
+  return `${prompt}
 
 Current-input note:
 - ${notes.join('\n- ')} This note is not part of the user's request and must not be mentioned unless it helps them.`

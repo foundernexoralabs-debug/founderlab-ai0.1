@@ -35,6 +35,7 @@ import {
   normalizeConversations,
   toChatRequestMessages,
 } from './chatUtils'
+import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
 import { createVoiceResponsePlan } from './voiceResponseUtils'
 import './chatPremium.css'
 
@@ -606,17 +607,40 @@ export function ChatWorkspace({ user }) {
   }
 
   async function saveToNotes(message) {
-    const notes = await load('fl_notes', [])
-    const note = { id: uid(), title: message.content.slice(0, 50) || 'Chat note', content: message.content, tags: ['from-chat'], created_at: ts(), updated_at: ts() }
-    await save('fl_notes', [note, ...(Array.isArray(notes) ? notes : [])])
-    toast('Saved to Notes', 'success')
+    try {
+      const notes = await load('fl_notes', [])
+      const note = { id: uid(), title: message.content.slice(0, 50) || 'Chat note', content: message.content, tags: ['from-chat'], created_at: ts(), updated_at: ts() }
+      await save('fl_notes', [note, ...(Array.isArray(notes) ? notes : [])])
+      toast('Saved to Notes', 'success')
+      return true
+    } catch {
+      toast('FounderLab could not save that note. Your conversation is unchanged.', 'error')
+      return false
+    }
   }
 
   async function createTask(message) {
-    const tasks = await load('fl_tasks', [])
-    const task = { id: uid(), title: message.content.slice(0, 80), status: 'todo', priority: 'medium', description: message.content, due_date: '', created_at: ts(), updated_at: ts() }
-    await save('fl_tasks', [task, ...(Array.isArray(tasks) ? tasks : [])])
-    toast('Task created', 'success')
+    try {
+      const tasks = await load('fl_tasks', [])
+      const task = { id: uid(), title: message.content.slice(0, 80), status: 'todo', priority: 'medium', description: message.content, due_date: '', created_at: ts(), updated_at: ts() }
+      await save('fl_tasks', [task, ...(Array.isArray(tasks) ? tasks : [])])
+      toast('Task created', 'success')
+      return true
+    } catch {
+      toast('FounderLab could not create that task. Your conversation is unchanged.', 'error')
+      return false
+    }
+  }
+
+  async function continueFromChat(action, message) {
+    if (action.id === 'save-note') return saveToNotes(message)
+    if (action.id === 'create-task') return createTask(message)
+    const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
+    if (!payload || !action.target) return false
+    flNavigate(action.target, payload)
+    const destination = action.target === 'builder' ? 'Builder' : action.target === 'code' ? 'Code AI' : 'YouTube AI'
+    toast(`Opening ${destination} with this chat brief.`, 'success')
+    return true
   }
 
   function readAloud(message) {
@@ -697,7 +721,7 @@ export function ChatWorkspace({ user }) {
             <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
-                {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
+                {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index)} onControlAction={continueFromChat} />)}
                 {sending && voiceSession.phase === 'idle' && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && voiceSession.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
                 {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}

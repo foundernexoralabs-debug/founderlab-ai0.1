@@ -3,6 +3,7 @@ import { C } from '@/app/theme'
 import { renderMsg } from '@/components/content/MessageContent'
 import { getVoiceSpeedLabel, VOICE_SPEED_OPTIONS } from '@/lib/voicePreferencesUtils'
 import { getChatUserInitials, getProviderPresentation } from './chatUtils'
+import { ChatControlActions } from './ChatControlActions'
 
 function ActionButton({ label, icon, onClick, active = false, danger = false, expanded }) {
   return (
@@ -75,6 +76,8 @@ export function ChatMessage({
   voiceCfg,
   onVoiceChange,
   elevenLabsAvailable,
+  controlActions = [],
+  onControlAction,
 }) {
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false)
   const [reaction, setReaction] = useState(null)
@@ -83,6 +86,8 @@ export function ChatMessage({
   const provider = assistant ? getProviderPresentation(message.provider, message.model) : null
   const time = message.ts ? new Date(message.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
   const ttsActive = activeTTS === message.id
+  const hasContextualNoteAction = controlActions.some((action) => action.id === 'save-note')
+  const hasContextualTaskAction = controlActions.some((action) => action.id === 'create-task')
 
   useEffect(() => {
     if (!voiceMenuOpen) return undefined
@@ -131,6 +136,8 @@ export function ChatMessage({
           </div>
         </div>
 
+        {assistant && <ChatControlActions actions={controlActions} onAction={(action) => onControlAction?.(action, message)} />}
+
         <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 7, flexWrap: 'wrap' }}>
           <ActionButton label="Copy" icon="⧉" onClick={() => onCopy(message.content)} />
           {assistant ? <>
@@ -142,8 +149,8 @@ export function ChatMessage({
             {!sending && <ActionButton label="Regenerate response" icon="↻" onClick={() => onRegenerate(message.id)} />}
             <ActionButton label="Good response" icon="↑" active={reaction === 'up'} onClick={() => react('up')} />
             <ActionButton label="Poor response" icon="↓" active={reaction === 'down'} onClick={() => react('down')} />
-            <ActionButton label="Save to Notes" icon="◫" onClick={() => onSaveToNotes(message)} />
-            <ActionButton label="Create task" icon="✓" onClick={() => onCreateTask(message)} />
+            {!hasContextualNoteAction && <ActionButton label="Save to Notes" icon="◫" onClick={() => onSaveToNotes(message)} />}
+            {!hasContextualTaskAction && <ActionButton label="Create task" icon="✓" onClick={() => onCreateTask(message)} />}
           </> : <ActionButton label="Edit and resend" icon="✎" onClick={() => onEdit(message)} />}
           <ActionButton label="Delete message" icon="×" danger onClick={() => onDelete(message.id)} />
         </div>
