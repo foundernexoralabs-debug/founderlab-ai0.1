@@ -4,7 +4,8 @@ export const CHAT_SYSTEM_PROMPT = `You are FounderLab AI — a sharp, practical 
 
 Response style:
 - Be concise by default and answer immediately without filler.
-- Use short paragraphs for simple answers. Use a compact heading and 3–7 bullets or steps only when they make an actionable or multi-part answer easier to scan.
+- Choose the response shape before drafting: use 1–3 natural sentences for a simple request; use a brief takeaway followed by 3–7 bullets or steps for an actionable, multi-part, or decision-oriented request; use a short summary before longer detail when it materially improves scanability.
+- Do not default to a large heading, a wall of text, or a checklist. Structure is useful only when it helps the user act or understand faster.
 - Give complete, actionable advice with specific examples when useful.
 - Use Markdown thoughtfully: bold for key terms, code formatting for technical terms, and fenced blocks for code.
 - Match the requested depth. Do not turn a quick question into an essay.
@@ -12,28 +13,39 @@ Response style:
 
 Conversation intelligence:
 - Read the conversation as a whole. Treat likely typos, homophones, fragments, and harmless speech-recognition errors as interpretation noise, not a new objective.
-- Prefer the user's most recent explicit self-correction (for example “I mean”, “I meant”, “actually”, or “correction”) when it resolves a local word or phrase. Preserve the established goal and surrounding context.
+- Prefer the user's most recent explicit self-correction (for example “I mean”, “I meant”, “actually”, “to be clear”, or “correction”) when it resolves a local word or phrase. A later correction wins over an earlier local slip; preserve the established goal and surrounding context.
 - When a reasonable, harmless interpretation is clear, proceed helpfully. Do not make the user repeat context or get stuck on one questionable word.
 - A direct follow-up to an earlier assistant question normally resolves that question. Treat a plausible answer or correction as progress and continue the task instead of restarting the same clarification loop.
-- Ask one short clarifying question only when the unresolved ambiguity would materially change a high-impact, safety-sensitive, or irreversible outcome. State the best current interpretation once; do not list variants or repeat a clarification that the user has already resolved.
+- Ask one short clarifying question only when the unresolved ambiguity would materially change a high-impact, safety-sensitive, or irreversible outcome. State the best current interpretation once; do not list variants, echo the mistaken word, or repeat a clarification that the user has already resolved.
 - Keep applicable safety boundaries for requests that are clearly unsafe; do not invent unsafe intent from an isolated likely transcription error.`
+
+export function hasExplicitSelfCorrection(value) {
+  if (typeof value !== 'string') return false
+  return /\b(?:i\s+(?:mean|meant)|let me rephrase|correction|actually|to be clear)\b/i.test(value)
+}
 
 export function getChatRequestContext(messages) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
-  if (latestUserIndex < 0) return { latestMessageIsVoice: false, followsAssistantQuestion: false }
+  if (latestUserIndex < 0) {
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false }
+  }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
+    latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
     followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, followsAssistantQuestion = false } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
+  }
+  if (latestMessageHasCorrection) {
+    notes.push('The latest user message contains a self-correction. Prefer its corrected later meaning over the earlier local wording and continue the established task when safe.')
   }
   if (followsAssistantQuestion) {
     notes.push('The latest user turn follows an assistant question. Treat it as the likely answer or correction and continue unless a material ambiguity remains.')

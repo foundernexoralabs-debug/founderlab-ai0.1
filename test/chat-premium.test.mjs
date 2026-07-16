@@ -36,6 +36,7 @@ import {
   getChatErrorPresentation,
   getChatRequestContext,
   getChatSystemPrompt,
+  hasExplicitSelfCorrection,
   getChatUserInitials,
   getProviderPresentation,
   groupConversationsByRecency,
@@ -155,12 +156,21 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(voicePrompt, /most recent explicit self-correction/i)
   assert.match(voicePrompt, /Ask one short clarifying question/i)
   assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /Choose the response shape/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
   assert.equal(getChatSystemPrompt(), CHAT_SYSTEM_PROMPT)
   assert.deepEqual(getChatRequestContext([
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', source: 'voice', content: 'The investor launch.' },
-  ]), { latestMessageIsVoice: true, followsAssistantQuestion: true })
+  ]), { latestMessageIsVoice: true, latestMessageHasCorrection: false, followsAssistantQuestion: true })
+  assert.equal(hasExplicitSelfCorrection('Actually, I meant the investor launch.'), true)
+  assert.equal(hasExplicitSelfCorrection('Please draft the investor launch.'), false)
+  const correctionContext = getChatRequestContext([
+    { role: 'assistant', content: 'Which launch are you referring to?' },
+    { role: 'user', source: 'voice', content: 'Sorry, I meant the investor launch.' },
+  ])
+  assert.equal(correctionContext.latestMessageHasCorrection, true)
+  assert.match(getChatSystemPrompt(correctionContext), /contains a self-correction/i)
   assert.match(getChatSystemPrompt(getChatRequestContext([
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', content: 'The investor launch.' },
@@ -238,6 +248,10 @@ test('Voice sessions keep short answers conversational while preserving dense de
   assert.equal(short.mode, 'conversational')
   assert.match(short.spokenText, /investor update/i)
 
+  const inlineCommand = createVoiceResponsePlan('Run `npm test` before you deploy.')
+  assert.equal(inlineCommand.mode, 'conversational')
+  assert.match(inlineCommand.spokenText, /npm test/i)
+
   const code = createVoiceResponsePlan('## API update\n\nHere is the implementation:\n```js\nconst secret = process.env.KEY\n```\n\nUse the endpoint after deployment.')
   assert.equal(code.mode, 'code-summary')
   assert.equal(code.spokenText.includes('process.env'), false)
@@ -248,6 +262,13 @@ test('Voice sessions keep short answers conversational while preserving dense de
   assert.equal(long.mode, 'summary')
   assert.equal(long.spokenText.length <= 660, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
+
+  const structured = createVoiceResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test the onboarding flow\n- Measure conversion before scaling\n\n[Research](https://example.com/research)')
+  assert.equal(structured.mode, 'structured-summary')
+  assert.match(structured.spokenText, /Here’s the short version/i)
+  assert.match(structured.spokenText, /First, clarify the customer promise/i)
+  assert.equal(structured.spokenText.includes('https://'), false)
+  assert.match(structured.spokenText, /full breakdown in the chat/i)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -258,6 +279,11 @@ test('Voice narration removes presentation artifacts, links, emojis, and code wh
   assert.equal(narration.includes('/'), false)
   assert.match(narration, /npm test or npm run build/i)
   assert.match(narration, /detailed code is available in the chat/i)
+
+  const structuredNarration = cleanTextForSpeech('> **Next steps**\n1. Confirm the plan\n2. Send the update\n| Owner | Status |\n| --- | --- |\n[^1]')
+  assert.equal(structuredNarration.includes('Owner'), false)
+  assert.equal(structuredNarration.includes('[^1]'), false)
+  assert.match(structuredNarration, /Confirm the plan\. Send the update/i)
 })
 
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
