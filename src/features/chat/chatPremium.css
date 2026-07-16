@@ -1,6 +1,8 @@
 .fl-chat-shell {
   display: flex;
-  height: 100%;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   overflow: hidden;
 }
@@ -10,8 +12,12 @@
   display: flex;
   flex: 0 0 286px;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  align-self: stretch;
   flex-direction: column;
   overflow: hidden;
+  overscroll-behavior: contain;
   background: rgba(15, 15, 26, .9);
   border-right: 1px solid rgba(255,255,255,.07);
   transition: width .2s ease, flex-basis .2s ease, opacity .16s ease;
@@ -29,18 +35,27 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   position: relative;
+  isolation: isolate;
 }
 
 .fl-chat-scroll {
-  flex: 1;
+  flex: 1 1 0;
+  height: 0;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 36px 32px 24px;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  padding: 38px 32px 26px;
+  outline: none;
 }
 
 .fl-chat-reading-column,
@@ -56,7 +71,7 @@
   animation: flChatFadeIn .25s ease;
 }
 
-.fl-chat-message + .fl-chat-message { margin-top: 28px; }
+.fl-chat-message + .fl-chat-message { margin-top: 32px; }
 
 .fl-chat-message.is-user {
   justify-content: flex-end;
@@ -83,27 +98,30 @@
 
 .fl-chat-message-body {
   min-width: 0;
-  flex: 0 1 min(100%, 790px);
+  flex: 0 1 min(100%, 800px);
+  margin-right: auto;
 }
 
 .fl-chat-message.is-user .fl-chat-message-body {
   order: 1;
-  flex-basis: min(100%, 650px);
+  flex-basis: min(100%, 660px);
+  margin-right: 0;
+  margin-left: auto;
 }
 
 .fl-chat-message-card {
   padding: 13px 15px 14px;
-  border: 1px solid rgba(255,255,255,.075);
-  border-radius: 5px 17px 17px 17px;
-  background: linear-gradient(145deg, rgba(21,21,42,.96), rgba(14,14,26,.96));
-  box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  border: 1px solid rgba(255,255,255,.085);
+  border-radius: 5px 18px 18px 18px;
+  background: linear-gradient(145deg, rgba(24,24,47,.98), rgba(13,13,27,.98));
+  box-shadow: 0 10px 26px rgba(0,0,0,.14);
 }
 
 .fl-chat-message.is-user .fl-chat-message-card {
-  border-color: rgba(129,140,248,.36);
-  border-radius: 17px 5px 17px 17px;
-  background: linear-gradient(145deg, rgba(79,70,229,.64), rgba(55,48,163,.52));
-  box-shadow: 0 9px 25px rgba(67,56,202,.18);
+  border-color: rgba(165,180,252,.48);
+  border-radius: 18px 5px 18px 18px;
+  background: linear-gradient(145deg, rgba(99,102,241,.82), rgba(67,56,202,.73));
+  box-shadow: 0 12px 30px rgba(67,56,202,.25);
 }
 
 .fl-chat-message-meta {
@@ -146,6 +164,43 @@
   justify-content: flex-end;
 }
 
+.fl-chat-voice-control {
+  position: relative;
+  display: inline-flex;
+}
+
+.fl-chat-voice-popover {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(320px, calc(100vw - 44px));
+  padding: 12px;
+  border: 1px solid rgba(148,163,184,.22);
+  border-radius: 12px;
+  background: rgba(20,20,39,.98);
+  box-shadow: 0 18px 42px rgba(0,0,0,.36);
+  backdrop-filter: blur(14px);
+  animation: flChatPopoverIn .14s ease both;
+}
+
+.fl-chat-voice-option-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.fl-chat-voice-option-label {
+  width: 100%;
+  color: #8f8fa8;
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
 .fl-chat-composer-wrap {
   padding: 0 32px 24px;
   flex: 0 0 auto;
@@ -166,8 +221,8 @@
   gap: 8px;
   min-height: 36px;
   padding: 7px 20px;
-  background: rgba(16,185,129,.08);
-  border-bottom: 1px solid rgba(16,185,129,.2);
+  background: linear-gradient(90deg, rgba(16,185,129,.1), rgba(99,102,241,.08));
+  border-bottom: 1px solid rgba(16,185,129,.23);
   color: #a7f3d0;
   font-size: 11.5px;
   flex: 0 0 auto;
@@ -204,6 +259,11 @@
 @keyframes flChatFadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes flChatPopoverIn {
+  from { opacity: 0; transform: translateY(4px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes flChatTyping {
@@ -256,4 +316,6 @@
   .fl-chat-message-body { flex-basis: calc(100% - 40px); }
   .fl-chat-message.is-user .fl-chat-message-body { flex-basis: min(100%, calc(100% - 40px)); }
   .fl-chat-playback-dock { padding: 7px 16px; }
+  .fl-chat-message-actions { opacity: 1; transform: none; }
+  .fl-chat-voice-popover { left: auto; right: 0; }
 }

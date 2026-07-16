@@ -5,14 +5,16 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
-import { normalizeVoiceConfig } from '../src/lib/voicePreferencesUtils.js'
+import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import {
   appendVoiceTranscript,
+  commitInterimTranscript,
   shouldResumeVoiceInput,
   VOICE_INPUT_RESTART_DELAY_MS,
   voiceInputStatusCopy,
 } from '../src/hooks/speechRecognitionUtils.js'
 import {
+  CHAT_SYSTEM_PROMPT,
   CHAT_STARTER_PROMPTS,
   createConversation,
   filterConversations,
@@ -36,7 +38,7 @@ test('Chat safely normalizes persisted conversation history and preserves valid 
       created_at: '2026-07-16T08:00:00.000Z',
       updated_at: '2026-07-16T08:30:00.000Z',
       messages: [
-        { id: 'user-1', role: 'user', content: 'Build a plan', ts: '2026-07-16T08:00:00.000Z' },
+        { id: 'user-1', role: 'user', content: 'Build a plan', source: 'voice', ts: '2026-07-16T08:00:00.000Z' },
         { id: 'assistant-1', role: 'assistant', content: 'Here is a plan', provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' },
         { id: 'bad', role: 'system', content: 'ignore this' },
       ],
@@ -45,6 +47,7 @@ test('Chat safely normalizes persisted conversation history and preserves valid 
   assert.equal(conversations.length, 1)
   assert.equal(conversations[0].title, 'Fundraising plan')
   assert.equal(conversations[0].messages.length, 2)
+  assert.equal(conversations[0].messages[0].source, 'voice')
   assert.equal(conversations[0].messages[1].provider, 'ollama')
   assert.equal(conversations[0].messages[1].model, 'llama3.2:3b-instruct-q4_K_M')
   assert.deepEqual(createConversation({ id: 'fresh', title: '  New launch  ', now: '2026-07-16T09:00:00.000Z' }), {
@@ -87,6 +90,14 @@ test('Chat keeps image input on capable providers and gives local/cloud text mod
   assert.match(ollama[0].content, /visual limitation/i)
 })
 
+test('Voice-transcribed messages preserve their harmless ambiguity context without weakening safety handling', () => {
+  const messages = toChatRequestMessages([{ role: 'user', source: 'voice', content: 'Please draft the next campaign message.' }], 'groq')
+  assert.match(messages[0].content, /Voice-transcription context/i)
+  assert.match(messages[0].content, /concise clarification/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
+})
+
 test('Chat turns normalized provider errors into scoped, recoverable UI states without raw details', () => {
   const unsupported = getChatErrorPresentation({ code: 'OLLAMA_BROWSER_UNSUPPORTED', retryable: false }, 'ollama')
   assert.match(unsupported.title, /Chromium/i)
@@ -124,11 +135,12 @@ test('Chat cancellation signal reaches the normalized protected cloud request pa
 test('Voice input preserves a draft across brief pauses and only stops for explicit or meaningful failures', () => {
   assert.equal(appendVoiceTranscript('A typed opening', 'and a dictated follow-up'), 'A typed opening and a dictated follow-up')
   assert.equal(appendVoiceTranscript('First sentence.', 'Second sentence'), 'First sentence. Second sentence')
+  assert.equal(commitInterimTranscript('Keep the opening', 'and preserve this final phrase'), 'Keep the opening and preserve this final phrase')
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'no-speech' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: '' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'not-allowed' }), false)
-  assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 500, true)
+  assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 150 && VOICE_INPUT_RESTART_DELAY_MS <= 350, true)
   assert.match(voiceInputStatusCopy('listening'), /brief pauses/i)
   assert.match(voiceInputStatusCopy('resuming'), /still listening/i)
 })
@@ -144,23 +156,28 @@ test('Chat UI preferences preserve the desktop history choice without accepting 
 })
 
 test('Voice preferences persist only safe, predictable playback choices', () => {
-  assert.deepEqual(normalizeVoiceConfig({ provider: 'elevenlabs', gender: 'female', speed: 24.7 }), {
-    provider: 'elevenlabs', gender: 'female', speed: 25,
+  assert.deepEqual(normalizeVoiceConfig({ provider: 'elevenlabs', gender: 'female', speed: 130 }), {
+    provider: 'elevenlabs', gender: 'female', speed: 150,
   })
   assert.deepEqual(normalizeVoiceConfig({ provider: 'unknown', gender: 'other', speed: 999 }), {
-    provider: 'browser', gender: 'male', speed: 50,
+    provider: 'browser', gender: 'male', speed: 150,
   })
   assert.deepEqual(normalizeVoiceConfig(null), { provider: 'browser', gender: 'male', speed: 0 })
+  assert.deepEqual(VOICE_SPEED_OPTIONS.map((option) => option.label), ['0.5×', '1×', '1.5×', '2×', '2.5×'])
+  assert.equal(getVoiceSpeedLabel(100), '2×')
 })
 
 test('Chat feature modules preserve local routing, cancellable requests, and responsive history behavior', () => {
   const workspaceSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatWorkspace.jsx'), 'utf8')
   const css = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatPremium.css'), 'utf8')
   const composerSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatComposer.jsx'), 'utf8')
+  const messageSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatMessage.jsx'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
   assert.match(workspaceSource, /signal: controller\.signal/)
+  assert.match(workspaceSource, /scrollContainer\.scrollTo/)
+  assert.doesNotMatch(workspaceSource, /scrollIntoView/)
   assert.match(workspaceSource, /getChatErrorPresentation/)
   assert.match(workspaceSource, /ChatHistory/)
   assert.match(workspaceSource, /ChatMessage/)
@@ -169,16 +186,24 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(composerSource, /brief pauses are okay/i)
   assert.match(composerSource, /Finish voice input/)
   assert.match(composerSource, /Retry voice input/)
+  assert.match(messageSource, /document\.addEventListener\('pointerdown'/)
+  assert.match(messageSource, /event\.key === 'Escape'/)
+  assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)
   assert.match(css, /fl-chat-message\.is-user/)
   assert.match(css, /justify-content: flex-end/)
   assert.match(css, /fl-chat-message-card/)
   assert.match(recognitionSource, /recognition\.continuous = true/)
+  assert.match(recognitionSource, /commitInterimTranscript/)
   assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
   assert.match(speechSource, /let activeAudio/)
   assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)
   assert.match(speechSource, /let playbackGeneration = 0/)
   assert.match(speechSource, /generation !== playbackGeneration/)
+  assert.match(css, /height: 100dvh/)
+  assert.match(css, /scrollbar-gutter: stable/)
+  assert.match(css, /fl-chat-voice-popover/)
+  assert.match(css, /margin-left: auto/)
   assert.match(css, /@media \(max-width: 760px\)/)
   assert.match(css, /fl-chat-history\.is-closed/)
 })

@@ -3,6 +3,7 @@ import { toast } from '@/app/toast'
 import { getMicrophoneStream } from '@/lib/microphone'
 import {
   appendVoiceTranscript,
+  commitInterimTranscript,
   shouldResumeVoiceInput,
   VOICE_INPUT_RESTART_DELAY_MS,
 } from './speechRecognitionUtils'
@@ -18,6 +19,7 @@ export function useSpeechRecognition() {
   const [listening, setListening] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [voiceInputState, setVoiceInputState] = useState('idle')
+  const [hasRecognizedSpeech, setHasRecognizedSpeech] = useState(false)
   const recognitionRef = useRef(null)
   const restartTimerRef = useRef(null)
   const desiredRef = useRef(false)
@@ -34,6 +36,13 @@ export function useSpeechRecognition() {
     recognitionRef.current = null
     setListening(false)
     setVoiceInputState('idle')
+  }, [])
+
+  const clearVoiceDraft = useCallback(() => {
+    confirmedTranscriptRef.current = ''
+    interimTranscriptRef.current = ''
+    setTranscript('')
+    setHasRecognizedSpeech(false)
   }, [])
 
   const start = useCallback(async (onUpdate, { initialTranscript = '' } = {}) => {
@@ -59,6 +68,7 @@ export function useSpeechRecognition() {
     confirmedTranscriptRef.current = typeof initialTranscript === 'string' ? initialTranscript.trim() : ''
     interimTranscriptRef.current = ''
     setTranscript(confirmedTranscriptRef.current)
+    setHasRecognizedSpeech(false)
     setVoiceInputState('resuming')
 
     const publishTranscript = () => {
@@ -94,11 +104,15 @@ export function useSpeechRecognition() {
           if (result.isFinal) {
             confirmedTranscriptRef.current = appendVoiceTranscript(confirmedTranscriptRef.current, phrase)
             interimTranscriptRef.current = ''
+            if (phrase.trim()) setHasRecognizedSpeech(true)
           } else {
             interim += phrase
           }
         }
-        if (interim) interimTranscriptRef.current = interim
+        if (interim) {
+          interimTranscriptRef.current = interim
+          setHasRecognizedSpeech(true)
+        }
         publishTranscript()
       }
       recognition.onerror = (event) => {
@@ -124,6 +138,17 @@ export function useSpeechRecognition() {
           if (!desiredRef.current && !meaningfulFailure) setVoiceInputState('idle')
           return
         }
+        // The browser can end a recognition session after returning an
+        // interim-only phrase. Preserve it before reconnecting so a natural
+        // pause never erases the end of the user's thought.
+        if (interimTranscriptRef.current.trim()) {
+          confirmedTranscriptRef.current = commitInterimTranscript(
+            confirmedTranscriptRef.current,
+            interimTranscriptRef.current,
+          )
+          interimTranscriptRef.current = ''
+          publishTranscript()
+        }
         setVoiceInputState('resuming')
         clearTimeout(restartTimerRef.current)
         restartTimerRef.current = setTimeout(beginRecognition, VOICE_INPUT_RESTART_DELAY_MS)
@@ -148,5 +173,14 @@ export function useSpeechRecognition() {
     recognitionRef.current?.abort()
   }, [])
 
-  return { listening, transcript, setTranscript, voiceInputState, start, stop }
+  return {
+    listening,
+    transcript,
+    setTranscript,
+    clearVoiceDraft,
+    hasRecognizedSpeech,
+    voiceInputState,
+    start,
+    stop,
+  }
 }

@@ -4,6 +4,7 @@ import { toast } from '@/app/toast'
 import { copyText, flConsumeHandoff, flNavigate, ts, uid } from '@/lib/appUtils'
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
 import { useTextToSpeech } from '@/hooks/useTextToSpeech'
+import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
 import { getAIProvider, getProviderModel, requestAIResult } from '@/services/aiProviderService'
 import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } from '@/services/workspaceStore'
@@ -46,9 +47,17 @@ export function ChatWorkspace({ user }) {
   const saveTimerRef = useRef(null)
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
-  const messageEndRef = useRef(null)
+  const conversationScrollRef = useRef(null)
 
-  const { listening, transcript, setTranscript, voiceInputState, start: startRecognition, stop: stopRecognition } = useSpeechRecognition()
+  const {
+    listening,
+    transcript,
+    clearVoiceDraft,
+    hasRecognizedSpeech,
+    voiceInputState,
+    start: startRecognition,
+    stop: stopRecognition,
+  } = useSpeechRecognition()
   const { speaking, speak, stop: stopTTS, activeProvider: activeVoiceProvider, elAvailable } = useTextToSpeech(voiceConfig)
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) || null
   const messages = activeConversation?.messages || []
@@ -92,7 +101,9 @@ export function ChatWorkspace({ user }) {
   }, [voiceConfig])
 
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ behavior: sending ? 'smooth' : 'auto', block: 'end' })
+    const scrollContainer = conversationScrollRef.current
+    if (!scrollContainer) return
+    scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: sending ? 'smooth' : 'auto' })
   }, [activeId, messages.length, sending])
 
   useEffect(() => {
@@ -210,9 +221,10 @@ export function ChatWorkspace({ user }) {
     const providerId = getAIProvider()
     const modelId = getProviderModel(providerId)
     const image = pendingImage
+    const source = hasRecognizedSpeech ? 'voice' : undefined
     setInput('')
     setPendingImage(null)
-    setTranscript('')
+    clearVoiceDraft()
     stopRecognition()
     setErrorState(null)
 
@@ -251,6 +263,7 @@ export function ChatWorkspace({ user }) {
         role: 'user',
         content: content || `[Image: ${image.name}]`,
         ...(image ? { image: image.base64 } : {}),
+        ...(source ? { source } : {}),
         ts: ts(),
       }
       outgoingMessages = [...target.messages, userMessage]
@@ -398,7 +411,7 @@ export function ChatWorkspace({ user }) {
         {activeTTS && speaking && (
           <div className="fl-chat-playback-dock" role="status" aria-live="polite">
             <span aria-hidden="true" className="fl-chat-playback-wave">◌</span>
-            <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'Browser voice' : 'Starting playback'}</span>
+            <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'System voice' : 'Starting playback'} · {getVoiceSpeedLabel(voiceConfig.speed)}</span>
             <button type="button" onClick={() => { stopTTS(); setActiveTTS(null) }}>Stop</button>
           </div>
         )}
@@ -416,13 +429,12 @@ export function ChatWorkspace({ user }) {
           </section>
         ) : (
           <>
-            <div className="fl-chat-scroll">
+            <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
                 {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={deleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
                 {sending && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
-                <div ref={messageEndRef} />
               </div>
             </div>
           </>

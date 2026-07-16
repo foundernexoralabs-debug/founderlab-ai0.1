@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { C } from '@/app/theme'
 import { renderMsg } from '@/components/content/MessageContent'
+import { getVoiceSpeedLabel, VOICE_SPEED_OPTIONS } from '@/lib/voicePreferencesUtils'
 import { getProviderPresentation } from './chatUtils'
 
-function ActionButton({ label, icon, onClick, active = false, danger = false }) {
+function ActionButton({ label, icon, onClick, active = false, danger = false, expanded }) {
   return (
-    <button type="button" onClick={onClick} title={label} aria-label={label} style={{
+    <button type="button" onClick={onClick} title={label} aria-label={label} aria-expanded={expanded} style={{
       background: active ? C.accentM : 'transparent',
       border: `1px solid ${active ? C.borderFocus : 'transparent'}`,
       color: active ? C.accent : (danger ? C.t3 : C.t2),
@@ -17,35 +18,54 @@ function ActionButton({ label, icon, onClick, active = false, danger = false }) 
   )
 }
 
-function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable }) {
+function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable, onClose }) {
   return (
-    <div style={{ marginTop: 9, padding: '11px 12px', background: `${C.surf}e6`, borderRadius: 10, border: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 9, maxWidth: 520 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 10, color: C.t3, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>Voice</span>
+    <section className="fl-chat-voice-popover" role="dialog" aria-label="Voice playback controls">
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>Voice & playback</div>
+          <div style={{ color: C.t3, fontSize: 10.5, marginTop: 2 }}>Keep reading while FounderLab speaks.</div>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close voice controls" style={{ background: 'transparent', border: 'none', color: C.t3, cursor: 'pointer', padding: 1, fontSize: 16, lineHeight: 1 }}>×</button>
+      </div>
+
+      <div className="fl-chat-voice-option-group">
+        <span className="fl-chat-voice-option-label">Voice</span>
         {[
           { id: 'elevenlabs', label: elevenLabsAvailable === true ? 'ElevenLabs' : 'ElevenLabs unavailable', available: elevenLabsAvailable === true },
-          { id: 'browser', label: 'Browser', available: true },
+          { id: 'browser', label: 'System voice', available: true },
         ].map((voice) => (
-          <button key={voice.id} type="button" disabled={!voice.available} onClick={() => onVoiceChange({ provider: voice.id })} style={{
+          <button key={voice.id} type="button" disabled={!voice.available} aria-pressed={voiceCfg.provider === voice.id} onClick={() => onVoiceChange({ provider: voice.id })} style={{
             padding: '4px 9px', borderRadius: 99, border: `1px solid ${voiceCfg.provider === voice.id ? C.borderFocus : C.border}`,
             background: voiceCfg.provider === voice.id ? C.accentM : 'transparent', color: voiceCfg.provider === voice.id ? C.accent : C.t2,
             cursor: voice.available ? 'pointer' : 'not-allowed', opacity: voice.available ? 1 : .45, fontSize: 11, fontFamily: 'inherit',
           }}>{voice.label}</button>
         ))}
+      </div>
+
+      <div className="fl-chat-voice-option-group">
+        <span className="fl-chat-voice-option-label">Voice style</span>
         {['male', 'female'].map((gender) => (
-          <button key={gender} type="button" onClick={() => onVoiceChange({ gender })} style={{
+          <button key={gender} type="button" aria-pressed={voiceCfg.gender === gender} onClick={() => onVoiceChange({ gender })} style={{
             padding: '4px 9px', borderRadius: 99, border: `1px solid ${voiceCfg.gender === gender ? C.borderFocus : C.border}`,
             background: voiceCfg.gender === gender ? C.accentM : 'transparent', color: voiceCfg.gender === gender ? C.accent : C.t2,
             cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', textTransform: 'capitalize',
           }}>{gender}</button>
         ))}
       </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: C.t2 }}>
-        <span style={{ color: C.t3, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', fontSize: 10 }}>Speed</span>
-        <input aria-label="Speech speed" type="range" min={-50} max={50} value={voiceCfg.speed} onChange={(event) => onVoiceChange({ speed: Number(event.target.value) })} style={{ flex: 1, minWidth: 120, accentColor: C.accent }} />
-        <span style={{ minWidth: 48, textAlign: 'right' }}>{voiceCfg.speed === 0 ? 'Normal' : `${voiceCfg.speed > 0 ? '+' : ''}${voiceCfg.speed}%`}</span>
-      </label>
-    </div>
+
+      <div className="fl-chat-voice-option-group">
+        <span className="fl-chat-voice-option-label">Speed</span>
+        {VOICE_SPEED_OPTIONS.map((option) => (
+          <button key={option.value} type="button" aria-label={`Speech speed ${option.label}`} aria-pressed={voiceCfg.speed === option.value} onClick={() => onVoiceChange({ speed: option.value })} style={{
+            padding: '4px 8px', borderRadius: 8, border: `1px solid ${voiceCfg.speed === option.value ? C.borderFocus : C.border}`,
+            background: voiceCfg.speed === option.value ? C.accentM : 'transparent', color: voiceCfg.speed === option.value ? C.accent : C.t2,
+            cursor: 'pointer', fontSize: 10.5, fontFamily: 'inherit', fontWeight: voiceCfg.speed === option.value ? 700 : 500,
+          }}>{option.label}</button>
+        ))}
+      </div>
+      <div style={{ color: C.t3, fontSize: 10.5 }}>Selected speed: {getVoiceSpeedLabel(voiceCfg.speed)}</div>
+    </section>
   )
 }
 
@@ -68,10 +88,27 @@ export function ChatMessage({
 }) {
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false)
   const [reaction, setReaction] = useState(null)
+  const voiceMenuRef = useRef(null)
   const assistant = message.role === 'assistant'
   const provider = assistant ? getProviderPresentation(message.provider, message.model) : null
   const time = message.ts ? new Date(message.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
   const ttsActive = activeTTS === message.id
+
+  useEffect(() => {
+    if (!voiceMenuOpen) return undefined
+    const closeOnOutsidePointer = (event) => {
+      if (!voiceMenuRef.current?.contains(event.target)) setVoiceMenuOpen(false)
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setVoiceMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [voiceMenuOpen])
 
   function react(value) {
     const next = reaction === value ? null : value
@@ -108,7 +145,10 @@ export function ChatMessage({
           <ActionButton label="Copy" icon="⧉" onClick={() => onCopy(message.content)} />
           {assistant ? <>
             <ActionButton label={ttsActive ? 'Stop reading' : 'Read aloud'} icon={ttsActive ? '■' : '◖'} active={ttsActive} onClick={() => onReadAloud(message)} />
-            <ActionButton label="Voice settings" icon="⚙" active={voiceMenuOpen} onClick={() => setVoiceMenuOpen((open) => !open)} />
+            <div ref={voiceMenuRef} className="fl-chat-voice-control">
+              <ActionButton label="Voice settings" icon="⚙" active={voiceMenuOpen} expanded={voiceMenuOpen} onClick={() => setVoiceMenuOpen((open) => !open)} />
+              {voiceMenuOpen && <VoiceSettings voiceCfg={voiceCfg} onVoiceChange={onVoiceChange} elevenLabsAvailable={elevenLabsAvailable} onClose={() => setVoiceMenuOpen(false)} />}
+            </div>
             {!sending && <ActionButton label="Regenerate response" icon="↻" onClick={() => onRegenerate(message.id)} />}
             <ActionButton label="Good response" icon="↑" active={reaction === 'up'} onClick={() => react('up')} />
             <ActionButton label="Poor response" icon="↓" active={reaction === 'down'} onClick={() => react('down')} />
@@ -118,7 +158,6 @@ export function ChatMessage({
           <ActionButton label="Delete message" icon="×" danger onClick={() => onDelete(message.id)} />
         </div>
 
-        {assistant && voiceMenuOpen && <VoiceSettings voiceCfg={voiceCfg} onVoiceChange={onVoiceChange} elevenLabsAvailable={elevenLabsAvailable} />}
       </div>
     </article>
   )

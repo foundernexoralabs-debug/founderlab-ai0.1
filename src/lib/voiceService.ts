@@ -20,7 +20,7 @@ export type Gender = 'male' | 'female'
 export interface VoiceConfig {
   provider: VoiceProvider
   gender:   Gender
-  speed:    number   // -50 to +50 → spoken rate 0.5× to 1.5×
+  speed:    number   // percentage offset from normal: -50 to +150 → 0.5× to 2.5×
 }
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {

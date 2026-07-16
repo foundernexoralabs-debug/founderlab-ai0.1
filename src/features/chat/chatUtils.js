@@ -7,7 +7,13 @@ Response style:
 - Use short paragraphs, bullets, and headings only when they improve scanning.
 - Give complete, actionable advice with specific examples when useful.
 - Use Markdown thoughtfully: bold for key terms, code formatting for technical terms, and fenced blocks for code.
-- Match the requested depth. Do not turn a quick question into an essay.`
+- Match the requested depth. Do not turn a quick question into an essay.
+
+Voice-transcription handling:
+- Some user messages may be transcribed from speech and can contain small homophone, punctuation, or wording errors.
+- Use the surrounding founder context to interpret a plausibly harmless message rather than overreacting to one ambiguous phrase.
+- If a materially important safety meaning is genuinely unclear, ask one short neutral clarifying question instead of assuming intent or giving an unnecessary hard refusal.
+- Keep applicable safety boundaries for requests that are clearly unsafe.`
 
 export const CHAT_STARTER_PROMPTS = Object.freeze([
   'Help me brainstorm a content strategy for my startup',
@@ -43,6 +49,7 @@ function cleanMessage(message) {
     ...(typeof message.image === 'string' && message.image.startsWith('data:image/') ? { image: message.image } : {}),
     ...(typeof message.provider === 'string' ? { provider: message.provider } : {}),
     ...(typeof message.model === 'string' ? { model: message.model } : {}),
+    ...(message.role === 'user' && message.source === 'voice' ? { source: 'voice' } : {}),
     ...(typeof message.ts === 'string' ? { ts: message.ts } : {}),
   }
 }
@@ -123,15 +130,23 @@ export function getProviderPresentation(providerId, modelId) {
   }
 }
 
+function withVoiceTranscriptionContext(content, source) {
+  if (source !== 'voice') return content
+  return `${content}\n\n[Voice-transcription context: This message was dictated and may contain small homophone or punctuation errors. Use the conversation context. If a phrase is materially ambiguous, ask a concise clarification rather than assuming harmful intent; follow safety requirements for clearly unsafe requests.]`
+}
+
 export function toChatRequestMessages(messages, providerId) {
   const supportsImages = getProvider(providerId)?.capabilities.imageInput === true
-  return messages.map((message) => ({
-    role: message.role,
-    content: message.image && !supportsImages
+  return messages.map((message) => {
+    const content = message.image && !supportsImages
       ? `${message.content || ''}\n[The user attached an image. Explain any visual limitation and respond to their text.]`.trim()
-      : message.content,
-    ...(message.image && supportsImages ? { image: message.image } : {}),
-  }))
+      : message.content
+    return {
+      role: message.role,
+      content: withVoiceTranscriptionContext(content, message.source),
+      ...(message.image && supportsImages ? { image: message.image } : {}),
+    }
+  })
 }
 
 /** Maps the normalized internal contract to a calm, user-facing Chat state. */
