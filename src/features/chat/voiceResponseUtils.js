@@ -1,7 +1,7 @@
 import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTextUtils.js'
 
 const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
-export const MAX_LIVE_CALL_SPEECH_LENGTH = 340
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 280
 
 function shortenAtSentence(text, limit = MAX_CONVERSATIONAL_SPEECH_LENGTH) {
   if (text.length <= limit) return text

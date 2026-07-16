@@ -1,6 +1,25 @@
 export const LIVE_CALL_TURN_DELAY_MS = 950
-export const LIVE_CALL_MAX_SPOKEN_LENGTH = 340
+export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
+
+/**
+ * A Live Call is a focused state machine, separate from text-chat composing.
+ * Explicit states keep microphone, model, and playback feedback from
+ * competing for the same visible state.
+ */
+export const LIVE_CALL_PHASES = Object.freeze([
+  'idle',
+  'connecting',
+  'ready',
+  'listening',
+  'thinking',
+  'speaking',
+  'interrupted',
+  'muted',
+  'reconnecting',
+  'error',
+  'ended',
+])
 
 export const EMPTY_LIVE_CALL = Object.freeze({
   phase: 'idle',
@@ -8,16 +27,22 @@ export const EMPTY_LIVE_CALL = Object.freeze({
   note: '',
   error: '',
   muted: false,
+  providerId: '',
+  modelId: '',
   turns: Object.freeze([]),
 })
 
 export const LIVE_CALL_COPY = Object.freeze({
   connecting: Object.freeze({ title: 'Connecting', detail: 'Preparing your microphone.' }),
+  ready: Object.freeze({ title: 'Ready', detail: 'Your live call is ready when you are.' }),
   listening: Object.freeze({ title: 'Listening', detail: 'Speak naturally. FounderLab will take the next turn after a short pause.' }),
-  thinking: Object.freeze({ title: 'Thinking', detail: 'Working on a response.' }),
-  speaking: Object.freeze({ title: 'Speaking', detail: 'You can stop the response or mute your mic at any time.' }),
+  thinking: Object.freeze({ title: 'Thinking', detail: 'Putting together a concise answer.' }),
+  speaking: Object.freeze({ title: 'Responding', detail: 'Speak to interrupt, or stop the response at any time.' }),
+  interrupted: Object.freeze({ title: 'I’m listening', detail: 'FounderLab paused so you can continue.' }),
   muted: Object.freeze({ title: 'Mic muted', detail: 'Unmute when you are ready to continue.' }),
+  reconnecting: Object.freeze({ title: 'Reconnecting', detail: 'Restoring your microphone for the next turn.' }),
   error: Object.freeze({ title: 'Call needs attention', detail: 'Your conversation is safe. Resume when ready.' }),
+  ended: Object.freeze({ title: 'Call ended', detail: 'Your recap is ready in this conversation.' }),
 })
 
 export function getLiveCallProviderSupport(provider) {
@@ -45,6 +70,16 @@ export function shouldQueueLiveCallTurn({ active = false, muted = false, isFinal
 
 export function getLiveCallCopy(phase) {
   return LIVE_CALL_COPY[phase] || LIVE_CALL_COPY.error
+}
+
+/** A caller can take back the floor only while FounderLab is speaking. */
+export function canInterruptLiveCall({ active = false, muted = false, phase = '' } = {}) {
+  return active === true && muted !== true && phase === 'speaking'
+}
+
+/** The call UI needs a compact caption, never a duplicate message thread. */
+export function getLiveCallTranscriptPreview(value) {
+  return truncateLiveCallText(value, 140)
 }
 
 export function truncateLiveCallText(value, limit = LIVE_CALL_MAX_SPOKEN_LENGTH) {

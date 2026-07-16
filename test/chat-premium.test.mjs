@@ -19,10 +19,13 @@ import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '.
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
 import { createLiveCallResponsePlan, createVoiceResponsePlan, MAX_LIVE_CALL_SPEECH_LENGTH } from '../src/features/chat/voiceResponseUtils.js'
 import {
+  canInterruptLiveCall,
   createLiveCallRecap,
   EMPTY_LIVE_CALL,
   getLiveCallCopy,
   getLiveCallProviderSupport,
+  getLiveCallTranscriptPreview,
+  LIVE_CALL_PHASES,
   LIVE_CALL_TURN_DELAY_MS,
   shouldQueueLiveCallTurn,
   truncateLiveCallText,
@@ -322,6 +325,11 @@ test('Live Call uses one bounded turn model and accurately describes local and c
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: true, isFinal: true, transcript: 'Do not send.' }), false)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: false, transcript: 'Still speaking' }), false)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: '   ' }), false)
+  assert.equal(canInterruptLiveCall({ active: true, muted: false, phase: 'speaking' }), true)
+  assert.equal(canInterruptLiveCall({ active: true, muted: true, phase: 'speaking' }), false)
+  assert.equal(canInterruptLiveCall({ active: true, muted: false, phase: 'thinking' }), false)
+  assert.equal(LIVE_CALL_PHASES.includes('interrupted'), true)
+  assert.equal(LIVE_CALL_PHASES.includes('reconnecting'), true)
 
   assert.deepEqual(getLiveCallProviderSupport(null), {
     supported: false,
@@ -338,7 +346,8 @@ test('Live Call uses one bounded turn model and accurately describes local and c
     label: 'Groq · GPT-OSS 120B',
   })
   assert.match(getLiveCallCopy('listening').detail, /short pause/i)
-  assert.match(getLiveCallCopy('speaking').detail, /stop the response/i)
+  assert.match(getLiveCallCopy('speaking').detail, /interrupt/i)
+  assert.match(getLiveCallCopy('interrupted').title, /listening/i)
   assert.match(getLiveCallCopy('unknown').title, /Call needs attention/i)
 })
 
@@ -356,6 +365,7 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.match(recap, /FounderLab/i)
   assert.equal(createLiveCallRecap([{ role: 'user', content: 'No response yet.' }]), '')
   assert.equal(truncateLiveCallText('A useful answer. '.repeat(60), 120).length <= 121, true)
+  assert.equal(getLiveCallTranscriptPreview('A useful answer. '.repeat(60)).length <= 141, true)
 
   const longPlan = createLiveCallResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test a sharper headline\n- Measure conversion\n\nUse this detail to plan the rest of the week. '.repeat(8))
   assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
@@ -496,13 +506,19 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(voiceSessionSource, /End/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
   assert.match(liveCallSource, /Live call/)
-  assert.match(liveCallSource, /Live call exchange/)
+  assert.match(liveCallSource, /Live turns stay focused here/)
+  assert.match(liveCallSource, /fl-chat-live-call-orb/)
+  assert.doesNotMatch(liveCallSource, /Live call exchange/)
   assert.match(liveCallSource, /Local & private/)
   assert.match(liveCallSource, /Mute/)
   assert.match(liveCallSource, /Stop response/)
+  assert.match(liveCallSource, /Cancel capture/)
   assert.match(liveCallSource, /End call/)
   assert.match(liveCallUtilsSource, /Private local call/)
   assert.match(liveCallUtilsSource, /shouldQueueLiveCallTurn/)
+  assert.match(liveCallUtilsSource, /canInterruptLiveCall/)
+  assert.match(workspaceSource, /beginLiveCallInterruptionMonitor/)
+  assert.match(workspaceSource, /maxTokens: 240/)
   assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)

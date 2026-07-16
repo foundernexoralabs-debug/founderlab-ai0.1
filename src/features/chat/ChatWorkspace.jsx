@@ -38,7 +38,7 @@ import {
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
-import { createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
+import { canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createVoiceResponsePlan } from './voiceResponseUtils'
 import './chatPremium.css'
 
@@ -80,7 +80,7 @@ export function ChatWorkspace({ user }) {
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const voiceSessionRef = useRef({ active: false, transcript: '' })
-  const liveCallRef = useRef({ active: false, muted: false, transcript: '', turns: [], providerId: '', modelId: '', turnTimer: null, turn: 0, inFlight: false })
+  const liveCallRef = useRef({ active: false, muted: false, phase: 'idle', transcript: '', turns: [], providerId: '', modelId: '', turnTimer: null, turn: 0, inFlight: false, monitoringInterrupt: false })
 
   const {
     clearVoiceDraft,
@@ -99,6 +99,10 @@ export function ChatWorkspace({ user }) {
   const selectedProvider = useMemo(() => {
     return { ...getChatProviderPresentation(providerSelection.id, providerSelection.model), modelId: providerSelection.model }
   }, [providerSelection])
+  const liveCallProvider = useMemo(() => {
+    if (liveCall.phase === 'idle' || !liveCall.providerId) return selectedProvider
+    return { ...getChatProviderPresentation(liveCall.providerId, liveCall.modelId), modelId: liveCall.modelId }
+  }, [liveCall.modelId, liveCall.phase, liveCall.providerId, selectedProvider])
   const activeError = errorState?.conversationId === activeId ? errorState : null
   const voiceSessionLabel = activeVoiceProvider === 'elevenlabs'
     ? `ElevenLabs · ${ELEVENLABS_VOICE_PROVIDER?.voiceLabels[voiceConfig.gender] || 'Premium voice'}`
@@ -167,7 +171,15 @@ export function ChatWorkspace({ user }) {
       }))
     }
     if (liveCallRef.current.active && voiceInputState === 'error') {
+      // A microphone used only to detect a spoken interruption is optional.
+      // If that secondary listener cannot start, keep the spoken reply alive
+      // instead of presenting a false call failure.
+      if (liveCallRef.current.phase === 'speaking' && liveCallRef.current.monitoringInterrupt) {
+        liveCallRef.current.monitoringInterrupt = false
+        return
+      }
       clearLiveCallTurnTimer()
+      liveCallRef.current.phase = 'error'
       setLiveCall((current) => ({
         ...current,
         phase: 'error',
@@ -332,14 +344,36 @@ export function ChatWorkspace({ user }) {
     liveCallRef.current.turnTimer = null
   }
 
+  function setLiveCallPhase(phase, patch = {}) {
+    liveCallRef.current.phase = phase
+    setLiveCall((current) => ({ ...current, ...patch, phase }))
+  }
+
   function handleLiveCallTranscript(nextTranscript, { isFinal = false } = {}) {
     const call = liveCallRef.current
     if (!call.active || call.muted) return
     const transcript = typeof nextTranscript === 'string' ? nextTranscript.trim() : ''
+    if (!transcript) return
+
+    // Keep a small interruption monitor active while FounderLab speaks. The
+    // first real utterance stops playback and becomes the next call turn;
+    // audio itself never competes with the caller for the visible transcript.
+    if (canInterruptLiveCall(call) && call.monitoringInterrupt) {
+      clearLiveCallTurnTimer()
+      call.monitoringInterrupt = false
+      call.inFlight = false
+      call.turn += 1
+      call.transcript = transcript
+      stopTTS()
+      setActiveTTS(null)
+      setLiveCallPhase('interrupted', { transcript, note: '', error: '' })
+      if (isFinal) queueLiveCallTurn()
+      return
+    }
+
+    if (!['connecting', 'ready', 'listening', 'interrupted', 'reconnecting'].includes(call.phase)) return
     call.transcript = transcript
-    setLiveCall((current) => ['connecting', 'listening'].includes(current.phase)
-      ? { ...current, phase: 'listening', transcript, error: '' }
-      : current)
+    setLiveCallPhase('listening', { transcript, error: '' })
     if (shouldQueueLiveCallTurn({ active: call.active, muted: call.muted, isFinal, transcript })) {
       queueLiveCallTurn()
     } else if (!isFinal) {
@@ -353,20 +387,19 @@ export function ChatWorkspace({ user }) {
     const call = liveCallRef.current
     if (!call.active) return false
     clearLiveCallTurnTimer()
+    call.monitoringInterrupt = false
     if (call.muted) {
-      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', error: '' }))
+      setLiveCallPhase('muted', { transcript: '', error: '' })
       return false
     }
     call.transcript = ''
-    setLiveCall((current) => ({ ...current, phase: connecting ? 'connecting' : 'listening', transcript: '', note: '', error: '' }))
+    setLiveCallPhase(connecting ? 'connecting' : 'ready', { transcript: '', note: '', error: '' })
     const started = await startRecognition(handleLiveCallTranscript)
     if (!started) {
       if (call.active) {
-        setLiveCall((current) => ({
-          ...current,
-          phase: 'error',
+        setLiveCallPhase('error', {
           error: 'FounderLab could not start live call listening. Check microphone access and try again.',
-        }))
+        })
       }
       return false
     }
@@ -374,7 +407,7 @@ export function ChatWorkspace({ user }) {
       stopRecognition()
       return false
     }
-    setLiveCall((current) => ({ ...current, phase: 'listening', transcript: '', note: '', error: '' }))
+    setLiveCallPhase('listening', { transcript: '', note: '', error: '' })
     return true
   }
 
@@ -399,6 +432,7 @@ export function ChatWorkspace({ user }) {
     liveCallRef.current = {
       active: true,
       muted: false,
+      phase: 'connecting',
       transcript: '',
       turns: [],
       providerId: providerSelection.id,
@@ -406,9 +440,10 @@ export function ChatWorkspace({ user }) {
       turnTimer: null,
       turn: 0,
       inFlight: false,
+      monitoringInterrupt: false,
     }
     setErrorState(null)
-    setLiveCall({ ...EMPTY_LIVE_CALL, phase: 'connecting' })
+    setLiveCall({ ...EMPTY_LIVE_CALL, phase: 'connecting', providerId: providerSelection.id, modelId: providerSelection.model })
     return beginLiveCallListening({ connecting: true })
   }
 
@@ -420,6 +455,22 @@ export function ChatWorkspace({ user }) {
     }, LIVE_CALL_TURN_DELAY_MS)
   }
 
+  async function beginLiveCallInterruptionMonitor(turn) {
+    const call = liveCallRef.current
+    if (!canInterruptLiveCall(call) || call.turn !== turn) return false
+    call.monitoringInterrupt = true
+    const started = await startRecognition(handleLiveCallTranscript)
+    if (!call.active || call.turn !== turn || call.phase !== 'speaking') {
+      stopRecognition()
+      return false
+    }
+    // Speech recognition is an enhancement for barge-in. A browser that does
+    // not allow the secondary listener must not turn a healthy spoken reply
+    // into a failed call.
+    call.monitoringInterrupt = started
+    return started
+  }
+
   async function sendLiveCallTurn() {
     const call = liveCallRef.current
     const transcript = typeof call.transcript === 'string' ? call.transcript.trim() : ''
@@ -429,10 +480,11 @@ export function ChatWorkspace({ user }) {
     call.inFlight = true
     const turn = ++call.turn
     stopRecognition()
+    call.monitoringInterrupt = false
     clearVoiceDraft()
     const userTurn = { id: uniqueMessageId(), role: 'user', content: transcript, source: 'voice', ts: ts() }
     call.turns = [...call.turns, userTurn]
-    setLiveCall((current) => ({ ...current, phase: 'thinking', transcript: '', turns: call.turns, note: '', error: '' }))
+    setLiveCallPhase('thinking', { transcript: '', turns: call.turns, note: '', error: '' })
     const baseMessages = conversationsRef.current.find((conversation) => conversation.id === activeId)?.messages || []
     const response = await requestLiveCallReply({
       conversationMessages: baseMessages,
@@ -444,37 +496,43 @@ export function ChatWorkspace({ user }) {
     call.inFlight = false
 
     if (!response?.ok || !response.message) {
-      setLiveCall((current) => ({
-        ...current,
-        phase: 'error',
+      setLiveCallPhase('error', {
         error: response?.cancelled
           ? 'That call turn was stopped. Resume when you are ready.'
           : response?.presentation?.message || 'FounderLab could not complete that call turn. Resume when ready.',
-      }))
+      })
       return
     }
 
     call.turns = [...call.turns, response.message]
     const plan = createLiveCallResponsePlan(response.message.content)
     if (!plan.spokenText) {
-      setLiveCall((current) => ({ ...current, phase: 'listening', turns: call.turns, transcript: '', note: '', error: '' }))
+      setLiveCallPhase('listening', { turns: call.turns, transcript: '', note: '', error: '' })
       await beginLiveCallListening()
       return
     }
 
-    setLiveCall((current) => ({ ...current, phase: 'speaking', transcript: '', turns: call.turns, note: plan.note, error: '' }))
+    setLiveCallPhase('speaking', { transcript: '', turns: call.turns, note: plan.note, error: '' })
     setActiveTTS(response.message.id)
+    let playbackFailed = false
     try {
-      await speak(plan.spokenText)
+      const playback = speak(plan.spokenText)
+      void beginLiveCallInterruptionMonitor(turn)
+      await playback
+    } catch {
+      playbackFailed = true
     } finally {
       if (turn !== call.turn) return
       setActiveTTS((current) => current === response.message.id ? null : current)
     }
     if (!call.active || turn !== call.turn) return
+    stopRecognition()
+    call.monitoringInterrupt = false
     if (call.muted) {
-      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', note: 'Response complete. Unmute when you are ready.', error: '' }))
+      setLiveCallPhase('muted', { transcript: '', note: 'Response complete. Unmute when you are ready.', error: '' })
       return
     }
+    if (playbackFailed) setLiveCallPhase('ready', { note: 'Voice playback was unavailable for that reply. You can keep talking.', error: '' })
     await beginLiveCallListening()
   }
 
@@ -483,7 +541,7 @@ export function ChatWorkspace({ user }) {
     if (!call.active) return
     if (call.muted) {
       call.muted = false
-      if (!['thinking', 'speaking'].includes(liveCall.phase)) beginLiveCallListening()
+      if (!['thinking', 'speaking'].includes(call.phase)) beginLiveCallListening({ connecting: call.phase === 'error' })
       else setLiveCall((current) => ({ ...current, muted: false }))
       return
     }
@@ -491,10 +549,24 @@ export function ChatWorkspace({ user }) {
     call.transcript = ''
     clearLiveCallTurnTimer()
     stopRecognition()
+    call.monitoringInterrupt = false
     clearVoiceDraft()
-    setLiveCall((current) => ['connecting', 'listening'].includes(current.phase)
-      ? { ...current, phase: 'muted', muted: true, transcript: '', note: '', error: '' }
-      : { ...current, muted: true })
+    if (['connecting', 'ready', 'listening', 'interrupted', 'reconnecting'].includes(call.phase)) {
+      setLiveCallPhase('muted', { muted: true, transcript: '', note: '', error: '' })
+    } else {
+      setLiveCall((current) => ({ ...current, muted: true }))
+    }
+  }
+
+  function cancelLiveCallCapture() {
+    const call = liveCallRef.current
+    if (!call.active || !['connecting', 'ready', 'listening', 'interrupted', 'reconnecting'].includes(call.phase)) return
+    clearLiveCallTurnTimer()
+    call.transcript = ''
+    stopRecognition()
+    clearVoiceDraft()
+    setLiveCallPhase('ready', { transcript: '', note: 'Capture cleared. Ready when you are.', error: '' })
+    void beginLiveCallListening()
   }
 
   function stopLiveCallTurn() {
@@ -503,18 +575,19 @@ export function ChatWorkspace({ user }) {
     clearLiveCallTurnTimer()
     call.turn += 1
     call.inFlight = false
-    if (liveCall.phase === 'thinking') {
+    call.monitoringInterrupt = false
+    if (call.phase === 'thinking') {
       requestAbortRef.current?.abort()
       requestAbortRef.current = null
       requestSequenceRef.current += 1
       setSending(false)
     }
-    if (liveCall.phase === 'speaking') {
+    if (call.phase === 'speaking') {
       stopTTS()
       setActiveTTS(null)
     }
     if (call.muted) {
-      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', note: 'Response stopped. Unmute when ready.', error: '' }))
+      setLiveCallPhase('muted', { transcript: '', note: 'Response stopped. Unmute when ready.', error: '' })
       return
     }
     beginLiveCallListening()
@@ -525,6 +598,7 @@ export function ChatWorkspace({ user }) {
     if (!call.active) return startLiveCall()
     call.muted = false
     setErrorState(null)
+    setLiveCallPhase('reconnecting', { muted: false, error: '' })
     return beginLiveCallListening({ connecting: true })
   }
 
@@ -563,8 +637,10 @@ export function ChatWorkspace({ user }) {
     const wasActive = call.active
     if (persistCall) persistLiveCallRecap(call)
     call.active = false
+    call.phase = 'ended'
     call.muted = false
     call.inFlight = false
+    call.monitoringInterrupt = false
     call.turn += 1
     call.transcript = ''
     clearLiveCallTurnTimer()
@@ -693,7 +769,7 @@ export function ChatWorkspace({ user }) {
       model: modelId,
       messages: toChatRequestMessages(callMessages, providerId),
       system: getLiveCallSystemPrompt(getChatRequestContext(callMessages)),
-      maxTokens: 360,
+      maxTokens: 240,
       localOllamaAllowed: true,
     }, { signal: controller.signal })
 
@@ -1059,10 +1135,11 @@ export function ChatWorkspace({ user }) {
           <section className="fl-chat-live-call-stage" aria-label="Live call session">
             <ChatLiveCallSurface
               call={liveCall}
-              provider={selectedProvider}
+              provider={liveCallProvider}
               voiceLabel={voiceSessionLabel}
               onToggleMute={toggleLiveCallMute}
               onStopTurn={stopLiveCallTurn}
+              onCancelCapture={cancelLiveCallCapture}
               onResume={resumeLiveCall}
               onEnd={endLiveCall}
             />
