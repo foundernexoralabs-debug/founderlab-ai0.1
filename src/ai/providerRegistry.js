@@ -59,7 +59,7 @@ const providerEntries = [
     id: 'ollama',
     name: 'Local Ollama',
     icon: '🦙',
-    sub: '100% private · Free forever · Your machine',
+    sub: 'Local inference · Free · Your machine',
     default: 'llama3.2',
     keyEnv: null,
     docsUrl: 'https://ollama.com',

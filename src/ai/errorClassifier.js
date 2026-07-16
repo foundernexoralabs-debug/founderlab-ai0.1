@@ -11,6 +11,13 @@ const ERROR_MESSAGES = {
   RATE_LIMITED: 'is temporarily busy. Please try again in a moment.',
   RATE_LIMIT_BACKEND_UNAVAILABLE: 'cannot run because AI request protection is unavailable for this deployment. Please try again later.',
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
+  OLLAMA_LOCAL_ONLY: 'runs directly on this device and cannot be sent through the cloud API.',
+  OLLAMA_CHAT_ONLY: 'is currently available for FounderLab Chat only. Choose a cloud provider for this feature.',
+  OLLAMA_INVALID_URL: 'needs a valid local Ollama address. Reset the local connection and try again.',
+  OLLAMA_UNAVAILABLE: 'is not available on this device. Start Ollama, then try again.',
+  OLLAMA_TIMEOUT: 'took too long to respond. Check that the selected local model can run on this device, then try again.',
+  OLLAMA_MODEL_REQUIRED: 'needs a local model selected. Discover models in Settings, then choose one.',
+  OLLAMA_MODEL_UNAVAILABLE: 'cannot find the selected local model. Refresh your local models and choose one.',
   GEMINI_REQUEST_INVALID: 'rejected this request. Choose another Gemini model or check server-side Google AI access.',
   GEMINI_BILLING_OR_REGION_REQUIRED: 'requires Google AI Studio billing or a supported region before it can run.',
   NETWORK_FAILURE: 'could not be reached. Check your connection and try again.',
@@ -48,12 +55,12 @@ export function classifyAIError({ provider, status, code, message } = {}) {
 
   const providerName = getProvider(provider)?.name || getVoiceProvider(provider)?.name || 'The AI provider'
   const globalError = ['AUTHENTICATION_REQUIRED', 'AUTHENTICATION_INVALID', 'AUTHENTICATION_UNAVAILABLE', 'CORS_ORIGIN_DENIED'].includes(resolvedCode)
-  const retryable = ['RATE_LIMITED', 'RATE_LIMIT_BACKEND_UNAVAILABLE', 'PROVIDER_UNAVAILABLE', 'NETWORK_FAILURE', 'MALFORMED_RESPONSE', 'EMPTY_RESPONSE', 'UNKNOWN', 'AUTHENTICATION_UNAVAILABLE'].includes(resolvedCode)
+  const retryable = ['RATE_LIMITED', 'RATE_LIMIT_BACKEND_UNAVAILABLE', 'PROVIDER_UNAVAILABLE', 'NETWORK_FAILURE', 'MALFORMED_RESPONSE', 'EMPTY_RESPONSE', 'UNKNOWN', 'AUTHENTICATION_UNAVAILABLE', 'OLLAMA_UNAVAILABLE', 'OLLAMA_TIMEOUT'].includes(resolvedCode)
   const resolvedStatus = Number.isInteger(status)
     ? status
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
-      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' ? 400
+      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' || resolvedCode === 'OLLAMA_LOCAL_ONLY' || resolvedCode === 'OLLAMA_CHAT_ONLY' || resolvedCode === 'OLLAMA_INVALID_URL' || resolvedCode === 'OLLAMA_MODEL_REQUIRED' || resolvedCode === 'OLLAMA_MODEL_UNAVAILABLE' ? 400
       : resolvedCode === 'RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503
           : 502

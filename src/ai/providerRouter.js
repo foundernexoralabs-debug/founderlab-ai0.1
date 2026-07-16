@@ -7,7 +7,12 @@ export async function routeAIRequest(input, {
   electronBridge,
   accessToken,
 } = {}) {
-  const normalized = normalizeAIRequest(input, { enforceLimits: true })
+  const normalized = normalizeAIRequest(input, {
+    enforceLimits: true,
+    // Ollama is a browser-to-loopback integration. Normalizing here prevents a
+    // persisted preference or caller from turning it into an arbitrary fetch.
+    restrictOllamaToLocal: true,
+  })
   if (!normalized.ok) {
     return createAIErrorResult({
       provider: input?.provider,
