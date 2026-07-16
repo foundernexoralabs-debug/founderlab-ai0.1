@@ -117,7 +117,7 @@ export function ChatMessage({
   }
 
   return (
-    <article className={`fl-chat-message ${assistant ? 'is-assistant' : 'is-user'}`} aria-label={assistant ? 'FounderLab response' : 'Your message'}>
+    <article className={`fl-chat-message ${assistant ? 'is-assistant' : 'is-user'} ${ttsActive ? 'is-speaking' : ''}`} aria-label={assistant ? 'FounderLab response' : 'Your message'}>
       <div aria-hidden="true" className="fl-chat-avatar" style={{
         color: '#fff', fontSize: assistant ? 14 : 11, fontWeight: assistant ? 500 : 750,
         background: assistant ? `linear-gradient(135deg, ${C.accent}, #a855f7)` : 'linear-gradient(135deg, #1f2937, #475569)',

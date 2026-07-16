@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { C } from '@/app/theme'
+import { toast } from '@/app/toast'
 import { ACCEPTED_IMAGE_TYPES, fileToBase64 } from '@/lib/files'
 
 function WaveformBars() {
@@ -28,9 +29,9 @@ export function ChatComposer({
   const recording = ['listening', 'resuming'].includes(voiceInputState)
   const voiceError = voiceInputState === 'error'
   const voiceStatus = voiceInputState === 'listening'
-    ? 'Listening — brief pauses are okay.'
+    ? 'Listening — pause naturally; I’ll keep your place.'
     : voiceInputState === 'resuming'
-      ? 'Still listening — ready when you are.'
+      ? 'Keeping your place — continue when you are ready.'
       : voiceInputState === 'error'
         ? 'Voice input stopped. Your draft is still here.'
         : ''
@@ -43,12 +44,18 @@ export function ChatComposer({
   }, [input])
 
   async function attachFile(file) {
-    if (!file || !file.type.startsWith('image/')) return
-    if (file.size > 5 * 1024 * 1024) return
+    if (!file || !file.type.startsWith('image/')) {
+      toast('Choose an image to attach to this message.', 'error')
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast('Choose an image smaller than 5 MB.', 'error')
+      return
+    }
     try {
       onPendingImage({ base64: await fileToBase64(file), name: file.name })
     } catch {
-      // The parent retains the stable composer state when a browser cannot read an attachment.
+      toast('FounderLab could not read that image. Please try another file.', 'error')
     }
   }
 
@@ -65,7 +72,7 @@ export function ChatComposer({
         {pendingImage && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, padding: '7px 10px', background: C.surf, borderRadius: 10, border: `1px solid ${C.border}` }}>
             <img src={pendingImage.base64} alt="Pending attachment" style={{ width: 34, height: 34, borderRadius: 7, objectFit: 'cover' }} />
-            <span style={{ flex: 1, color: C.t2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pendingImage.name}</span>
+            <span style={{ flex: 1, minWidth: 0, color: C.t2, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><span style={{ color: C.t3 }}>Image ready · </span>{pendingImage.name}</span>
             <button type="button" onClick={() => onPendingImage(null)} aria-label="Remove image" style={{ background: 'transparent', border: 'none', color: C.t2, cursor: 'pointer', fontSize: 17 }}>×</button>
           </div>
         )}
@@ -81,7 +88,7 @@ export function ChatComposer({
           onDrop={(event) => { event.preventDefault(); attachFile(event.dataTransfer.files?.[0]) }}
           style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${recording ? (listening ? C.red : C.borderFocus) : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
           <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display: 'none' }} onChange={(event) => { attachFile(event.target.files?.[0]); event.target.value = '' }} />
-          <button type="button" onClick={() => fileRef.current?.click()} title="Attach image" aria-label="Attach image" style={{ background: pendingImage ? C.accentM : 'transparent', border: `1px solid ${pendingImage ? C.borderFocus : 'transparent'}`, borderRadius: 10, color: pendingImage ? C.accent : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>⌁</button>
+          <button type="button" className="fl-chat-composer-attachment" onClick={() => fileRef.current?.click()} title="Add an image (up to 5 MB)" aria-label="Add an image" style={{ background: pendingImage ? C.accentM : 'transparent', border: `1px solid ${pendingImage ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 16, lineHeight: 0 }}>+</span><span className="fl-chat-composer-attachment-label">Image</span></button>
           <textarea
             ref={textRef}
             value={input}
@@ -100,11 +107,11 @@ export function ChatComposer({
             aria-label="Message FounderLab"
             style={{ flex: 1, minWidth: 0, minHeight: 24, maxHeight: 200, overflowY: 'auto', resize: 'none', background: 'transparent', border: 'none', color: C.t1, outline: 'none', padding: '9px 3px', fontFamily: 'inherit', fontSize: 15, lineHeight: 1.55 }}
           />
-          <button type="button" onClick={onMic} title={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} aria-label={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
+          <button type="button" className="fl-chat-composer-voice" onClick={onMic} title={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} aria-label={recording ? 'Finish voice input' : voiceError ? 'Retry voice input' : 'Start voice input'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
           {sending ? (
             <button type="button" onClick={onStop} title="Stop generating" aria-label="Stop generating" style={{ background: C.red, border: 'none', borderRadius: 10, color: '#fff', cursor: 'pointer', padding: '9px 12px', fontSize: 12, boxShadow: '0 3px 12px rgba(239,68,68,.25)' }}>■</button>
           ) : (
-            <button type="button" onClick={onSend} disabled={!canSend} title="Send message" aria-label="Send message" style={{ background: canSend ? `linear-gradient(135deg, ${C.accent}, #8b5cf6)` : C.surfHigh, border: 'none', borderRadius: 10, color: '#fff', cursor: canSend ? 'pointer' : 'not-allowed', opacity: canSend ? 1 : .5, padding: '8px 12px', fontSize: 17, lineHeight: 1, boxShadow: canSend ? '0 4px 14px rgba(99,102,241,.3)' : 'none' }}>↑</button>
+            <button type="button" className="fl-chat-composer-send" onClick={onSend} disabled={!canSend} title="Send message" aria-label="Send message" style={{ background: canSend ? `linear-gradient(135deg, ${C.accent}, #8b5cf6)` : C.surfHigh, border: 'none', borderRadius: 10, color: '#fff', cursor: canSend ? 'pointer' : 'not-allowed', opacity: canSend ? 1 : .5, padding: '8px 12px', fontSize: 17, lineHeight: 1, boxShadow: canSend ? '0 4px 14px rgba(99,102,241,.3)' : 'none' }}>↑</button>
           )}
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, minHeight: 18, flexWrap: 'wrap' }}>

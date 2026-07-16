@@ -84,7 +84,7 @@ async function speakElevenLabs(config: VoiceConfig, text: string): Promise<boole
       const audio = new Audio(url)
       activeAudio = audio
       activeAudioUrl = url
-      audio.playbackRate = 1 + config.speed / 100  // -50..+50 → 0.5..1.5
+      audio.playbackRate = 1 + config.speed / 100  // -50..+150 → 0.5..2.5
       const complete = (ok: boolean) => {
         if (activeAudio === audio) releaseActiveAudio()?.(ok)
       }

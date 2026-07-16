@@ -7,6 +7,7 @@ import { routeAIRequest } from '../src/ai/providerRouter.js'
 import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import {
+  applyFinalSpeechPhrase,
   appendVoiceTranscript,
   commitInterimTranscript,
   shouldResumeVoiceInput,
@@ -136,13 +137,21 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.equal(appendVoiceTranscript('A typed opening', 'and a dictated follow-up'), 'A typed opening and a dictated follow-up')
   assert.equal(appendVoiceTranscript('First sentence.', 'Second sentence'), 'First sentence. Second sentence')
   assert.equal(commitInterimTranscript('Keep the opening', 'and preserve this final phrase'), 'Keep the opening and preserve this final phrase')
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Typed opening', 'Draft the launch email'], 'Sorry, I meant draft the investor update', 1),
+    ['Typed opening', 'draft the investor update'],
+  )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Typed opening'], 'I mean add a clearer CTA', 1),
+    ['Typed opening', 'add a clearer CTA'],
+  )
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'no-speech' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: '' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'not-allowed' }), false)
   assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 150 && VOICE_INPUT_RESTART_DELAY_MS <= 350, true)
-  assert.match(voiceInputStatusCopy('listening'), /brief pauses/i)
-  assert.match(voiceInputStatusCopy('resuming'), /still listening/i)
+  assert.match(voiceInputStatusCopy('listening'), /pause naturally/i)
+  assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
 
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
@@ -183,9 +192,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
-  assert.match(composerSource, /brief pauses are okay/i)
+  assert.match(composerSource, /pause naturally/i)
   assert.match(composerSource, /Finish voice input/)
   assert.match(composerSource, /Retry voice input/)
+  assert.match(composerSource, /Add an image/)
   assert.match(messageSource, /document\.addEventListener\('pointerdown'/)
   assert.match(messageSource, /event\.key === 'Escape'/)
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
@@ -194,7 +204,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /justify-content: flex-end/)
   assert.match(css, /fl-chat-message-card/)
   assert.match(recognitionSource, /recognition\.continuous = true/)
-  assert.match(recognitionSource, /commitInterimTranscript/)
+  assert.match(recognitionSource, /applyFinalSpeechPhrase/)
   assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
   assert.match(speechSource, /let activeAudio/)
   assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)

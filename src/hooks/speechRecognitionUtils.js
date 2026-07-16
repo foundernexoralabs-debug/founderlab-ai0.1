@@ -15,6 +15,26 @@ export function commitInterimTranscript(confirmed = '', interim = '') {
   return appendVoiceTranscript(confirmed, interim)
 }
 
+const SPOKEN_CORRECTION = /^(?:(?:no|sorry|actually)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction)[:,;]?\s+(.+)$/i
+
+/**
+ * Browser-final recognition results are normally the source of truth. When a
+ * user clearly corrects their immediately preceding dictated phrase, preserve
+ * the replacement rather than making them manually repair a harmless slip.
+ * Typed text before dictation is protected from this replacement behavior.
+ */
+export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegmentCount = 0) {
+  const safeSegments = Array.isArray(segments)
+    ? segments.map((segment) => typeof segment === 'string' ? segment.trim() : '').filter(Boolean)
+    : []
+  const cleanPhrase = typeof phrase === 'string' ? phrase.trim() : ''
+  if (!cleanPhrase) return safeSegments
+  const correction = cleanPhrase.match(SPOKEN_CORRECTION)?.[1]?.trim()
+  if (!correction) return [...safeSegments, cleanPhrase]
+  if (safeSegments.length > protectedSegmentCount) return [...safeSegments.slice(0, -1), correction]
+  return [...safeSegments, correction]
+}
+
 /**
  * Browser speech recognition often emits `no-speech` after a natural pause.
  * That is not a user decision to finish dictating, so a live session should
@@ -27,8 +47,8 @@ export function shouldResumeVoiceInput({ desired = false, error = '' } = {}) {
 
 export function voiceInputStatusCopy(state) {
   const copy = {
-    listening: 'Listening — brief pauses are okay.',
-    resuming: 'Still listening — ready when you are.',
+    listening: 'Listening — pause naturally; I’ll keep your place.',
+    resuming: 'Keeping your place — continue when you are ready.',
     error: 'Voice input needs attention. Your typed draft is still here.',
     idle: '',
   }

@@ -29,10 +29,28 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 
 export function pickBrowserVoice(gender: Gender, voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
   const priority = BROWSER_VOICES[gender] as readonly string[]
-  return priority.reduce<SpeechSynthesisVoice | null>(
-    (found, name) => found ?? (voices.find(v => v.name === name) ?? null),
-    null
-  ) ?? voices.find(v => v.lang === 'en-GB') ?? voices.find(v => v.lang.startsWith('en')) ?? null
+  const explicit = priority.reduce<SpeechSynthesisVoice | null>(
+    (found, name) => found ?? (voices.find((voice) => voice.name === name) ?? null),
+    null,
+  )
+  if (explicit) return explicit
+
+  const genderHints = gender === 'female'
+    ? ['sonia', 'samantha', 'ava', 'karen', 'moira', 'zira', 'aria']
+    : ['ryan', 'daniel', 'arthur', 'alex', 'aaron', 'david', 'fred']
+  const qualityHints = ['natural', 'enhanced', 'neural', 'premium', 'online', 'google']
+  const english = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('en'))
+  const candidates = english.length ? english : voices
+  return candidates
+    .map((voice) => {
+      const name = voice.name.toLowerCase()
+      const languageScore = voice.lang?.toLowerCase() === 'en-gb' ? 20 : 8
+      const qualityScore = qualityHints.some((hint) => name.includes(hint)) ? 12 : 0
+      const genderScore = genderHints.some((hint) => name.includes(hint)) ? 8 : 0
+      const remoteQualityScore = voice.localService === false ? 3 : 0
+      return { voice, score: languageScore + qualityScore + genderScore + remoteQualityScore }
+    })
+    .sort((left, right) => right.score - left.score)[0]?.voice ?? null
 }
 
 export function cleanForSpeech(text: string): string {

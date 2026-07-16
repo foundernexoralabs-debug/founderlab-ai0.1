@@ -3,7 +3,7 @@ import { toast } from '@/app/toast'
 import { getMicrophoneStream } from '@/lib/microphone'
 import {
   appendVoiceTranscript,
-  commitInterimTranscript,
+  applyFinalSpeechPhrase,
   shouldResumeVoiceInput,
   VOICE_INPUT_RESTART_DELAY_MS,
 } from './speechRecognitionUtils'
@@ -26,6 +26,8 @@ export function useSpeechRecognition() {
   const sessionRef = useRef(0)
   const confirmedTranscriptRef = useRef('')
   const interimTranscriptRef = useRef('')
+  const finalizedSegmentsRef = useRef([])
+  const protectedSegmentCountRef = useRef(0)
   const onUpdateRef = useRef(null)
 
   const stop = useCallback(() => {
@@ -41,6 +43,8 @@ export function useSpeechRecognition() {
   const clearVoiceDraft = useCallback(() => {
     confirmedTranscriptRef.current = ''
     interimTranscriptRef.current = ''
+    finalizedSegmentsRef.current = []
+    protectedSegmentCountRef.current = 0
     setTranscript('')
     setHasRecognizedSpeech(false)
   }, [])
@@ -67,6 +71,8 @@ export function useSpeechRecognition() {
     onUpdateRef.current = onUpdate
     confirmedTranscriptRef.current = typeof initialTranscript === 'string' ? initialTranscript.trim() : ''
     interimTranscriptRef.current = ''
+    finalizedSegmentsRef.current = confirmedTranscriptRef.current ? [confirmedTranscriptRef.current] : []
+    protectedSegmentCountRef.current = finalizedSegmentsRef.current.length
     setTranscript(confirmedTranscriptRef.current)
     setHasRecognizedSpeech(false)
     setVoiceInputState('resuming')
@@ -75,6 +81,16 @@ export function useSpeechRecognition() {
       const next = appendVoiceTranscript(confirmedTranscriptRef.current, interimTranscriptRef.current)
       setTranscript(next)
       onUpdateRef.current?.(next)
+    }
+
+    const finalizeSpokenPhrase = (phrase) => {
+      finalizedSegmentsRef.current = applyFinalSpeechPhrase(
+        finalizedSegmentsRef.current,
+        phrase,
+        protectedSegmentCountRef.current,
+      )
+      confirmedTranscriptRef.current = finalizedSegmentsRef.current.join(' ')
+      if (typeof phrase === 'string' && phrase.trim()) setHasRecognizedSpeech(true)
     }
 
     const beginRecognition = () => {
@@ -102,9 +118,8 @@ export function useSpeechRecognition() {
           const result = event.results[index]
           const phrase = result?.[0]?.transcript || ''
           if (result.isFinal) {
-            confirmedTranscriptRef.current = appendVoiceTranscript(confirmedTranscriptRef.current, phrase)
+            finalizeSpokenPhrase(phrase)
             interimTranscriptRef.current = ''
-            if (phrase.trim()) setHasRecognizedSpeech(true)
           } else {
             interim += phrase
           }
@@ -142,8 +157,7 @@ export function useSpeechRecognition() {
         // interim-only phrase. Preserve it before reconnecting so a natural
         // pause never erases the end of the user's thought.
         if (interimTranscriptRef.current.trim()) {
-          confirmedTranscriptRef.current = commitInterimTranscript(
-            confirmedTranscriptRef.current,
+          finalizeSpokenPhrase(
             interimTranscriptRef.current,
           )
           interimTranscriptRef.current = ''
