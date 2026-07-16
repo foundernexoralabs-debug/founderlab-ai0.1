@@ -5,6 +5,7 @@ import { requestOllama } from './providers/ollama.js'
 export async function routeAIRequest(input, {
   fetchImpl = globalThis.fetch,
   electronBridge,
+  permissionQuery,
   accessToken,
 } = {}) {
   const normalized = normalizeAIRequest(input, {
@@ -24,7 +25,7 @@ export async function routeAIRequest(input, {
 
   const request = normalized.value
   if (request.provider === 'ollama') {
-    return requestOllama(request, { fetchImpl, electronBridge })
+    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery })
   }
 
   if (typeof fetchImpl !== 'function') {

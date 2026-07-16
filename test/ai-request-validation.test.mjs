@@ -306,6 +306,45 @@ test('an active workspace session is used by both Chat and provider-status reque
   }
 })
 
+test('provider availability keeps a Local Ollama selection made while status refresh is in flight', async () => {
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const store = new Map()
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => store.get(key) || null,
+      setItem: (key, value) => store.set(key, String(value)),
+    },
+  })
+
+  try {
+    setAIProviderPreference('groq')
+    const status = await refreshProviderAvailability({
+      accessToken: 'active-workspace-access-token',
+      fetchImpl: async () => {
+        // This mirrors selecting the Local Ollama card before the status
+        // response returns. A stale result must not switch the card away.
+        setAIProviderPreference('ollama')
+        return jsonResponse({ body: {
+          ok: true,
+          providers: {
+            anthropic: { configured: false },
+            groq: { configured: true },
+            gemini: { configured: true },
+            ollama: { configured: true, local: true },
+          },
+        } })
+      },
+    })
+
+    assert.equal(status.provider, 'ollama')
+    assert.equal(getAIProviderPreference(), 'ollama')
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else Object.defineProperty(globalThis, 'localStorage', originalStorage)
+  }
+})
+
 test('a genuinely signed-out browser request has no token and receives the normalized authentication error', async () => {
   const previousSession = workspaceStore.session
   workspaceStore.session = null
@@ -507,6 +546,36 @@ test('Ollama failures remain isolated and an accidental server route is rejected
   } finally {
     resetProviderConnectionStatuses()
   }
+})
+
+test('Ollama retains a browser local-access category without exposing browser internals', async () => {
+  const denied = await discoverOllama('http://localhost:11434', {
+    permissionQuery: async () => ({ state: 'denied' }),
+    fetchImpl: async () => assert.fail('A denied browser permission must not send a request'),
+  })
+  assert.equal(denied.ok, false)
+  assert.equal(denied.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
+
+  const blocked = await requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => ({ state: 'prompt' }),
+    fetchImpl: async () => { throw new TypeError('browser refused local request') },
+  })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.error.code, 'OLLAMA_BROWSER_ACCESS_BLOCKED')
+  assert.equal(blocked.error.message.includes('browser refused local request'), false)
+
+  const deniedTest = await requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => ({ state: 'denied' }),
+    fetchImpl: async () => assert.fail('A denied browser permission must not send a test request'),
+  })
+  assert.equal(deniedTest.ok, false)
+  assert.equal(deniedTest.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
 })
 
 test('Ollama is presented as a first-class local provider without stale CORS setup guidance', () => {

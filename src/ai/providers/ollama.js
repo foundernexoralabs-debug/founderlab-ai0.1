@@ -66,20 +66,39 @@ function availableInspection(models) {
   })
 }
 
-/**
- * Public HTTPS apps talking to a loopback HTTP service are subject to browser
- * local-network controls in addition to CORS. Unsupported browsers ignore
- * this standard request hint; supporting browsers can use it to apply their
- * local-network permission flow instead of failing as opaque mixed content.
- */
 function localOllamaFetchOptions(options) {
   return {
     mode: 'cors',
     credentials: 'omit',
     cache: 'no-store',
+    // An HTTPS FounderLab Preview reaches a local HTTP Ollama service. This
+    // tells supporting browsers that the literal localhost target is loopback,
+    // allowing their local-network permission flow to relax mixed-content
+    // blocking without routing a request through a cloud service.
     targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE,
     ...options,
   }
+}
+
+async function getLoopbackPermissionState(permissionQuery) {
+  const query = permissionQuery
+    || (typeof navigator !== 'undefined' && typeof navigator.permissions?.query === 'function'
+      ? navigator.permissions.query.bind(navigator.permissions)
+      : null)
+  if (!query) return ''
+  try {
+    const permission = await query({ name: 'loopback-network' })
+    return ['granted', 'prompt', 'denied'].includes(permission?.state) ? permission.state : ''
+  } catch {
+    // The loopback-network descriptor is not available in every browser.
+    return ''
+  }
+}
+
+function localRequestFailureCode(error, permissionState) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'OLLAMA_TIMEOUT'
+  if (permissionState === 'denied') return 'OLLAMA_BROWSER_ACCESS_DENIED'
+  return 'OLLAMA_BROWSER_ACCESS_BLOCKED'
 }
 
 export function isElectronOllamaAvailable(bridge) {
@@ -91,7 +110,7 @@ export function isElectronOllamaAvailable(bridge) {
  * request produces an opaque response and cannot prove that this website can
  * actually use Ollama, so it must never be treated as a successful detection.
  */
-export async function discoverOllama(base, { fetchImpl = globalThis.fetch, electronBridge } = {}) {
+export async function discoverOllama(base, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery } = {}) {
   const url = normalizeOllamaUrl(base)
   if (!url || typeof fetchImpl !== 'function') return unavailableInspection('OLLAMA_UNAVAILABLE')
 
@@ -101,6 +120,8 @@ export async function discoverOllama(base, { fetchImpl = globalThis.fetch, elect
       const result = await bridge.ollama.probe(url)
       return result?.running ? availableInspection(result.models) : unavailableInspection()
     }
+    const permissionState = await getLoopbackPermissionState(permissionQuery)
+    if (permissionState === 'denied') return unavailableInspection('OLLAMA_BROWSER_ACCESS_DENIED')
     const response = await fetchImpl(url + '/api/tags', localOllamaFetchOptions({
       method: 'GET',
       headers: { Accept: 'application/json' },
@@ -111,7 +132,8 @@ export async function discoverOllama(base, { fetchImpl = globalThis.fetch, elect
     if (!data || !Array.isArray(data.models)) return unavailableInspection('MALFORMED_RESPONSE')
     return availableInspection(data.models)
   } catch (error) {
-    return unavailableInspection(error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'OLLAMA_TIMEOUT' : 'OLLAMA_UNAVAILABLE')
+    const permissionState = await getLoopbackPermissionState(permissionQuery)
+    return unavailableInspection(localRequestFailureCode(error, permissionState))
   }
 }
 
@@ -125,7 +147,7 @@ export async function requestOllama({
   maxTokens,
   temperature,
   ollamaUrl,
-}, { fetchImpl = globalThis.fetch, electronBridge } = {}) {
+}, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery } = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
   const selectedModel = normalizeOllamaModelName(model)
   if (!base) return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_INVALID_URL' })
@@ -153,6 +175,10 @@ export async function requestOllama({
     }
 
     if (typeof fetchImpl !== 'function') return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_UNAVAILABLE' })
+    const permissionState = await getLoopbackPermissionState(permissionQuery)
+    if (permissionState === 'denied') {
+      return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_BROWSER_ACCESS_DENIED' })
+    }
     const response = await fetchImpl(base + '/api/chat', localOllamaFetchOptions({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -186,7 +212,7 @@ export async function requestOllama({
     return createAIErrorResult({
       provider: 'ollama',
       model: selectedModel,
-      code: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'OLLAMA_TIMEOUT' : 'OLLAMA_UNAVAILABLE',
+      code: localRequestFailureCode(error, await getLoopbackPermissionState(permissionQuery)),
     })
   }
 }

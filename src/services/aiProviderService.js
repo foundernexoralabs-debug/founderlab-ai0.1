@@ -88,8 +88,12 @@ export async function refreshProviderAvailability({
     }
 
     providerAvailability = normalizeProviderAvailability(payload.providers)
-    const provider = resolveConfiguredProvider(preferredProvider, providerAvailability)
-    if (provider && provider !== preferredProvider) setAIProviderPreference(provider)
+    // The Settings card can be changed while this authenticated status request
+    // is in flight. Resolve against the latest preference so a stale response
+    // never unmounts Local Ollama and discards its visible result.
+    const currentPreferredProvider = getAIProviderPreference() || preferredProvider
+    const provider = resolveConfiguredProvider(currentPreferredProvider, providerAvailability)
+    if (provider && provider !== currentPreferredProvider) setAIProviderPreference(provider)
     return { provider, providers: providerAvailability }
   } catch {
     return { provider: preferredProvider, providers: providerAvailability }
@@ -144,6 +148,7 @@ export async function requestAIResult({
 } = {}, {
   fetchImpl = globalThis.fetch,
   electronBridge,
+  permissionQuery,
   accessToken,
 } = {}) {
   if (!provider) {
@@ -182,6 +187,7 @@ export async function requestAIResult({
   }, {
     fetchImpl,
     electronBridge,
+    permissionQuery,
     accessToken: token,
   })
   let result = await request(activeAccessToken)

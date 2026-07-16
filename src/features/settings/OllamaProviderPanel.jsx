@@ -27,6 +27,8 @@ function statePresentation(inspection, testing, testState, testMessage) {
   if (inspection.state === 'models_available') return { title: 'Models available', detail: `${inspection.models.length} local model${inspection.models.length === 1 ? '' : 's'} found. Choose one, then test it.`, color: 'green' }
   if (inspection.state === 'no_models') return { title: 'Ollama is running', detail: 'No local models are installed yet.', color: 'yellow' }
   if (inspection.error?.code === 'MALFORMED_RESPONSE') return { title: 'Ollama needs attention', detail: 'The local service responded, but did not return a usable model list. Refresh the local connection and try again.', color: 'yellow' }
+  if (inspection.error?.code === 'OLLAMA_BROWSER_ACCESS_DENIED') return { title: 'Browser access is blocked', detail: 'This browser denied FounderLab access to the local Ollama service. Allow local access, then refresh.', color: 'red' }
+  if (inspection.error?.code === 'OLLAMA_BROWSER_ACCESS_BLOCKED') return { title: 'Browser could not reach local Ollama', detail: 'Ollama may be running, but this browser could not access it. Check browser local access, then refresh.', color: 'yellow' }
   if (inspection.error?.code === 'OLLAMA_TIMEOUT') return { title: 'Ollama took too long to respond', detail: 'The local service did not answer the model check in time. Confirm that Ollama is running, then refresh.', color: 'yellow' }
   return { title: 'Ollama is not available', detail: 'FounderLab could not reach a local Ollama service from this browser.', color: 'yellow' }
 }
