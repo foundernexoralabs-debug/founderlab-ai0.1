@@ -19,6 +19,13 @@ import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '.
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
 import { createVoiceResponsePlan } from '../src/features/chat/voiceResponseUtils.js'
 import {
+  EMPTY_LIVE_CALL,
+  getLiveCallCopy,
+  getLiveCallProviderSupport,
+  LIVE_CALL_TURN_DELAY_MS,
+  shouldQueueLiveCallTurn,
+} from '../src/features/chat/liveCallUtils.js'
+import {
   buildChatHandoffPayload,
   getAssistantControlActions,
   getChatControlActions,
@@ -305,6 +312,33 @@ test('Voice sessions keep short answers conversational while preserving dense de
   assert.match(structured.spokenText, /full breakdown in the chat/i)
 })
 
+test('Live Call uses one bounded turn model and accurately describes local and cloud provider support', () => {
+  assert.equal(EMPTY_LIVE_CALL.phase, 'idle')
+  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 700 && LIVE_CALL_TURN_DELAY_MS <= 1500, true)
+  assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: 'Help me plan a launch.' }), true)
+  assert.equal(shouldQueueLiveCallTurn({ active: true, muted: true, isFinal: true, transcript: 'Do not send.' }), false)
+  assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: false, transcript: 'Still speaking' }), false)
+  assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: '   ' }), false)
+
+  assert.deepEqual(getLiveCallProviderSupport(null), {
+    supported: false,
+    label: 'Choose an AI provider before starting a live call.',
+  })
+  assert.deepEqual(getLiveCallProviderSupport({ id: 'ollama', local: true, model: 'llama3.2:3b-instruct-q4_K_M' }), {
+    supported: true,
+    local: true,
+    label: 'Private local call · llama3.2:3b-instruct-q4_K_M',
+  })
+  assert.deepEqual(getLiveCallProviderSupport({ id: 'groq', name: 'Groq', local: false, model: 'GPT-OSS 120B' }), {
+    supported: true,
+    local: false,
+    label: 'Groq · GPT-OSS 120B',
+  })
+  assert.match(getLiveCallCopy('listening').detail, /short pause/i)
+  assert.match(getLiveCallCopy('speaking').detail, /stop the response/i)
+  assert.match(getLiveCallCopy('unknown').title, /Call needs attention/i)
+})
+
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
   const narration = cleanTextForSpeech('## Launch update!!! 🚀\nUse `npm test` / `npm run build`; see [the guide](https://example.com/docs).\n```js\nconsole.log("internal")\n```')
   assert.equal(narration.includes('🚀'), false)
@@ -359,6 +393,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const controlActionsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatControlActions.jsx'), 'utf8')
   const controlUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatControlCenterUtils.js'), 'utf8')
   const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
+  const liveCallSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatLiveCallSurface.jsx'), 'utf8')
+  const liveCallUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/liveCallUtils.js'), 'utf8')
   const speechTextSource = fs.readFileSync(path.join(repositoryRoot, 'src/lib/speechTextUtils.js'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
@@ -377,6 +413,11 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
   assert.match(workspaceSource, /finishRequested/)
+  assert.match(workspaceSource, /startLiveCall/)
+  assert.match(workspaceSource, /sendLiveCallTurn/)
+  assert.match(workspaceSource, /preserveComposer: true/)
+  assert.match(workspaceSource, /ChatLiveCallSurface/)
+  assert.match(workspaceSource, /Start a live voice call/)
   assert.match(workspaceSource, /voiceSession\.phase === 'idle'/)
   assert.match(workspaceSource, /sending && voiceSession\.phase === 'idle'/)
   assert.match(workspaceSource, /activeError && voiceSession\.phase === 'idle'/)
@@ -420,6 +461,12 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(voiceSessionSource, /Stop/)
   assert.match(voiceSessionSource, /End/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
+  assert.match(liveCallSource, /Live call/)
+  assert.match(liveCallSource, /Mute/)
+  assert.match(liveCallSource, /Stop response/)
+  assert.match(liveCallSource, /End call/)
+  assert.match(liveCallUtilsSource, /Private local call/)
+  assert.match(liveCallUtilsSource, /shouldQueueLiveCallTurn/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)
   assert.match(confirmationSource, /role="alertdialog"/)
@@ -443,6 +490,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
   assert.match(css, /fl-chat-voice-dock/)
+  assert.match(css, /fl-chat-live-call/)
+  assert.match(css, /fl-chat-live-call-start/)
   assert.doesNotMatch(css, /fl-chat-voice-session/)
   assert.doesNotMatch(css, /fl-chat-dictation-status/)
   assert.match(css, /flChatVoiceListen/)

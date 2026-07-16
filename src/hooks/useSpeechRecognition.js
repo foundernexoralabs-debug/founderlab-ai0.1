@@ -82,15 +82,21 @@ export function useSpeechRecognition() {
     setTranscript(confirmedTranscriptRef.current)
     setVoiceInputState('resuming')
 
-    const publishTranscript = () => {
+    const publishTranscript = ({ isFinal = false } = {}) => {
       const next = appendVoiceTranscript(confirmedTranscriptRef.current, interimTranscriptRef.current)
       // Some browser engines repeat an unchanged interim result. Publishing
       // each duplicate makes a live composer appear to stutter even though no
       // speech changed, so only update the UI when the audible draft moved.
-      if (next === lastPublishedTranscriptRef.current) return
-      lastPublishedTranscriptRef.current = next
-      setTranscript(next)
-      onUpdateRef.current?.(next)
+      if (next !== lastPublishedTranscriptRef.current) {
+        lastPublishedTranscriptRef.current = next
+        setTranscript(next)
+        onUpdateRef.current?.(next, { isFinal })
+        return
+      }
+      // A browser can finalise text it already emitted as interim. Live Call
+      // needs that final boundary for end-of-turn timing even when no visible
+      // transcript characters changed.
+      if (isFinal) onUpdateRef.current?.(next, { isFinal: true })
     }
 
     const finalizeSpokenPhrase = (phrase) => {
@@ -123,12 +129,14 @@ export function useSpeechRecognition() {
       recognition.onresult = (event) => {
         if (!desiredRef.current || session !== sessionRef.current) return
         let interim = ''
+        let receivedFinal = false
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
           const result = event.results[index]
           const phrase = result?.[0]?.transcript || ''
           if (result.isFinal) {
             finalizeSpokenPhrase(phrase)
             interimTranscriptRef.current = ''
+            receivedFinal = true
           } else {
             interim += phrase
           }
@@ -136,7 +144,7 @@ export function useSpeechRecognition() {
         if (interim) {
           interimTranscriptRef.current = interim
         }
-        publishTranscript()
+        publishTranscript({ isFinal: receivedFinal })
       }
       recognition.onerror = (event) => {
         lastError = event.error || ''
@@ -169,7 +177,7 @@ export function useSpeechRecognition() {
             interimTranscriptRef.current,
           )
           interimTranscriptRef.current = ''
-          publishTranscript()
+          publishTranscript({ isFinal: true })
         }
         setVoiceInputState('resuming')
         clearTimeout(restartTimerRef.current)

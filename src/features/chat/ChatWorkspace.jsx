@@ -21,6 +21,7 @@ import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } 
 import { ChatComposer } from './ChatComposer'
 import { ChatConfirmDialog } from './ChatConfirmDialog'
 import { ChatHistory } from './ChatHistory'
+import { ChatLiveCallSurface } from './ChatLiveCallSurface'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
@@ -36,6 +37,7 @@ import {
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
+import { EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createVoiceResponsePlan } from './voiceResponseUtils'
 import './chatPremium.css'
 
@@ -63,6 +65,7 @@ export function ChatWorkspace({ user }) {
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
   const [voiceSession, setVoiceSession] = useState(EMPTY_VOICE_SESSION)
+  const [liveCall, setLiveCall] = useState(EMPTY_LIVE_CALL)
   const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
   const [providerSelection, setProviderSelection] = useState(() => {
     const providerId = getAIProvider()
@@ -76,6 +79,7 @@ export function ChatWorkspace({ user }) {
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const voiceSessionRef = useRef({ active: false, transcript: '' })
+  const liveCallRef = useRef({ active: false, muted: false, transcript: '', turnTimer: null, turn: 0, inFlight: false })
 
   const {
     clearVoiceDraft,
@@ -153,13 +157,20 @@ export function ChatWorkspace({ user }) {
   }, [])
 
   useEffect(() => {
-    if (!voiceSessionRef.current.active) return
-    if (voiceInputState === 'error') {
+    if (voiceSessionRef.current.active && voiceInputState === 'error') {
       voiceSessionRef.current.active = false
       setVoiceSession((current) => ({
         ...current,
         phase: 'error',
         error: 'Voice capture stopped before FounderLab could finish your message. Your existing chat is unchanged.',
+      }))
+    }
+    if (liveCallRef.current.active && voiceInputState === 'error') {
+      clearLiveCallTurnTimer()
+      setLiveCall((current) => ({
+        ...current,
+        phase: 'error',
+        error: 'Live call listening stopped. Check microphone access, then resume when ready.',
       }))
     }
   }, [voiceInputState])
@@ -173,6 +184,8 @@ export function ChatWorkspace({ user }) {
 
   useEffect(() => () => {
     clearTimeout(saveTimerRef.current)
+    clearLiveCallTurnTimer()
+    liveCallRef.current.active = false
     requestAbortRef.current?.abort()
   }, [])
 
@@ -305,6 +318,211 @@ export function ChatWorkspace({ user }) {
     setVoiceSession(EMPTY_VOICE_SESSION)
   }
 
+  function clearLiveCallTurnTimer() {
+    if (liveCallRef.current.turnTimer) clearTimeout(liveCallRef.current.turnTimer)
+    liveCallRef.current.turnTimer = null
+  }
+
+  function handleLiveCallTranscript(nextTranscript, { isFinal = false } = {}) {
+    const call = liveCallRef.current
+    if (!call.active || call.muted) return
+    const transcript = typeof nextTranscript === 'string' ? nextTranscript.trim() : ''
+    call.transcript = transcript
+    setLiveCall((current) => ['connecting', 'listening'].includes(current.phase)
+      ? { ...current, phase: 'listening', transcript, error: '' }
+      : current)
+    if (shouldQueueLiveCallTurn({ active: call.active, muted: call.muted, isFinal, transcript })) {
+      queueLiveCallTurn()
+    } else if (!isFinal) {
+      // New interim speech means the caller is still talking, so do not send a
+      // previously finalised fragment halfway through their thought.
+      clearLiveCallTurnTimer()
+    }
+  }
+
+  async function beginLiveCallListening({ connecting = false } = {}) {
+    const call = liveCallRef.current
+    if (!call.active) return false
+    clearLiveCallTurnTimer()
+    if (call.muted) {
+      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', error: '' }))
+      return false
+    }
+    call.transcript = ''
+    setLiveCall((current) => ({ ...current, phase: connecting ? 'connecting' : 'listening', transcript: '', note: '', error: '' }))
+    const started = await startRecognition(handleLiveCallTranscript)
+    if (!started) {
+      if (call.active) {
+        setLiveCall((current) => ({
+          ...current,
+          phase: 'error',
+          error: 'FounderLab could not start live call listening. Check microphone access and try again.',
+        }))
+      }
+      return false
+    }
+    if (!call.active || call.muted) {
+      stopRecognition()
+      return false
+    }
+    setLiveCall((current) => ({ ...current, phase: 'listening', transcript: '', note: '', error: '' }))
+    return true
+  }
+
+  async function startLiveCall() {
+    if (liveCallRef.current.active) return true
+    if (sending) {
+      toast('Wait for the current response or stop it before starting a live call.', 'error')
+      return false
+    }
+    if (editingMessageId) {
+      toast('Finish or cancel the message edit before starting a live call.', 'error')
+      return false
+    }
+    const support = getLiveCallProviderSupport(selectedProvider)
+    if (!support.supported) {
+      toast(support.label, 'error')
+      return false
+    }
+    if (voiceSession.phase !== 'idle') endVoiceSession()
+    stopTTS()
+    setActiveTTS(null)
+    liveCallRef.current = { active: true, muted: false, transcript: '', turnTimer: null, turn: 0, inFlight: false }
+    setErrorState(null)
+    setLiveCall({ ...EMPTY_LIVE_CALL, phase: 'connecting' })
+    return beginLiveCallListening({ connecting: true })
+  }
+
+  function queueLiveCallTurn() {
+    clearLiveCallTurnTimer()
+    liveCallRef.current.turnTimer = setTimeout(() => {
+      liveCallRef.current.turnTimer = null
+      sendLiveCallTurn()
+    }, LIVE_CALL_TURN_DELAY_MS)
+  }
+
+  async function sendLiveCallTurn() {
+    const call = liveCallRef.current
+    const transcript = typeof call.transcript === 'string' ? call.transcript.trim() : ''
+    if (!call.active || call.muted || !transcript || call.inFlight) return
+    clearLiveCallTurnTimer()
+    call.transcript = ''
+    call.inFlight = true
+    const turn = ++call.turn
+    stopRecognition()
+    clearVoiceDraft()
+    setLiveCall((current) => ({ ...current, phase: 'thinking', transcript: '', note: '', error: '' }))
+    const response = await send(transcript, { source: 'voice', preserveComposer: true })
+    if (!call.active || turn !== call.turn) return
+    call.inFlight = false
+
+    if (!response?.ok || !response.message) {
+      setLiveCall((current) => ({
+        ...current,
+        phase: 'error',
+        error: response?.cancelled
+          ? 'That call turn was stopped. Resume when you are ready.'
+          : response?.presentation?.message || 'FounderLab could not complete that call turn. Resume when ready.',
+      }))
+      return
+    }
+
+    const plan = createVoiceResponsePlan(response.message.content)
+    if (!plan.spokenText) {
+      await beginLiveCallListening()
+      return
+    }
+
+    setLiveCall((current) => ({ ...current, phase: 'speaking', transcript: '', note: plan.note, error: '' }))
+    setActiveTTS(response.message.id)
+    try {
+      await speak(plan.spokenText)
+    } finally {
+      if (turn !== call.turn) return
+      setActiveTTS((current) => current === response.message.id ? null : current)
+    }
+    if (!call.active || turn !== call.turn) return
+    if (call.muted) {
+      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', note: 'Response complete. Unmute when you are ready.', error: '' }))
+      return
+    }
+    await beginLiveCallListening()
+  }
+
+  function toggleLiveCallMute() {
+    const call = liveCallRef.current
+    if (!call.active) return
+    if (call.muted) {
+      call.muted = false
+      if (!['thinking', 'speaking'].includes(liveCall.phase)) beginLiveCallListening()
+      else setLiveCall((current) => ({ ...current, muted: false }))
+      return
+    }
+    call.muted = true
+    call.transcript = ''
+    clearLiveCallTurnTimer()
+    stopRecognition()
+    clearVoiceDraft()
+    setLiveCall((current) => ['connecting', 'listening'].includes(current.phase)
+      ? { ...current, phase: 'muted', muted: true, transcript: '', note: '', error: '' }
+      : { ...current, muted: true })
+  }
+
+  function stopLiveCallTurn() {
+    const call = liveCallRef.current
+    if (!call.active) return
+    clearLiveCallTurnTimer()
+    call.turn += 1
+    call.inFlight = false
+    if (liveCall.phase === 'thinking') {
+      requestAbortRef.current?.abort()
+      requestAbortRef.current = null
+      requestSequenceRef.current += 1
+      setSending(false)
+    }
+    if (liveCall.phase === 'speaking') {
+      stopTTS()
+      setActiveTTS(null)
+    }
+    if (call.muted) {
+      setLiveCall((current) => ({ ...current, phase: 'muted', transcript: '', note: 'Response stopped. Unmute when ready.', error: '' }))
+      return
+    }
+    beginLiveCallListening()
+  }
+
+  function resumeLiveCall() {
+    const call = liveCallRef.current
+    if (!call.active) return startLiveCall()
+    call.muted = false
+    setErrorState(null)
+    return beginLiveCallListening({ connecting: true })
+  }
+
+  function endLiveCall({ quiet = false } = {}) {
+    const call = liveCallRef.current
+    const wasActive = call.active
+    call.active = false
+    call.muted = false
+    call.inFlight = false
+    call.turn += 1
+    call.transcript = ''
+    clearLiveCallTurnTimer()
+    stopRecognition()
+    clearVoiceDraft()
+    stopTTS()
+    setActiveTTS(null)
+    if (requestAbortRef.current) {
+      requestAbortRef.current.abort()
+      requestAbortRef.current = null
+      requestSequenceRef.current += 1
+      setSending(false)
+    }
+    setErrorState(null)
+    setLiveCall(EMPTY_LIVE_CALL)
+    if (wasActive && !quiet) toast('Live call ended', 'success')
+  }
+
   function selectChatProvider(providerId) {
     if (!setAIProvider(providerId)) {
       toast('That AI provider is not available for this workspace.', 'error')
@@ -394,9 +612,12 @@ export function ChatWorkspace({ user }) {
     return { ok: true, message: assistantMessage }
   }
 
-  async function send(textOverride, { source: sourceOverride } = {}) {
+  async function send(textOverride, { source: sourceOverride, preserveComposer = false } = {}) {
     const content = typeof textOverride === 'string' ? textOverride.trim() : input.trim()
-    if ((!content && !pendingImage) || sending) return
+    // A live call is its own turn: it must never consume a draft or an image
+    // the caller was preparing in the normal composer.
+    const image = preserveComposer ? null : pendingImage
+    if ((!content && !image) || sending) return
 
     const providerId = providerSelection.id
     const modelId = providerSelection.model
@@ -404,10 +625,11 @@ export function ChatWorkspace({ user }) {
       toast('Choose an AI provider below the composer before sending a message.', 'error')
       return
     }
-    const image = pendingImage
     const source = sourceOverride
-    setInput('')
-    setPendingImage(null)
+    if (!preserveComposer) {
+      setInput('')
+      setPendingImage(null)
+    }
     clearVoiceDraft()
     stopRecognition()
     setErrorState(null)
@@ -693,11 +915,12 @@ export function ChatWorkspace({ user }) {
             <div>{activeConversation?.title || 'FounderLab Chat'}</div>
             {activeConversation && <div>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
           </div>
+          {liveCall.phase === 'idle' && <button type="button" className="fl-chat-live-call-start" onClick={startLiveCall} aria-label="Start a live voice call"><span aria-hidden="true">◌</span> Live call</button>}
           {activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={requestClearConversation}>Clear</button>}
           {elAvailable === true && <span title="Premium voice is available" className="fl-chat-voice-ready">● Voice</span>}
         </header>
 
-        {activeTTS && speaking && voiceSession.phase === 'idle' && (
+        {activeTTS && speaking && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && (
           <div className="fl-chat-playback-dock" role="status" aria-live="polite">
             <span aria-hidden="true" className="fl-chat-playback-wave">◌</span>
             <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'System voice' : 'Starting playback'} · {getVoiceSpeedLabel(voiceConfig.speed)}</span>
@@ -722,48 +945,62 @@ export function ChatWorkspace({ user }) {
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
                 {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index)} onControlAction={continueFromChat} />)}
-                {sending && voiceSession.phase === 'idle' && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
-                {activeError && voiceSession.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
+                {sending && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
+                {activeError && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
                 {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}
               </div>
             </div>
           </>
         )}
-        <ChatComposer
-          input={input}
-          onInput={setInput}
-          onSend={send}
-          sending={sending}
-          onStop={stopGenerating}
-          pendingImage={pendingImage}
-          onPendingImage={setPendingImage}
-          voiceSession={voiceSession}
-          voiceSessionActions={{
-            provider: selectedProvider,
-            voiceLabel: voiceSessionLabel,
-            onFinish: finishVoiceCapture,
-            onCancel: cancelVoiceCapture,
-            onSend: sendVoiceSession,
-            onStop: stopVoiceSessionActivity,
-            onEnd: endVoiceSession,
-            onStartAgain: startVoiceSession,
-            onEditDraft: editVoiceDraft,
-          }}
-          onVoiceStart={startVoiceSession}
-          onVoiceFinish={finishVoiceCapture}
-          providerSwitcher={<ChatProviderSwitcher
-            provider={selectedProvider}
-            availability={providerAvailability}
-            localModels={localModels}
-            localState={localModelState}
-            onSelectProvider={selectChatProvider}
-            onSelectModel={selectChatModel}
-            onDiscoverLocal={discoverChatOllamaModels}
-            onOpenSettings={() => flNavigate('settings')}
-          />}
-          editing={Boolean(editingMessageId)}
-          onCancelEdit={cancelEdit}
-        />
+        {liveCall.phase !== 'idle' ? (
+          <div className="fl-chat-live-call-wrap">
+            <ChatLiveCallSurface
+              call={liveCall}
+              provider={selectedProvider}
+              voiceLabel={voiceSessionLabel}
+              onToggleMute={toggleLiveCallMute}
+              onStopTurn={stopLiveCallTurn}
+              onResume={resumeLiveCall}
+              onEnd={endLiveCall}
+            />
+          </div>
+        ) : (
+          <ChatComposer
+            input={input}
+            onInput={setInput}
+            onSend={send}
+            sending={sending}
+            onStop={stopGenerating}
+            pendingImage={pendingImage}
+            onPendingImage={setPendingImage}
+            voiceSession={voiceSession}
+            voiceSessionActions={{
+              provider: selectedProvider,
+              voiceLabel: voiceSessionLabel,
+              onFinish: finishVoiceCapture,
+              onCancel: cancelVoiceCapture,
+              onSend: sendVoiceSession,
+              onStop: stopVoiceSessionActivity,
+              onEnd: endVoiceSession,
+              onStartAgain: startVoiceSession,
+              onEditDraft: editVoiceDraft,
+            }}
+            onVoiceStart={startVoiceSession}
+            onVoiceFinish={finishVoiceCapture}
+            providerSwitcher={<ChatProviderSwitcher
+              provider={selectedProvider}
+              availability={providerAvailability}
+              localModels={localModels}
+              localState={localModelState}
+              onSelectProvider={selectChatProvider}
+              onSelectModel={selectChatModel}
+              onDiscoverLocal={discoverChatOllamaModels}
+              onOpenSettings={() => flNavigate('settings')}
+            />}
+            editing={Boolean(editingMessageId)}
+            onCancelEdit={cancelEdit}
+          />
+        )}
       </main>
     </div>
   )
