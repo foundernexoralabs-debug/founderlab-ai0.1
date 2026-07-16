@@ -17,6 +17,7 @@ function diagnosticHost(value) {
 }
 
 function createDiagnostic(flow, base, path) {
+  const browserContext = getBrowserLoopbackContext()
   return {
     flow,
     requestStarted: false,
@@ -28,7 +29,35 @@ function createDiagnostic(flow, base, path) {
     modelListEmpty: null,
     browserBlockedBeforeResponse: false,
     permissionState: 'not-checked',
+    secureContext: browserContext.secureContext,
+    topLevelContext: browserContext.topLevelContext,
+    targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE,
+    targetAddressSpaceSupported: browserContext.targetAddressSpaceSupported,
     failureStep: '',
+  }
+}
+
+function getBrowserLoopbackContext() {
+  if (typeof window === 'undefined') {
+    return { secureContext: 'not-browser', topLevelContext: 'not-browser', targetAddressSpaceSupported: null }
+  }
+  let topLevelContext = false
+  try {
+    topLevelContext = window.top === window
+  } catch {
+    topLevelContext = false
+  }
+  let targetAddressSpaceSupported = false
+  try {
+    const request = new Request('http://localhost:11434', { targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE })
+    targetAddressSpaceSupported = request.targetAddressSpace === OLLAMA_LOOPBACK_ADDRESS_SPACE
+  } catch {
+    targetAddressSpaceSupported = false
+  }
+  return {
+    secureContext: globalThis.isSecureContext ? 'secure' : 'insecure',
+    topLevelContext,
+    targetAddressSpaceSupported,
   }
 }
 
@@ -187,20 +216,16 @@ export async function discoverOllama(base, { fetchImpl = globalThis.fetch, elect
         failureStep: result?.running ? '' : 'electron-probe',
       })
     }
-    const permissionState = await getLoopbackPermissionState(permissionQuery)
-    if (permissionState === 'denied') {
-      return completeInspection(unavailableInspection('OLLAMA_BROWSER_ACCESS_DENIED'), {
-        ...diagnostic,
-        browserBlockedBeforeResponse: true,
-        permissionState,
-        failureStep: 'local-network-permission',
-      })
-    }
+    // Start the permission-gated fetch directly from the user's Refresh
+    // action. Permissions.query() reports state only; it cannot request or
+    // grant local access, so it must not delay the annotated browser request.
+    const permissionStatePromise = getLoopbackPermissionState(permissionQuery)
     const response = await fetchImpl(url + '/api/tags', localOllamaFetchOptions({
       method: 'GET',
       headers: { Accept: 'application/json' },
       signal: timeoutSignal(OLLAMA_DISCOVERY_TIMEOUT_MS),
     }))
+    const permissionState = await permissionStatePromise
     const responseDiagnostic = {
       ...diagnostic,
       requestStarted: true,
@@ -316,15 +341,9 @@ export async function requestOllama({
         failureStep: 'fetch-unavailable',
       })
     }
-    const permissionState = await getLoopbackPermissionState(permissionQuery)
-    if (permissionState === 'denied') {
-      return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_BROWSER_ACCESS_DENIED' }), diagnosticFlow, {
-        ...diagnostic,
-        browserBlockedBeforeResponse: true,
-        permissionState,
-        failureStep: 'local-network-permission',
-      })
-    }
+    // Match discovery: a user-initiated Test or Chat must begin its annotated
+    // local fetch before awaiting a permission-status query.
+    const permissionStatePromise = getLoopbackPermissionState(permissionQuery)
     const response = await fetchImpl(base + '/api/chat', localOllamaFetchOptions({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -336,6 +355,7 @@ export async function requestOllama({
       }),
       signal: timeoutSignal(OLLAMA_CHAT_TIMEOUT_MS),
     }))
+    const permissionState = await permissionStatePromise
     const responseDiagnostic = {
       ...diagnostic,
       requestStarted: true,

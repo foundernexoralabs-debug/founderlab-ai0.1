@@ -408,6 +408,10 @@ test('Ollama discovery only reports a real readable local models response', asyn
     modelListEmpty: null,
     browserBlockedBeforeResponse: true,
     permissionState: 'not-supported',
+    secureContext: 'not-browser',
+    topLevelContext: 'not-browser',
+    targetAddressSpace: 'loopback',
+    targetAddressSpaceSupported: null,
     failureStep: 'fetch-before-response',
   })
 
@@ -449,6 +453,48 @@ test('Ollama discovery only reports a real readable local models response', asyn
   assert.equal(malformed.error.code, 'MALFORMED_RESPONSE')
   assert.equal(malformed.diagnostic.jsonParsed, false)
   assert.equal(malformed.diagnostic.failureStep, 'json-parse')
+})
+
+test('user-initiated local discovery starts the annotated fetch before permission status resolves', async () => {
+  let resolvePermission
+  const permissionPending = new Promise((resolve) => { resolvePermission = resolve })
+  let fetchStarted = false
+  const discoveryPromise = discoverOllama('http://localhost:11434', {
+    permissionQuery: async () => permissionPending,
+    fetchImpl: async () => {
+      fetchStarted = true
+      return jsonResponse({ body: { models: [{ name: 'llama3.2:3b-instruct-q4_K_M' }] } })
+    },
+  })
+  await Promise.resolve()
+  assert.equal(fetchStarted, true)
+  resolvePermission({ state: 'prompt' })
+  const discovered = await discoveryPromise
+  assert.equal(discovered.ok, true)
+  assert.equal(discovered.diagnostic.permissionState, 'prompt')
+})
+
+test('local connection tests start their annotated Chat request before permission status resolves', async () => {
+  let resolvePermission
+  const permissionPending = new Promise((resolve) => { resolvePermission = resolve })
+  let fetchStarted = false
+  const connectionPromise = requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => permissionPending,
+    fetchImpl: async (url) => {
+      fetchStarted = true
+      assert.equal(url, 'http://localhost:11434/api/chat')
+      return jsonResponse({ body: { message: { content: 'CONNECTED' } } })
+    },
+  })
+  await Promise.resolve()
+  assert.equal(fetchStarted, true)
+  resolvePermission({ state: 'prompt' })
+  const connection = await connectionPromise
+  assert.equal(connection.ok, true)
+  assert.equal(connection.diagnostic.permissionState, 'prompt')
 })
 
 test('Ollama model discovery preserves a valid model.model value and tagged names', () => {
@@ -589,13 +635,13 @@ test('Ollama failures remain isolated and an accidental server route is rejected
 test('Ollama retains a browser local-access category without exposing browser internals', async () => {
   const denied = await discoverOllama('http://localhost:11434', {
     permissionQuery: async () => ({ state: 'denied' }),
-    fetchImpl: async () => assert.fail('A denied browser permission must not send a request'),
+    fetchImpl: async () => { throw new TypeError('browser denied the local request before it reached Ollama') },
   })
   assert.equal(denied.ok, false)
   assert.equal(denied.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
-  assert.equal(denied.diagnostic.requestStarted, false)
+  assert.equal(denied.diagnostic.requestStarted, true)
   assert.equal(denied.diagnostic.browserBlockedBeforeResponse, true)
-  assert.equal(denied.diagnostic.failureStep, 'local-network-permission')
+  assert.equal(denied.diagnostic.failureStep, 'fetch-before-response')
 
   const blocked = await requestAIResult({
     ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
@@ -617,7 +663,7 @@ test('Ollama retains a browser local-access category without exposing browser in
     localOllamaAllowed: true,
   }, {
     permissionQuery: async () => ({ state: 'denied' }),
-    fetchImpl: async () => assert.fail('A denied browser permission must not send a test request'),
+    fetchImpl: async () => { throw new TypeError('browser denied the local test before it reached Ollama') },
   })
   assert.equal(deniedTest.ok, false)
   assert.equal(deniedTest.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
@@ -642,6 +688,10 @@ test('Ollama is presented as a first-class local provider without stale CORS set
   assert.match(panelSource, /Test connection/)
   assert.match(panelSource, /Temporary local connection trace/)
   assert.match(panelSource, /Target host/)
+  assert.match(panelSource, /Loopback permission/)
+  assert.match(panelSource, /Allow local browser access/)
+  assert.match(panelSource, /Check Local Ollama/)
+  assert.doesNotMatch(panelSource, /void detect\(\)/)
   assert.match(panelSource, /State discarded after success/)
   assert.match(panelSource, /local app/)
   assert.doesNotMatch(appSource, /OLLAMA_ORIGINS=\*/)

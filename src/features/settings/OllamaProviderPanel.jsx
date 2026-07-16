@@ -24,6 +24,7 @@ function statePresentation(inspection, testing, testState, testMessage) {
   if (testing) return { title: 'Testing local Ollama', detail: 'Sending a short request to the selected model.', color: 'accent' }
   if (testState === 'connected') return { title: 'Connected', detail: 'Your selected local model replied successfully.', color: 'green' }
   if (testState === 'failed') return { title: 'Connection needs attention', detail: testMessage || 'Ollama could not complete the local test. Refresh models or check the connection help below.', color: 'red' }
+  if (inspection.state === 'idle') return { title: 'Ready to check Local Ollama', detail: 'Choose Check Local Ollama to request browser permission and discover models on this Mac.', color: 'accent' }
   if (inspection.state === 'detecting') return { title: 'Detecting Ollama', detail: 'Looking for Ollama on this Mac.', color: 'accent' }
   if (inspection.state === 'models_available') return { title: 'Models available', detail: `${inspection.models.length} local model${inspection.models.length === 1 ? '' : 's'} found. Choose one, then test it.`, color: 'green' }
   if (inspection.state === 'no_models') return { title: 'Ollama is running', detail: 'No local models are installed yet.', color: 'yellow' }
@@ -58,6 +59,10 @@ function LocalConnectionTrace({ diagnostics }) {
     ['HTTP response', latestRequest.responseReceived ? `HTTP ${diagnosticValue(latestRequest.httpStatus, 'unknown')}` : 'No response reached'],
     ['JSON parsed', diagnosticValue(latestRequest.jsonParsed)],
     ['Model list empty', diagnosticValue(latestRequest.modelListEmpty)],
+    ['Loopback permission', diagnosticValue(latestRequest.permissionState)],
+    ['Secure context', diagnosticValue(latestRequest.secureContext)],
+    ['Top-level browser tab', diagnosticValue(latestRequest.topLevelContext)],
+    ['Loopback targeting', latestRequest.targetAddressSpaceSupported === null ? 'Not checked' : latestRequest.targetAddressSpaceSupported ? latestRequest.targetAddressSpace : 'Not supported by this browser'],
     ['Stopped before response', diagnosticValue(latestRequest.browserBlockedBeforeResponse)],
     ['Failure boundary', diagnosticValue(latestRequest.failureStep, 'None')],
     ['Discovery result applied', diagnosticValue(panel.discoveryResultApplied)],
@@ -126,10 +131,7 @@ export function OllamaProviderPanel({ providerAvailability }) {
     setProviderConnectionStatus('ollama', 'ready')
   }, [syncDiagnostics])
 
-  useEffect(() => {
-    void detect()
-    return () => { attempt.current += 1 }
-  }, [detect])
+  useEffect(() => () => { attempt.current += 1 }, [])
 
   useEffect(() => {
     syncDiagnostics()
@@ -179,6 +181,9 @@ export function OllamaProviderPanel({ providerAvailability }) {
 
   const presentation = statePresentation(inspection, testing, testState, testMessage)
   const [background, foreground] = colorForState(presentation.color)
+  const needsLocalAccessRecovery = inspection.error?.code === 'OLLAMA_BROWSER_ACCESS_DENIED' || inspection.error?.code === 'OLLAMA_BROWSER_ACCESS_BLOCKED'
+  const isEmbedded = inspection.diagnostic?.topLevelContext === false
+  const openInTopLevelTab = () => window.open(window.location.href, '_blank', 'noopener,noreferrer')
   return (
     <section aria-label="Local Ollama" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -186,7 +191,7 @@ export function OllamaProviderPanel({ providerAvailability }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><strong style={{ fontSize: 15, color: C.t1 }}>Local Ollama</strong><Badge color="green">Local · Free</Badge></div>
           <p style={{ margin: '5px 0 0', color: C.t2, fontSize: 12, lineHeight: 1.55 }}>Runs model inference on this Mac. FounderLab sends local Chat requests straight to Ollama—no cloud key or FounderLab server is involved. Normal workspace chat-history sync still follows your FounderLab data settings.</p>
         </div>
-        <Button onClick={detect} disabled={inspection.state === 'detecting'} variant="secondary" size="sm">{inspection.state === 'detecting' ? <><Spinner size={12} color={C.accent} /> Detecting</> : 'Refresh'}</Button>
+        <Button onClick={detect} disabled={inspection.state === 'detecting'} variant="secondary" size="sm">{inspection.state === 'detecting' ? <><Spinner size={12} color={C.accent} /> Detecting</> : inspection.state === 'idle' ? 'Check Local Ollama' : 'Refresh'}</Button>
       </div>
 
       <div role="status" style={{ padding: '12px 13px', background, border: `1px solid ${foreground}44`, borderRadius: 9, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
@@ -210,6 +215,14 @@ export function OllamaProviderPanel({ providerAvailability }) {
       </div>
 
       <LocalConnectionTrace diagnostics={diagnostics} />
+
+      {needsLocalAccessRecovery && (
+        <div role="alert" style={{ padding: '12px 13px', background: C.yellowM, border: `1px solid ${C.yellow}44`, borderRadius: 9, color: C.t2, fontSize: 12, lineHeight: 1.55 }}>
+          <strong style={{ display: 'block', color: C.t1, marginBottom: 3 }}>Allow local browser access</strong>
+          FounderLab reached the browser boundary, but the browser did not allow a response from Ollama. Open this Preview in a normal top-level desktop browser tab, allow Local Network Access when prompted, reload the tab, then choose Refresh again.
+          {isEmbedded && <div style={{ marginTop: 9 }}><Button onClick={openInTopLevelTab} variant="secondary" size="sm">Open in a browser tab</Button></div>}
+        </div>
+      )}
 
       {(inspection.state === 'unavailable' || inspection.state === 'no_models') && (
         <details style={{ paddingTop: 2 }}>
