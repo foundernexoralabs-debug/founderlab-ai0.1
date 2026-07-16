@@ -38,9 +38,9 @@ export function ChatComposer({
   const recording = ['listening', 'resuming'].includes(voiceInputState)
   const voiceError = voiceInputState === 'error'
   const voiceStatus = voiceInputState === 'listening'
-    ? 'Listening — pause naturally, correct yourself, or keep typing.'
+    ? 'Live dictation is flowing into your message. Pause or correct yourself; send when ready.'
     : voiceInputState === 'resuming'
-      ? 'Keeping your place — continue when you are ready.'
+      ? 'Keeping your place — take your time, then continue naturally.'
       : voiceInputState === 'error'
         ? 'Voice input stopped. Your draft is still here.'
         : ''
@@ -150,10 +150,10 @@ export function ChatComposer({
           </div>
         )}
         {voiceStatus && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, padding: '8px 10px', background: listening ? 'rgba(239,68,68,.09)' : voiceError ? 'rgba(239,68,68,.08)' : C.accentM, border: `1px solid ${listening || voiceError ? 'rgba(239,68,68,.32)' : C.borderFocus}`, borderRadius: 9, color: listening || voiceError ? '#fca5a5' : C.t2, fontSize: 12 }}>
-            <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: listening || voiceError ? C.red : C.accent, boxShadow: `0 0 0 4px ${listening || voiceError ? 'rgba(239,68,68,.13)' : C.accentM}` }} />
-            <span style={{ flex: 1 }}>{voiceStatus}</span>
-            <button type="button" onClick={voiceError ? onVoiceStart : onVoiceFinish} style={{ background: 'transparent', border: 'none', color: C.t1, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit' }}>{voiceError ? 'Try again' : 'Finish'}</button>
+          <div className={`fl-chat-dictation-status ${listening ? 'is-listening' : ''} ${voiceError ? 'is-error' : ''}`} role="status" aria-live="polite">
+            <span aria-hidden="true" className="fl-chat-dictation-status-dot" />
+            <span className="fl-chat-dictation-status-copy"><strong>{listening ? 'Listening live' : voiceError ? 'Dictation paused' : 'Reconnecting'}</strong>{voiceStatus}</span>
+            <button type="button" onClick={voiceError ? onVoiceStart : onVoiceFinish}>{voiceError ? 'Try again' : 'Finish'}</button>
           </div>
         )}
         <div
@@ -162,14 +162,19 @@ export function ChatComposer({
           style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${recording ? (listening ? C.red : C.borderFocus) : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
           <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display: 'none' }} onChange={(event) => { attachFile(event.target.files?.[0]); event.target.value = '' }} />
           <div ref={actionMenuRef} className="fl-chat-composer-action-menu-anchor">
-            <button type="button" className="fl-chat-composer-attachment" onClick={() => setActionMenuOpen((open) => !open)} title="Add to message" aria-label="Add to message" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
+            <button type="button" className="fl-chat-composer-attachment" onClick={() => setActionMenuOpen((open) => !open)} title="Add visual context" aria-label="Add visual context" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
             {actionMenuOpen && (
               <div className="fl-chat-composer-action-menu" role="menu" aria-label="Add to message">
-                <span className="fl-chat-composer-action-menu-label">Add to this message</span>
-                <button type="button" role="menuitem" onClick={openImagePicker}>
+                <div className="fl-chat-composer-action-menu-heading">
+                  <span>Bring in context</span>
+                  <small>Use a visual when it helps FounderLab understand your message.</small>
+                </div>
+                <button type="button" role="menuitem" className="fl-chat-composer-image-action" onClick={openImagePicker}>
                   <span aria-hidden="true">◫</span>
-                  <span><strong>Add image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
+                  <span><strong>Upload an image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
+                  <i aria-hidden="true">→</i>
                 </button>
+                <p className="fl-chat-composer-action-menu-hint">You can also paste an image directly into the message box.</p>
               </div>
             )}
           </div>

@@ -3,8 +3,8 @@ import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
 import { DEFAULT_VOICE_PREFERENCE } from '@/lib/voicePreferencesUtils'
 
 export const BROWSER_VOICES = {
-  male:   ['Microsoft Ryan Online (Natural) - English (United Kingdom)', 'Microsoft Ryan - English (United Kingdom)', 'Google UK English Male', 'Daniel', 'Arthur'],
-  female: ['Microsoft Sonia Online (Natural) - English (United Kingdom)', 'Microsoft Sonia - English (United Kingdom)', 'Google UK English Female', 'Karen', 'Moira'],
+  male:   ['Microsoft Ryan Online (Natural) - English (United Kingdom)', 'Microsoft Ryan - English (United Kingdom)', 'Google UK English Male', 'Daniel', 'Arthur', 'Alex'],
+  female: ['Microsoft Sonia Online (Natural) - English (United Kingdom)', 'Microsoft Sonia - English (United Kingdom)', 'Google UK English Female', 'Samantha', 'Karen', 'Moira'],
 } as const
 
 // Voice identifiers are registry-owned; requests remain proxied server-side.
@@ -38,7 +38,7 @@ export function pickBrowserVoice(gender: Gender, voices: SpeechSynthesisVoice[])
   const genderHints = gender === 'female'
     ? ['sonia', 'samantha', 'ava', 'karen', 'moira', 'zira', 'aria']
     : ['ryan', 'daniel', 'arthur', 'alex', 'aaron', 'david', 'fred']
-  const qualityHints = ['natural', 'enhanced', 'neural', 'premium', 'online', 'google']
+  const qualityHints = ['natural', 'enhanced', 'neural', 'premium', 'online', 'google', 'siri']
   const english = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('en'))
   const candidates = english.length ? english : voices
   return candidates
@@ -48,7 +48,11 @@ export function pickBrowserVoice(gender: Gender, voices: SpeechSynthesisVoice[])
       const qualityScore = qualityHints.some((hint) => name.includes(hint)) ? 12 : 0
       const genderScore = genderHints.some((hint) => name.includes(hint)) ? 8 : 0
       const remoteQualityScore = voice.localService === false ? 3 : 0
-      return { voice, score: languageScore + qualityScore + genderScore + remoteQualityScore }
+      // Platform defaults are often the most complete locally installed
+      // voices. This is only a tie-breaker; explicit natural/neural matches
+      // and the selected voice style still take precedence.
+      const defaultScore = voice.default ? 2 : 0
+      return { voice, score: languageScore + qualityScore + genderScore + remoteQualityScore + defaultScore }
     })
     .sort((left, right) => right.score - left.score)[0]?.voice ?? null
 }

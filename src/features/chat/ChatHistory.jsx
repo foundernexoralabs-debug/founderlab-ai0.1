@@ -2,17 +2,6 @@ import { C } from '@/app/theme'
 import { Spinner } from '@/components/ui/Primitives'
 import { filterConversations, groupConversationsByRecency } from './chatUtils'
 
-const iconButton = {
-  background: 'transparent',
-  border: 'none',
-  color: C.t3,
-  cursor: 'pointer',
-  padding: 4,
-  borderRadius: 6,
-  fontFamily: 'inherit',
-  lineHeight: 1,
-}
-
 export function ChatHistory({
   conversations,
   activeId,
@@ -92,9 +81,9 @@ export function ChatHistory({
                   )}
                   {!renaming && (
                     <div className="fl-chat-history-actions">
-                      <button type="button" onClick={() => onTogglePin(conversation.id)} title={conversation.pinned ? 'Unpin chat' : 'Pin chat'} aria-label={conversation.pinned ? 'Unpin chat' : 'Pin chat'} style={{ ...iconButton, color: conversation.pinned ? C.accent : C.t3 }}>⌖</button>
-                      <button type="button" onClick={() => onRenameStart(conversation)} title="Rename chat" aria-label="Rename chat" style={iconButton}>✎</button>
-                      <button type="button" onClick={() => onDelete(conversation.id)} title="Delete chat" aria-label="Delete chat" style={{ ...iconButton, fontSize: 16 }}>×</button>
+                      <button type="button" className={`fl-chat-history-action ${conversation.pinned ? 'is-pinned' : ''}`} onClick={() => onTogglePin(conversation.id)} title={conversation.pinned ? 'Unpin chat' : 'Pin chat'} aria-label={conversation.pinned ? 'Unpin chat' : 'Pin chat'}>⌖</button>
+                      <button type="button" className="fl-chat-history-action" onClick={() => onRenameStart(conversation)} title="Rename chat" aria-label="Rename chat">✎</button>
+                      <button type="button" className="fl-chat-history-action is-danger" onClick={() => onDelete(conversation.id)} title="Delete chat" aria-label="Delete chat">×</button>
                     </div>
                   )}
                 </div>

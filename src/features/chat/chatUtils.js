@@ -34,6 +34,50 @@ export function createConversation({ id, title = 'New chat', now = new Date().to
   }
 }
 
+const CHAT_DESTRUCTIVE_ACTIONS = Object.freeze({
+  clear: {
+    title: 'Clear this conversation?',
+    description: 'Every message in this chat will be removed. This cannot be undone.',
+    confirmLabel: 'Clear conversation',
+  },
+  conversation: {
+    title: 'Delete this conversation?',
+    description: 'This chat and its saved messages will be removed. This cannot be undone.',
+    confirmLabel: 'Delete conversation',
+  },
+  message: {
+    title: 'Delete this message?',
+    description: 'This message will be removed from the conversation. This cannot be undone.',
+    confirmLabel: 'Delete message',
+  },
+})
+
+/**
+ * Keep destructive-action language consistent wherever Chat offers a real
+ * deletion. Deliberately do not introduce a share action here: Chat has no
+ * persisted, access-controlled sharing flow yet, so presenting one would be
+ * misleading rather than premium.
+ */
+export function getChatDestructiveActionCopy(action) {
+  return CHAT_DESTRUCTIVE_ACTIONS[action] || null
+}
+
+export function getChatUserInitials(user) {
+  const name = typeof user?.user_metadata?.full_name === 'string'
+    ? user.user_metadata.full_name
+    : typeof user?.email === 'string'
+      ? user.email.split('@')[0]
+      : ''
+  const initials = name
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1))
+    .join('')
+    .slice(0, 2)
+    .toUpperCase()
+  return initials || 'U'
+}
+
 function cleanTitle(value) {
   return typeof value === 'string' ? value.trim().slice(0, 96) : ''
 }

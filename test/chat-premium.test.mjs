@@ -30,7 +30,9 @@ import {
   CHAT_STARTER_PROMPTS,
   createConversation,
   filterConversations,
+  getChatDestructiveActionCopy,
   getChatErrorPresentation,
+  getChatUserInitials,
   getProviderPresentation,
   groupConversationsByRecency,
   normalizeConversations,
@@ -78,6 +80,18 @@ test('Chat history supports search, active groups, and pinned conversations with
   assert.deepEqual(groupConversationsByRecency(conversations, now).map(([label, entries]) => [label, entries.map((conversation) => conversation.id)]), [
     ['Pinned', ['pin']], ['Today', ['today']], ['Yesterday', ['yesterday']],
   ])
+})
+
+test('Chat gives real destructive actions consistent in-product confirmation copy and keeps user identity tidy', () => {
+  assert.deepEqual(getChatDestructiveActionCopy('conversation'), {
+    title: 'Delete this conversation?',
+    description: 'This chat and its saved messages will be removed. This cannot be undone.',
+    confirmLabel: 'Delete conversation',
+  })
+  assert.equal(getChatDestructiveActionCopy('share'), null)
+  assert.equal(getChatUserInitials({ user_metadata: { full_name: 'Ada Lovelace' }, email: 'ignored@example.com' }), 'AL')
+  assert.equal(getChatUserInitials({ email: 'founder.one@example.com' }), 'FO')
+  assert.equal(getChatUserInitials({}), 'U')
 })
 
 test('Chat labels the active local or cloud model clearly and keeps provider-specific message attribution', () => {
@@ -229,6 +243,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const providerUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatProviderUtils.js'), 'utf8')
   const scrollSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/useConversationScroll.js'), 'utf8')
   const messageSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatMessage.jsx'), 'utf8')
+  const confirmationSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatConfirmDialog.jsx'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
@@ -239,13 +254,17 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.doesNotMatch(workspaceSource, /scrollIntoView/)
   assert.match(workspaceSource, /getChatErrorPresentation/)
   assert.match(workspaceSource, /ChatHistory/)
+  assert.match(workspaceSource, /ChatConfirmDialog/)
+  assert.doesNotMatch(workspaceSource, /window\.confirm/)
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
-  assert.match(composerSource, /pause naturally/i)
+  assert.match(composerSource, /pause or correct/i)
   assert.match(composerSource, /Finish dictation/)
   assert.match(composerSource, /Retry dictation/)
-  assert.match(composerSource, /Add image/)
+  assert.match(composerSource, /Upload an image/)
+  assert.match(composerSource, /paste an image directly/i)
+  assert.match(composerSource, /Live dictation is flowing/i)
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
   assert.match(composerSource, /role="menu"/)
@@ -259,6 +278,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /document\.addEventListener\('pointerdown'/)
   assert.match(messageSource, /event\.key === 'Escape'/)
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
+  assert.match(messageSource, /Best available browser voice/)
+  assert.match(messageSource, /getChatUserInitials/)
+  assert.match(confirmationSource, /role="alertdialog"/)
+  assert.match(confirmationSource, /aria-modal="true"/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)
   assert.match(css, /fl-chat-message\.is-user/)
   assert.match(css, /justify-content: flex-end/)
@@ -267,6 +290,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(recognitionSource, /applyFinalSpeechPhrase/)
   assert.match(recognitionSource, /sessionRef\.current \+= 1/)
   assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
+  assert.match(recognitionSource, /lastPublishedTranscriptRef/)
   assert.match(speechSource, /let activeAudio/)
   assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)
   assert.match(speechSource, /let playbackGeneration = 0/)
@@ -274,6 +298,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /height: 100dvh/)
   assert.match(css, /scrollbar-gutter: stable/)
   assert.match(css, /fl-chat-voice-popover/)
+  assert.match(css, /fl-chat-confirm-dialog/)
+  assert.match(css, /fl-chat-composer-image-action/)
+  assert.match(css, /fl-chat-dictation-status/)
+  assert.match(css, /fl-chat-avatar\.is-user/)
   assert.match(css, /fl-chat-composer-action-menu/)
   assert.match(css, /fl-chat-provider-menu/)
   assert.match(css, /fl-chat-jump-latest/)

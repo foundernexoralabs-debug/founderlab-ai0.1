@@ -29,6 +29,7 @@ export function useSpeechRecognition() {
   const finalizedSegmentsRef = useRef([])
   const protectedSegmentCountRef = useRef(0)
   const onUpdateRef = useRef(null)
+  const lastPublishedTranscriptRef = useRef('')
 
   const stop = useCallback(() => {
     // Invalidate both an active recognition instance and a microphone
@@ -49,6 +50,7 @@ export function useSpeechRecognition() {
     interimTranscriptRef.current = ''
     finalizedSegmentsRef.current = []
     protectedSegmentCountRef.current = 0
+    lastPublishedTranscriptRef.current = ''
     setTranscript('')
     setHasRecognizedSpeech(false)
   }, [])
@@ -78,12 +80,18 @@ export function useSpeechRecognition() {
     interimTranscriptRef.current = ''
     finalizedSegmentsRef.current = confirmedTranscriptRef.current ? [confirmedTranscriptRef.current] : []
     protectedSegmentCountRef.current = finalizedSegmentsRef.current.length
+    lastPublishedTranscriptRef.current = confirmedTranscriptRef.current
     setTranscript(confirmedTranscriptRef.current)
     setHasRecognizedSpeech(false)
     setVoiceInputState('resuming')
 
     const publishTranscript = () => {
       const next = appendVoiceTranscript(confirmedTranscriptRef.current, interimTranscriptRef.current)
+      // Some browser engines repeat an unchanged interim result. Publishing
+      // each duplicate makes a live composer appear to stutter even though no
+      // speech changed, so only update the UI when the audible draft moved.
+      if (next === lastPublishedTranscriptRef.current) return
+      lastPublishedTranscriptRef.current = next
       setTranscript(next)
       onUpdateRef.current?.(next)
     }

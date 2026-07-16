@@ -19,6 +19,7 @@ import {
 } from '@/services/aiProviderService'
 import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } from '@/services/workspaceStore'
 import { ChatComposer } from './ChatComposer'
+import { ChatConfirmDialog } from './ChatConfirmDialog'
 import { ChatHistory } from './ChatHistory'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
@@ -51,6 +52,7 @@ export function ChatWorkspace({ user }) {
   const [renamingId, setRenamingId] = useState(null)
   const [renameValue, setRenameValue] = useState('')
   const [editingMessageId, setEditingMessageId] = useState(null)
+  const [confirmation, setConfirmation] = useState(null)
   const [errorState, setErrorState] = useState(null)
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
@@ -418,25 +420,50 @@ export function ChatWorkspace({ user }) {
     toast('Generation stopped. Your message is still saved.', 'success')
   }
 
-  function clearConversation() {
+  function requestClearConversation() {
     if (!activeConversation || !activeConversation.messages.length) return
-    if (!window.confirm('Clear every message in this conversation? This cannot be undone.')) return
-    updateConversation(activeConversation.id, { messages: [] })
+    setConfirmation({ type: 'clear', conversationId: activeConversation.id })
+  }
+
+  function clearConversation(conversationId) {
+    const conversation = conversationsRef.current.find((entry) => entry.id === conversationId)
+    if (!conversation?.messages.length) return
+    updateConversation(conversationId, { messages: [] })
     setErrorState(null)
     toast('Conversation cleared', 'success')
   }
 
+  function requestDeleteConversation(conversationId) {
+    if (!conversationsRef.current.some((conversation) => conversation.id === conversationId)) return
+    setConfirmation({ type: 'conversation', conversationId })
+  }
+
   function deleteConversation(conversationId) {
-    if (!window.confirm('Delete this conversation? This cannot be undone.')) return
     const next = conversationsRef.current.filter((conversation) => conversation.id !== conversationId)
     persist(next)
     if (activeId === conversationId) setActiveId(next[0]?.id || null)
     toast('Conversation deleted', 'success')
   }
 
-  function deleteMessage(messageId) {
-    if (!activeConversation) return
-    updateConversation(activeConversation.id, { messages: activeConversation.messages.filter((message) => message.id !== messageId) })
+  function requestDeleteMessage(messageId) {
+    if (!activeConversation?.messages.some((message) => message.id === messageId)) return
+    setConfirmation({ type: 'message', conversationId: activeConversation.id, messageId })
+  }
+
+  function deleteMessage(conversationId, messageId) {
+    const conversation = conversationsRef.current.find((entry) => entry.id === conversationId)
+    if (!conversation?.messages.some((message) => message.id === messageId)) return
+    updateConversation(conversationId, { messages: conversation.messages.filter((message) => message.id !== messageId) })
+    toast('Message deleted', 'success')
+  }
+
+  function confirmPendingAction() {
+    const action = confirmation
+    setConfirmation(null)
+    if (!action) return
+    if (action.type === 'clear') clearConversation(action.conversationId)
+    if (action.type === 'conversation') deleteConversation(action.conversationId)
+    if (action.type === 'message') deleteMessage(action.conversationId, action.messageId)
   }
 
   function saveRename(conversationId) {
@@ -497,8 +524,9 @@ export function ChatWorkspace({ user }) {
         onRenameCommit={saveRename}
         onRenameCancel={() => setRenamingId(null)}
         onTogglePin={togglePin}
-        onDelete={deleteConversation}
+        onDelete={requestDeleteConversation}
       />
+      <ChatConfirmDialog action={confirmation} onCancel={() => setConfirmation(null)} onConfirm={confirmPendingAction} />
 
       <main className="fl-chat-main" aria-label="FounderLab Chat">
         <header className="fl-chat-topbar">
@@ -507,7 +535,7 @@ export function ChatWorkspace({ user }) {
             <div>{activeConversation?.title || 'FounderLab Chat'}</div>
             {activeConversation && <div>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
           </div>
-          {activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={clearConversation}>Clear</button>}
+          {activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={requestClearConversation}>Clear</button>}
           {elAvailable === true && <span title="Premium voice is available" className="fl-chat-voice-ready">● Voice</span>}
         </header>
 
@@ -535,7 +563,7 @@ export function ChatWorkspace({ user }) {
             <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
-                {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={deleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
+                {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
                 {sending && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
                 {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}
