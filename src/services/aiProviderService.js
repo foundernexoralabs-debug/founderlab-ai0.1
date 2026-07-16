@@ -1,4 +1,4 @@
-import { PROVIDERS, getDefaultModel, resolveModel } from '../ai/providerRegistry.js'
+import { PROVIDERS } from '../ai/providerRegistry.js'
 import {
   normalizeProviderAvailability,
   resolveConfiguredProvider,
@@ -11,12 +11,14 @@ import {
   OLLAMA_MODEL_STORAGE_KEY,
   OLLAMA_URL_STORAGE_KEY,
   setAIProviderPreference,
+  setOllamaModelPreference,
+  setOllamaURLPreference,
   setProviderModelPreference,
 } from '../ai/providerPreferences.js'
 import { createAIErrorResult, toLegacyAIText } from '../ai/normalizeResponse.js'
 import { routeAIRequest } from '../ai/providerRouter.js'
 import { recordProviderConnectionResult } from '../ai/providerConnectionState.js'
-import { isElectronOllamaAvailable, probeOllama, requestOllama } from '../ai/providers/ollama.js'
+import { discoverOllama, recordOllamaDiagnostic } from '../ai/providers/ollama.js'
 import { workspaceStore } from './workspaceStore.js'
 
 export {
@@ -28,13 +30,18 @@ export {
 let providerAvailability = normalizeProviderAvailability()
 
 export const PROVIDER_CONNECTION_TEST_MAX_TOKENS = 256
+export const OLLAMA_CONNECTION_TEST_MAX_TOKENS = 24
 
 export function createProviderConnectionTestRequest({ provider, model } = {}) {
   return {
     provider,
     model,
     messages: [{ role: 'user', content: 'Say only: CONNECTED' }],
-    maxTokens: PROVIDER_CONNECTION_TEST_MAX_TOKENS,
+    // A local connection test proves the selected model can reply; it should
+    // not make a small laptop model generate a cloud-sized response.
+    maxTokens: provider === 'ollama'
+      ? OLLAMA_CONNECTION_TEST_MAX_TOKENS
+      : PROVIDER_CONNECTION_TEST_MAX_TOKENS,
     connectionTest: true,
   }
 }
@@ -81,8 +88,20 @@ export async function refreshProviderAvailability({
     }
 
     providerAvailability = normalizeProviderAvailability(payload.providers)
-    const provider = resolveConfiguredProvider(preferredProvider, providerAvailability)
-    if (provider && provider !== preferredProvider) setAIProviderPreference(provider)
+    // The Settings card can be changed while this authenticated status request
+    // is in flight. Resolve against the latest preference so a stale response
+    // never unmounts Local Ollama and discards its visible result.
+    const currentPreferredProvider = getAIProviderPreference() || preferredProvider
+    const provider = resolveConfiguredProvider(currentPreferredProvider, providerAvailability)
+    if (preferredProvider === 'ollama' || currentPreferredProvider === 'ollama') {
+      recordOllamaDiagnostic('provider-status', {
+        selectedProviderAtStart: preferredProvider || 'none',
+        selectedProviderAtCompletion: currentPreferredProvider || 'none',
+        selectedProviderChangedDuringRefresh: preferredProvider !== currentPreferredProvider,
+        resolvedProvider: provider || 'none',
+      })
+    }
+    if (provider && provider !== currentPreferredProvider) setAIProviderPreference(provider)
     return { provider, providers: providerAvailability }
   } catch {
     return { provider: preferredProvider, providers: providerAvailability }
@@ -98,11 +117,11 @@ export function setAIProvider(providerId) {
 }
 
 export function getProviderModel(providerId) {
-  return getProviderModelPreference(providerId)
+  return providerId === 'ollama' ? getOllamaModelPreference() : getProviderModelPreference(providerId)
 }
 
 export function setProviderModel(providerId, model) {
-  return setProviderModelPreference(providerId, model)
+  return providerId === 'ollama' ? setOllamaModelPreference(model) : setProviderModelPreference(providerId, model)
 }
 
 export function getOllamaURL() {
@@ -113,23 +132,16 @@ export function getOllamaModel() {
   return getOllamaModelPreference()
 }
 
-export const isElectron = isElectronOllamaAvailable()
-
-export async function ollamaProbe(base) {
-  return probeOllama(base)
+export function setOllamaModel(model) {
+  return setOllamaModelPreference(model)
 }
 
-export async function ollamaChat(messages, system, maxTokens) {
-  const model = getOllamaModel() || getDefaultModel('ollama')
-  const result = await requestOllama({
-    model,
-    messages,
-    system,
-    maxTokens,
-    ollamaUrl: getOllamaURL(),
-  })
-  if (!result.ok) throw new Error(result.error.message)
-  return result.text
+export function setOllamaURL(url) {
+  return setOllamaURLPreference(url)
+}
+
+export async function discoverLocalOllama(options = {}) {
+  return discoverOllama(options.url || getOllamaURL(), options)
 }
 
 export async function requestAIResult({
@@ -140,18 +152,27 @@ export async function requestAIResult({
   maxTokens = 1200,
   ollamaUrl,
   connectionTest = false,
+  localOllamaAllowed = false,
 } = {}, {
   fetchImpl = globalThis.fetch,
   electronBridge,
+  permissionQuery,
   accessToken,
 } = {}) {
   if (!provider) {
     return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
   }
 
+  if (provider === 'ollama' && !localOllamaAllowed) {
+    return createAIErrorResult({ provider, code: 'OLLAMA_CHAT_ONLY' })
+  }
+
   const resolvedModel = model || (provider === 'ollama'
-    ? getOllamaModel() || resolveModel('ollama', '')
+    ? getOllamaModel()
     : getProviderModel(provider))
+  if (provider === 'ollama' && !resolvedModel) {
+    return createAIErrorResult({ provider, code: 'OLLAMA_MODEL_REQUIRED' })
+  }
   const complete = (result) => {
     recordProviderConnectionResult(provider, result, { connectionTest })
     return result
@@ -174,6 +195,8 @@ export async function requestAIResult({
   }, {
     fetchImpl,
     electronBridge,
+    permissionQuery,
+    diagnosticFlow: provider === 'ollama' ? (connectionTest ? 'connection-test' : 'chat') : undefined,
     accessToken: token,
   })
   let result = await request(activeAccessToken)
@@ -192,7 +215,7 @@ export async function requestAIResult({
   return complete(result)
 }
 
-export async function ai(messages, system = '', maxTokens = 1200) {
-  const result = await requestAIResult({ messages, system, maxTokens })
+export async function ai(messages, system = '', maxTokens = 1200, { localOllamaAllowed = false } = {}) {
+  const result = await requestAIResult({ messages, system, maxTokens, localOllamaAllowed })
   return toLegacyAIText(result)
 }

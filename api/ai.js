@@ -75,6 +75,17 @@ async function handler(req, res, dependencies = {}) {
   }
 
   const request = normalized.value
+  // Local Ollama must execute in the user's browser against their loopback
+  // service. A Vercel function's localhost is not the user's machine.
+  if (request.provider === 'ollama') {
+    const result = engine.createAIErrorResult({
+      provider: request.provider,
+      model: request.model,
+      status: 400,
+      code: 'OLLAMA_LOCAL_ONLY',
+    })
+    return res.status(result.error.status).json(result)
+  }
   const allowed = await requireRateLimit(req, res, {
     user,
     scope: 'ai',

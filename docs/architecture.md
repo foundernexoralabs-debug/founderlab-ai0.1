@@ -101,6 +101,18 @@ FounderLab has deliberately independent configuration groups:
   deployment will use. Authentication and the rest of the workspace never
   depend on `ANTHROPIC_API_KEY`; Local Ollama needs no server key.
 
+## Local Ollama boundary
+
+Local Ollama is a browser-to-loopback integration for Chat, not a Vercel
+provider. `src/ai/providers/ollama.js` discovers models with a readable local
+`/api/tags` request and sends Chat directly to local `/api/chat` with browser
+credentials omitted. This path is constrained to `localhost`, `127.0.0.1`, or
+`::1`; it never enters the cloud provider runner, requires no Supabase token or
+provider key, and cannot use an arbitrary remote URL. `/api/ai` defensively
+rejects Ollama execution because its own `localhost` would be the Vercel
+runtime, not the user's device. See `docs/ollama-local.md` for CORS and macOS
+setup requirements.
+
 Provider availability is queried only after a user is authenticated. The API
 returns provider booleans, never provider keys, and the browser keeps a saved
 provider only when it remains configured. Otherwise it selects the first

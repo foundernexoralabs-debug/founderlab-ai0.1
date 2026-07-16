@@ -5,9 +5,16 @@ import { requestOllama } from './providers/ollama.js'
 export async function routeAIRequest(input, {
   fetchImpl = globalThis.fetch,
   electronBridge,
+  permissionQuery,
+  diagnosticFlow,
   accessToken,
 } = {}) {
-  const normalized = normalizeAIRequest(input, { enforceLimits: true })
+  const normalized = normalizeAIRequest(input, {
+    enforceLimits: true,
+    // Ollama is a browser-to-loopback integration. Normalizing here prevents a
+    // persisted preference or caller from turning it into an arbitrary fetch.
+    restrictOllamaToLocal: true,
+  })
   if (!normalized.ok) {
     return createAIErrorResult({
       provider: input?.provider,
@@ -19,7 +26,7 @@ export async function routeAIRequest(input, {
 
   const request = normalized.value
   if (request.provider === 'ollama') {
-    return requestOllama(request, { fetchImpl, electronBridge })
+    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow })
   }
 
   if (typeof fetchImpl !== 'function') {

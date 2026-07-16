@@ -1,6 +1,11 @@
 const CONNECTION_STATES = Object.freeze({
   not_configured: Object.freeze({ state: 'not_configured', label: 'Not configured' }),
-  local: Object.freeze({ state: 'local', label: 'Local only — test connection' }),
+  local: Object.freeze({ state: 'local', label: 'Local Ollama' }),
+  unavailable: Object.freeze({ state: 'unavailable', label: 'Not available' }),
+  detecting: Object.freeze({ state: 'detecting', label: 'Detecting' }),
+  running: Object.freeze({ state: 'running', label: 'Running' }),
+  no_models: Object.freeze({ state: 'no_models', label: 'No models found' }),
+  models_available: Object.freeze({ state: 'models_available', label: 'Models available' }),
   ready: Object.freeze({ state: 'ready', label: 'Ready to test' }),
   testing: Object.freeze({ state: 'testing', label: 'Testing' }),
   connected: Object.freeze({ state: 'connected', label: 'Connected' }),
@@ -18,6 +23,14 @@ const PROVIDER_EXECUTION_ERROR_CODES = new Set([
   'MALFORMED_RESPONSE',
   'EMPTY_RESPONSE',
   'REQUEST_INVALID',
+  'OLLAMA_INVALID_URL',
+  'OLLAMA_UNAVAILABLE',
+  'OLLAMA_BROWSER_UNSUPPORTED',
+  'OLLAMA_BROWSER_ACCESS_DENIED',
+  'OLLAMA_BROWSER_ACCESS_BLOCKED',
+  'OLLAMA_TIMEOUT',
+  'OLLAMA_MODEL_REQUIRED',
+  'OLLAMA_MODEL_UNAVAILABLE',
   'GEMINI_REQUEST_INVALID',
   'GEMINI_BILLING_OR_REGION_REQUIRED',
 ])
@@ -57,7 +70,12 @@ export function recordProviderConnectionResult(providerId, result, { connectionT
   const code = result.error?.code
   if (!PROVIDER_EXECUTION_ERROR_CODES.has(code)) return
   if (connectionTest && getProviderConnectionStatus(providerId) === 'connected') return
-  setProviderConnectionStatus(providerId, code === 'MISSING_CONFIGURATION' ? 'not_configured' : 'failed')
+  const state = code === 'MISSING_CONFIGURATION'
+    ? 'not_configured'
+    : code === 'OLLAMA_UNAVAILABLE' || code === 'OLLAMA_BROWSER_UNSUPPORTED'
+      ? 'unavailable'
+      : 'failed'
+  setProviderConnectionStatus(providerId, state)
 }
 
 export function subscribeProviderConnectionStatuses(listener) {

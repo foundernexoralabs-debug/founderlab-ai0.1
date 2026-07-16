@@ -1,14 +1,12 @@
 const anthropic = require('./providers/anthropic')
 const gemini = require('./providers/gemini')
 const groq = require('./providers/groq')
-const ollama = require('./providers/ollama')
 const { createProviderError } = require('./providerUtils')
 
 const providers = {
   anthropic,
   gemini,
   groq,
-  ollama,
 }
 
 async function runProvider(request, { env = process.env, fetchImpl = globalThis.fetch } = {}) {

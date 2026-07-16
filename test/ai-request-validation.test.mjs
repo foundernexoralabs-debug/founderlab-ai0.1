@@ -17,9 +17,17 @@ import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normaliz
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 import {
+  discoverOllama,
+  getOllamaBrowserCompatibility,
+  getOllamaDiagnostics,
+  normalizeOllamaModels,
+  recordOllamaDiagnostic,
+} from '../src/ai/providers/ollama.js'
+import {
   getProviderConnectionState,
   getProviderConnectionStatus,
   resetProviderConnectionStatuses,
+  setProviderConnectionStatus,
 } from '../src/ai/providerConnectionState.js'
 import {
   getProviderConfigurationState,
@@ -28,6 +36,7 @@ import {
 } from '../src/ai/providerAvailability.js'
 import {
   createProviderConnectionTestRequest,
+  OLLAMA_CONNECTION_TEST_MAX_TOKENS,
   PROVIDER_CONNECTION_TEST_MAX_TOKENS,
   refreshProviderAvailability,
   requestAIResult,
@@ -35,8 +44,12 @@ import {
 import { workspaceStore } from '../src/services/workspaceStore.js'
 import {
   getAIProviderPreference,
+  getOllamaModelPreference,
+  getOllamaURLPreference,
   getProviderModelPreference,
   setAIProviderPreference,
+  setOllamaModelPreference,
+  setOllamaURLPreference,
   setProviderModelPreference,
 } from '../src/ai/providerPreferences.js'
 
@@ -299,6 +312,52 @@ test('an active workspace session is used by both Chat and provider-status reque
   }
 })
 
+test('provider availability keeps a Local Ollama selection made while status refresh is in flight', async () => {
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const store = new Map()
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => store.get(key) || null,
+      setItem: (key, value) => store.set(key, String(value)),
+    },
+  })
+
+  try {
+    setAIProviderPreference('groq')
+    const status = await refreshProviderAvailability({
+      accessToken: 'active-workspace-access-token',
+      fetchImpl: async () => {
+        // This mirrors selecting the Local Ollama card before the status
+        // response returns. A stale result must not switch the card away.
+        setAIProviderPreference('ollama')
+        return jsonResponse({ body: {
+          ok: true,
+          providers: {
+            anthropic: { configured: false },
+            groq: { configured: true },
+            gemini: { configured: true },
+            ollama: { configured: true, local: true },
+          },
+        } })
+      },
+    })
+
+    assert.equal(status.provider, 'ollama')
+    assert.equal(getAIProviderPreference(), 'ollama')
+    assert.deepEqual(getOllamaDiagnostics()['provider-status'], {
+      flow: 'provider-status',
+      selectedProviderAtStart: 'groq',
+      selectedProviderAtCompletion: 'ollama',
+      selectedProviderChangedDuringRefresh: true,
+      resolvedProvider: 'ollama',
+    })
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else Object.defineProperty(globalThis, 'localStorage', originalStorage)
+  }
+})
+
 test('a genuinely signed-out browser request has no token and receives the normalized authentication error', async () => {
   const previousSession = workspaceStore.session
   workspaceStore.session = null
@@ -331,7 +390,360 @@ test('provider connection labels distinguish configured, testing, connected, fai
   assert.deepEqual(getProviderConnectionState('ready', 'testing'), { state: 'testing', label: 'Testing' })
   assert.deepEqual(getProviderConnectionState('ready', 'connected'), { state: 'connected', label: 'Connected' })
   assert.deepEqual(getProviderConnectionState('ready', 'failed'), { state: 'failed', label: 'Failed' })
-  assert.deepEqual(getProviderConnectionState('local'), { state: 'local', label: 'Local only — test connection' })
+  assert.deepEqual(getProviderConnectionState('local'), { state: 'local', label: 'Local Ollama' })
+  assert.deepEqual(getProviderConnectionState('local', 'detecting'), { state: 'detecting', label: 'Detecting' })
+  assert.deepEqual(getProviderConnectionState('local', 'no_models'), { state: 'no_models', label: 'No models found' })
+  assert.deepEqual(getProviderConnectionState('local', 'unavailable'), { state: 'unavailable', label: 'Not available' })
+})
+
+test('Ollama discovery only reports a real readable local models response', async () => {
+  const unavailable = await discoverOllama('http://localhost:11434', {
+    fetchImpl: async () => { throw new TypeError('CORS or network failure') },
+  })
+  assert.equal(unavailable.ok, false)
+  assert.equal(unavailable.state, 'unavailable')
+  assert.equal(unavailable.models.length, 0)
+  assert.deepEqual(unavailable.diagnostic, {
+    flow: 'discovery',
+    requestStarted: true,
+    requestHost: 'localhost:11434',
+    requestPath: '/api/tags',
+    responseReceived: false,
+    httpStatus: null,
+    jsonParsed: null,
+    modelListEmpty: null,
+    browserBlockedBeforeResponse: true,
+    permissionState: 'not-supported',
+    secureContext: 'not-browser',
+    topLevelContext: 'not-browser',
+    targetAddressSpace: 'loopback',
+    targetAddressSpaceSupported: null,
+    failureStep: 'fetch-before-response',
+  })
+
+  const noModels = await discoverOllama('http://localhost:11434', {
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'http://localhost:11434/api/tags')
+      assert.equal(options.credentials, 'omit')
+      assert.equal(options.mode, 'cors')
+      assert.equal(options.cache, 'no-store')
+      assert.equal(options.targetAddressSpace, 'loopback')
+      return jsonResponse({ body: { models: [] } })
+    },
+  })
+  assert.equal(noModels.ok, true)
+  assert.equal(noModels.state, 'no_models')
+  assert.equal(noModels.diagnostic.httpStatus, 200)
+  assert.equal(noModels.diagnostic.jsonParsed, true)
+  assert.equal(noModels.diagnostic.modelListEmpty, true)
+
+  const discovered = await discoverOllama('http://localhost:11434', {
+    fetchImpl: async () => jsonResponse({ body: {
+      models: [
+        { name: 'gemma3:latest', size: 3338801804, details: { family: 'gemma', parameter_size: '4.3B' } },
+        { name: 'qwen3:8b', details: { family: 'qwen3', parameter_size: '8B' } },
+      ],
+    } }),
+  })
+  assert.equal(discovered.ok, true)
+  assert.equal(discovered.state, 'models_available')
+  assert.deepEqual(discovered.models.map((model) => model.id), ['gemma3:latest', 'qwen3:8b'])
+  assert.equal(discovered.models[0].parameterSize, '4.3B')
+  assert.equal(discovered.diagnostic.requestHost, 'localhost:11434')
+  assert.equal(discovered.diagnostic.responseReceived, true)
+  assert.equal(discovered.diagnostic.modelListEmpty, false)
+
+  const malformed = await discoverOllama('http://localhost:11434', {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('not exposed') } }),
+  })
+  assert.equal(malformed.error.code, 'MALFORMED_RESPONSE')
+  assert.equal(malformed.diagnostic.jsonParsed, false)
+  assert.equal(malformed.diagnostic.failureStep, 'json-parse')
+})
+
+test('user-initiated local discovery starts the annotated fetch before permission status resolves', async () => {
+  let resolvePermission
+  const permissionPending = new Promise((resolve) => { resolvePermission = resolve })
+  let fetchStarted = false
+  const discoveryPromise = discoverOllama('http://localhost:11434', {
+    permissionQuery: async () => permissionPending,
+    fetchImpl: async () => {
+      fetchStarted = true
+      return jsonResponse({ body: { models: [{ name: 'llama3.2:3b-instruct-q4_K_M' }] } })
+    },
+  })
+  await Promise.resolve()
+  assert.equal(fetchStarted, true)
+  resolvePermission({ state: 'prompt' })
+  const discovered = await discoveryPromise
+  assert.equal(discovered.ok, true)
+  assert.equal(discovered.diagnostic.permissionState, 'prompt')
+})
+
+test('local connection tests start their annotated Chat request before permission status resolves', async () => {
+  let resolvePermission
+  const permissionPending = new Promise((resolve) => { resolvePermission = resolve })
+  let fetchStarted = false
+  const connectionPromise = requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => permissionPending,
+    fetchImpl: async (url) => {
+      fetchStarted = true
+      assert.equal(url, 'http://localhost:11434/api/chat')
+      return jsonResponse({ body: { message: { content: 'CONNECTED' } } })
+    },
+  })
+  await Promise.resolve()
+  assert.equal(fetchStarted, true)
+  resolvePermission({ state: 'prompt' })
+  const connection = await connectionPromise
+  assert.equal(connection.ok, true)
+  assert.equal(connection.diagnostic.permissionState, 'prompt')
+})
+
+test('Ollama model discovery preserves a valid model.model value and tagged names', () => {
+  const models = normalizeOllamaModels([
+    { model: 'llama3.2:3b-instruct-q4_K_M', details: { family: 'llama' } },
+    { name: 'llama3.2:3b-instruct-q4_K_M' },
+    { name: '  qwen3:8b  ' },
+    { name: '' },
+  ])
+  assert.deepEqual(models.map((model) => model.id), ['llama3.2:3b-instruct-q4_K_M', 'qwen3:8b'])
+})
+
+test('Local Ollama identifies unsupported browser loopback capability before making a request', async () => {
+  const chromiumWindow = {}
+  chromiumWindow.top = chromiumWindow
+  class ChromiumRequest {
+    constructor(_url, options) { this.targetAddressSpace = options.targetAddressSpace }
+  }
+  const chromium = getOllamaBrowserCompatibility({
+    windowImpl: chromiumWindow,
+    RequestImpl: ChromiumRequest,
+    secureContext: true,
+  })
+  assert.equal(chromium.isBrowser, true)
+  assert.equal(chromium.loopbackAccessSupported, true)
+  assert.equal(chromium.targetAddressSpaceSupported, true)
+
+  const safariWindow = {}
+  safariWindow.top = safariWindow
+  class UnsupportedRequest {}
+  const safari = getOllamaBrowserCompatibility({
+    windowImpl: safariWindow,
+    RequestImpl: UnsupportedRequest,
+    secureContext: true,
+  })
+  assert.equal(safari.isBrowser, true)
+  assert.equal(safari.loopbackAccessSupported, false)
+  assert.equal(safari.targetAddressSpaceSupported, false)
+
+  const unsupported = await discoverOllama('http://localhost:11434', {
+    browserCompatibility: safari,
+    fetchImpl: async () => assert.fail('An unsupported browser must not start a local request'),
+  })
+  assert.equal(unsupported.ok, false)
+  assert.equal(unsupported.error.code, 'OLLAMA_BROWSER_UNSUPPORTED')
+  assert.equal(unsupported.diagnostic.failureStep, 'browser-capability')
+  assert.equal(unsupported.diagnostic.requestStarted, false)
+  assert.match(classifyAIError({ provider: 'ollama', code: unsupported.error.code }).message, /Chromium-based desktop browser/)
+})
+
+test('Ollama model and localhost preferences persist safely without accepting a remote endpoint', () => {
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const store = new Map()
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => store.get(key) || null,
+      setItem: (key, value) => store.set(key, String(value)),
+    },
+  })
+  try {
+    assert.equal(setOllamaModelPreference('gemma3:latest'), true)
+    assert.equal(getOllamaModelPreference(), 'gemma3:latest')
+    assert.equal(setOllamaURLPreference('http://127.0.0.1:11434/api/tags'), true)
+    assert.equal(getOllamaURLPreference(), 'http://127.0.0.1:11434')
+    assert.equal(setOllamaURLPreference('https://remote.example.test'), false)
+    store.set('fl_ollama_url', 'https://remote.example.test')
+    assert.equal(getOllamaURLPreference(), 'http://localhost:11434')
+    assert.deepEqual([...store.keys()].sort(), ['fl_ollama_model', 'fl_ollama_url'])
+    assert.equal([...store.values()].some((value) => /api.?key|token|secret/i.test(value)), false)
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage
+    else Object.defineProperty(globalThis, 'localStorage', originalStorage)
+  }
+})
+
+test('Ollama test and Chat route directly to localhost without cloud authentication', async () => {
+  resetProviderConnectionStatuses()
+  const calls = []
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options })
+    assert.equal(url, 'http://localhost:11434/api/chat')
+    assert.equal(options.credentials, 'omit')
+    assert.equal(options.mode, 'cors')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.targetAddressSpace, 'loopback')
+    assert.equal(options.headers.Authorization, undefined)
+    const body = JSON.parse(options.body)
+    assert.equal(body.stream, false)
+    assert.equal(body.model, 'gemma3:latest')
+    assert.equal(body.options.num_predict, calls.length === 1 ? OLLAMA_CONNECTION_TEST_MAX_TOKENS : 300)
+    return jsonResponse({ body: {
+      message: { role: 'assistant', content: 'CONNECTED' },
+      done_reason: 'stop',
+      eval_count: 4,
+    } })
+  }
+  try {
+    const tested = await requestAIResult({
+      ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'gemma3:latest' }),
+      localOllamaAllowed: true,
+    }, { fetchImpl })
+    assert.equal(tested.ok, true)
+    assert.equal(getProviderConnectionStatus('ollama'), 'connected')
+    assert.equal(tested.diagnostic.flow, 'connection-test')
+    assert.equal(tested.diagnostic.httpStatus, 200)
+    assert.equal(tested.diagnostic.jsonParsed, true)
+
+    const chat = await requestAIResult({
+      provider: 'ollama',
+      model: 'gemma3:latest',
+      messages: [message('Draft a launch update')],
+      maxTokens: 300,
+      localOllamaAllowed: true,
+    }, { fetchImpl })
+    assert.equal(chat.ok, true)
+    assert.equal(chat.text, 'CONNECTED')
+    assert.equal(chat.diagnostic.flow, 'chat')
+    assert.equal(chat.diagnostic.responseReceived, true)
+    assert.equal(calls.length, 2)
+  } finally {
+    resetProviderConnectionStatuses()
+  }
+})
+
+test('Ollama failures remain isolated and an accidental server route is rejected', async () => {
+  resetProviderConnectionStatuses()
+  try {
+    const restricted = await requestAIResult({
+      provider: 'ollama',
+      model: 'gemma3:latest',
+      messages: [message('A non-Chat feature request')],
+    }, { fetchImpl: async () => assert.fail('Non-Chat Ollama use must not fetch') })
+    assert.equal(restricted.ok, false)
+    assert.equal(restricted.error.code, 'OLLAMA_CHAT_ONLY')
+
+    setProviderConnectionStatus('groq', 'connected')
+    const failed = await requestAIResult({
+      ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'missing-local-model' }),
+      localOllamaAllowed: true,
+    }, {
+      fetchImpl: async () => jsonResponse({ ok: false, status: 404, body: { error: 'model not found' } }),
+    })
+    assert.equal(failed.ok, false)
+    assert.equal(failed.error.code, 'OLLAMA_MODEL_UNAVAILABLE')
+    assert.equal(getProviderConnectionStatus('ollama'), 'failed')
+    assert.equal(getProviderConnectionStatus('groq'), 'connected')
+
+    let fetched = false
+    const routed = await routeAIRequest({
+      provider: 'ollama',
+      model: 'gemma3:latest',
+      ollamaUrl: 'https://remote.example.test',
+      messages: [message()],
+    }, { fetchImpl: async () => { fetched = true; throw new Error('must not fetch') } })
+    assert.equal(routed.ok, false)
+    assert.equal(routed.error.code, 'REQUEST_INVALID')
+    assert.equal(fetched, false)
+
+    const response = createResponseRecorder()
+    await aiHandler(createRequest({
+      headers: { authorization: 'Bearer verified-access-token' },
+      body: { provider: 'ollama', model: 'gemma3:latest', ollamaUrl: 'http://localhost:11434', messages: [message()] },
+    }), response, {
+      env: TEST_ENV,
+      fetchImpl: authenticatedFetch(async () => assert.fail('The server must not execute a local Ollama request')),
+      rateLimiter: async () => assert.fail('The local-only rejection must happen before rate limiting'),
+    })
+    assert.equal(response.statusCode, 400)
+    assert.equal(response.body.error.code, 'OLLAMA_LOCAL_ONLY')
+  } finally {
+    resetProviderConnectionStatuses()
+  }
+})
+
+test('Ollama retains a browser local-access category without exposing browser internals', async () => {
+  const denied = await discoverOllama('http://localhost:11434', {
+    permissionQuery: async () => ({ state: 'denied' }),
+    fetchImpl: async () => { throw new TypeError('browser denied the local request before it reached Ollama') },
+  })
+  assert.equal(denied.ok, false)
+  assert.equal(denied.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
+  assert.equal(denied.diagnostic.requestStarted, true)
+  assert.equal(denied.diagnostic.browserBlockedBeforeResponse, true)
+  assert.equal(denied.diagnostic.failureStep, 'fetch-before-response')
+
+  const blocked = await requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => ({ state: 'prompt' }),
+    fetchImpl: async () => { throw new TypeError('browser refused local request') },
+  })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.error.code, 'OLLAMA_BROWSER_ACCESS_BLOCKED')
+  assert.equal(blocked.error.message.includes('browser refused local request'), false)
+  assert.equal(blocked.diagnostic.flow, 'connection-test')
+  assert.equal(blocked.diagnostic.responseReceived, false)
+  assert.equal(blocked.diagnostic.browserBlockedBeforeResponse, true)
+  assert.equal(blocked.diagnostic.failureStep, 'fetch-before-response')
+
+  const deniedTest = await requestAIResult({
+    ...createProviderConnectionTestRequest({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }),
+    localOllamaAllowed: true,
+  }, {
+    permissionQuery: async () => ({ state: 'denied' }),
+    fetchImpl: async () => { throw new TypeError('browser denied the local test before it reached Ollama') },
+  })
+  assert.equal(deniedTest.ok, false)
+  assert.equal(deniedTest.error.code, 'OLLAMA_BROWSER_ACCESS_DENIED')
+
+  const discarded = recordOllamaDiagnostic('panel', {
+    event: 'discovery-result-discarded',
+    discoveryResultApplied: false,
+    successDiscarded: true,
+  })
+  assert.equal(discarded.successDiscarded, true)
+  assert.equal(getOllamaDiagnostics().panel.discoveryResultApplied, false)
+})
+
+test('Ollama is presented as a first-class local provider without stale CORS setup guidance', () => {
+  const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
+  const panelSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/settings/OllamaProviderPanel.jsx'), 'utf8')
+  assert.match(appSource, /Cloud providers/)
+  assert.match(appSource, /Local AI/)
+  assert.match(appSource, /ProviderChoiceCard/)
+  assert.match(appSource, /<OllamaProviderPanel/)
+  assert.match(panelSource, /Local · Private · Free/)
+  assert.match(panelSource, /Models available/)
+  assert.match(panelSource, /Test connection/)
+  assert.match(panelSource, /Connection details/)
+  assert.match(panelSource, /Target host/)
+  assert.match(panelSource, /Loopback permission/)
+  assert.match(panelSource, /Allow local browser access/)
+  assert.match(panelSource, /Check Local Ollama/)
+  assert.match(panelSource, /Local Ollama currently requires Chrome, Edge, Brave, or Arc on desktop/)
+  assert.match(panelSource, /Why this browser cannot use Local Ollama/)
+  assert.match(panelSource, /Setup and recovery help/)
+  assert.doesNotMatch(panelSource, /void detect\(\)/)
+  assert.match(panelSource, /State discarded after success/)
+  assert.match(panelSource, /local app/)
+  assert.doesNotMatch(appSource, /OLLAMA_ORIGINS=\*/)
+  assert.doesNotMatch(panelSource, /OLLAMA_ORIGINS/)
 })
 
 test('provider connection checks use the same normalized path as Chat and preserve a known successful provider', async () => {
