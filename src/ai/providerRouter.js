@@ -8,6 +8,7 @@ export async function routeAIRequest(input, {
   permissionQuery,
   diagnosticFlow,
   accessToken,
+  signal,
 } = {}) {
   const normalized = normalizeAIRequest(input, {
     enforceLimits: true,
@@ -26,7 +27,7 @@ export async function routeAIRequest(input, {
 
   const request = normalized.value
   if (request.provider === 'ollama') {
-    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow })
+    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow, signal })
   }
 
   if (typeof fetchImpl !== 'function') {
@@ -47,7 +48,9 @@ export async function routeAIRequest(input, {
         max_tokens: request.maxTokens,
         ...(request.system && { system: request.system }),
         ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
       }),
+      signal,
     })
     const payload = await response.json().catch(() => null)
     if (!payload) {
@@ -62,7 +65,7 @@ export async function routeAIRequest(input, {
     return createAIErrorResult({
       provider: request.provider,
       model: request.model,
-      code: 'NETWORK_FAILURE',
+      code: error?.name === 'AbortError' ? 'REQUEST_CANCELLED' : 'NETWORK_FAILURE',
       message: error?.message,
     })
   }

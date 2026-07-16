@@ -59,6 +59,8 @@ const aiHandler = require('../api/ai.js')
 const youtubeHandler = require('../api/youtube.js')
 const ttsHandler = require('../api/tts.js')
 const groqProvider = require('../api/ai/providers/groq.js')
+const { assertProviderResponse } = require('../api/ai/providerUtils.js')
+const { createTimedFetch, getProviderTimeoutMs } = require('../api/ai/providerRunner.js')
 const {
   authenticateRequest,
   enforceRequestLimit,
@@ -185,6 +187,15 @@ test('server request normalization accepts a large Builder prompt within the bou
   assert.equal(result.ok, true)
   assert.equal(result.value.maxTokens, 4500)
   assert.equal(result.value.model, 'claude-sonnet-4-6')
+
+  const structured = normalizeServerAIRequest({
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    messages: [message('Return a project manifest.')],
+    response_format: { type: 'json_object' },
+  })
+  assert.equal(structured.ok, true)
+  assert.deepEqual(structured.value.responseFormat, { type: 'json_object' })
 })
 
 test('server request normalization rejects invalid models, oversized messages, and unsupported image paths', () => {
@@ -195,6 +206,7 @@ test('server request normalization rejects invalid models, oversized messages, a
   assert.equal(normalizeServerAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('x'.repeat(160001))] }).error.code, 'REQUEST_INVALID')
   assert.equal(normalizeServerAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('image', 'data:image/png;base64,a')] }).error.code, 'REQUEST_INVALID')
   assert.equal(normalizeServerAIRequest({ provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [message('one', 'data:image/png;base64,a'), message('two', 'data:image/png;base64,b')] }).error.code, 'REQUEST_INVALID')
+  assert.equal(normalizeServerAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message()], response_format: { type: 'text' } }).error.code, 'REQUEST_INVALID')
 })
 
 test('request normalization accepts one bounded Anthropic image and limits Ollama to a local origin on the server', () => {
@@ -219,6 +231,9 @@ test('AI results normalize malformed output and premium failure categories witho
   assert.deepEqual(success.content, [{ type: 'text', text: 'Useful answer' }])
   assert.equal(createAIResult({ provider: 'groq', model: 'openai/gpt-oss-120b', text: '   ' }).error.code, 'EMPTY_RESPONSE')
   assert.equal(classifyAIError({ provider: 'gemini', status: 429 }).code, 'RATE_LIMITED')
+  assert.equal(classifyAIError({ provider: 'groq', status: 429, code: 'PROVIDER_RATE_LIMITED' }).message, 'Groq has reached its provider request limit. Wait briefly, then try again.')
+  assert.equal(classifyAIError({ provider: 'groq', status: 413 }).code, 'PROVIDER_REQUEST_TOO_LARGE')
+  assert.equal(classifyAIError({ provider: 'groq', status: 413 }).retryable, false)
   assert.equal(classifyAIError({ provider: 'gemini', status: 503 }).code, 'PROVIDER_UNAVAILABLE')
   assert.equal(classifyAIError({ provider: 'anthropic', code: 'MISSING_CONFIGURATION' }).retryable, false)
   assert.equal(
@@ -237,6 +252,13 @@ test('AI results normalize malformed output and premium failure categories witho
   assert.equal(normalized.error.message.includes('raw upstream text'), false)
 })
 
+test('provider responses preserve an upstream 413 as a safe non-retryable request-size error', () => {
+  assert.throws(
+    () => assertProviderResponse({ ok: false, status: 413 }, { error: { message: 'raw provider detail' } }, 'groq'),
+    (error) => error.code === 'PROVIDER_REQUEST_TOO_LARGE' && error.status === 413 && error.message === 'raw provider detail'
+  )
+})
+
 test('browser provider router preserves the stable API contract and sends the supplied model', async () => {
   let requestBody
   const result = await routeAIRequest({
@@ -244,6 +266,7 @@ test('browser provider router preserves the stable API contract and sends the su
     model: 'openai/gpt-oss-120b',
     messages: [message('hello')],
     maxTokens: 200,
+    responseFormat: { type: 'json_object' },
   }, {
     accessToken: 'browser-session-token',
     fetchImpl: async (_, options) => {
@@ -260,8 +283,22 @@ test('browser provider router preserves the stable API contract and sends the su
     },
   })
   assert.equal(requestBody.max_tokens, 200)
+  assert.deepEqual(requestBody.response_format, { type: 'json_object' })
   assert.equal(result.ok, true)
   assert.equal(result.text, 'Consistent result')
+})
+
+test('server provider execution uses a bounded fetch timeout without exposing provider details', async () => {
+  assert.equal(getProviderTimeoutMs({}), 60000)
+  assert.equal(getProviderTimeoutMs({ FOUNDERLAB_PROVIDER_TIMEOUT_MS: '1' }), 5000)
+  const timedFetch = createTimedFetch(async (_url, options) => new Promise((_, reject) => {
+    options.signal.addEventListener('abort', () => {
+      const error = new Error('aborted')
+      error.name = 'AbortError'
+      reject(error)
+    })
+  }), 1)
+  await assert.rejects(() => timedFetch('https://provider.example.test'), (error) => error.code === 'PROVIDER_UNAVAILABLE' && error.status === 504 && error.message === 'Provider request timed out.')
 })
 
 test('an active workspace session is used by both Chat and provider-status requests', async () => {
@@ -1094,6 +1131,7 @@ test('Gemini uses the current GenerateContent contract and preserves a safe prov
       messages: [message('Say only: CONNECTED')],
       system: 'Keep answers concise.',
       max_tokens: 256,
+      response_format: { type: 'json_object' },
     },
   }), accepted, {
     env: { ...TEST_ENV, GEMINI_API_KEY: 'server-only-gemini-key' },
@@ -1104,6 +1142,7 @@ test('Gemini uses the current GenerateContent contract and preserves a safe prov
       const body = JSON.parse(options.body)
       assert.deepEqual(body.systemInstruction, { parts: [{ text: 'Keep answers concise.' }] })
       assert.equal(body.generationConfig.maxOutputTokens, 256)
+      assert.equal(body.generationConfig.responseMimeType, 'application/json')
       return jsonResponse({ body: {
         candidates: [{ content: { parts: [{ text: 'CONNECTED' }] }, finishReason: 'STOP' }],
       } })
@@ -1130,6 +1169,46 @@ test('Gemini uses the current GenerateContent contract and preserves a safe prov
   assert.equal(rejected.body.error.code, 'GEMINI_REQUEST_INVALID')
   assert.equal(rejected.body.error.message, 'Google Gemini rejected this request. Choose another Gemini model or check server-side Google AI access.')
   assert.equal(JSON.stringify(rejected.body).includes('raw Gemini diagnostic'), false)
+})
+
+test('an upstream provider rate limit is normalized separately from FounderLab request protection', async () => {
+  const limited = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('Build a landing page')] },
+  }), limited, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-key' },
+    fetchImpl: authenticatedFetch(async () => jsonResponse({
+      ok: false,
+      status: 429,
+      body: { error: { message: 'raw quota detail must not reach the browser' } },
+    })),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(limited.statusCode, 429)
+  assert.equal(limited.body.error.code, 'PROVIDER_RATE_LIMITED')
+  assert.equal(limited.body.error.message, 'Groq has reached its provider request limit. Wait briefly, then try again.')
+  assert.equal(JSON.stringify(limited.body).includes('raw quota detail'), false)
+})
+
+test('an upstream provider request-size failure is precise and does not leak upstream details', async () => {
+  const oversized = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token' },
+    body: { provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('Build a landing page')] },
+  }), oversized, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-key' },
+    fetchImpl: authenticatedFetch(async () => jsonResponse({
+      ok: false,
+      status: 413,
+      body: { error: { message: 'raw request-size diagnostic must not reach the browser' } },
+    })),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(oversized.statusCode, 413)
+  assert.equal(oversized.body.error.code, 'PROVIDER_REQUEST_TOO_LARGE')
+  assert.equal(oversized.body.error.retryable, false)
+  assert.equal(JSON.stringify(oversized.body).includes('raw request-size diagnostic'), false)
 })
 
 test('authenticated provider availability exposes no keys and supports independent optional providers', async () => {
