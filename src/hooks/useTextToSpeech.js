@@ -31,10 +31,16 @@ export function useTextToSpeech(voiceConfig) {
     // audio promise, so the previous playback state cannot linger.
     const sequence = ++playbackSequenceRef.current
     stopSpeech()
+    // Keep the preference ready for an enhanced voice, but do not repeatedly
+    // send a known-unavailable premium request before using the honest local
+    // browser fallback.
+    const effectiveConfig = voiceConfig.provider === 'elevenlabs' && elevenLabsAvailable === false
+      ? { ...voiceConfig, provider: 'browser' }
+      : voiceConfig
     setSpeaking(true)
-    setActiveProvider(voiceConfig.provider)
+    setActiveProvider(effectiveConfig.provider)
     try {
-      const providerUsed = await synthesizeSpeech(voiceConfig, text)
+      const providerUsed = await synthesizeSpeech(effectiveConfig, text)
       if (providerUsed && playbackSequenceRef.current === sequence) setActiveProvider(providerUsed)
     } finally {
       if (playbackSequenceRef.current === sequence) {

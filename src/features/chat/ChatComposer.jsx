@@ -21,6 +21,7 @@ export function ChatComposer({
   voiceInputState = 'idle',
   onVoiceStart,
   onVoiceFinish,
+  voiceSession = null,
   providerSwitcher,
   editing,
   onCancelEdit,
@@ -34,8 +35,12 @@ export function ChatComposer({
   const pressedWhileRecordingRef = useRef(false)
   const suppressVoiceClickRef = useRef(false)
   const [actionMenuOpen, setActionMenuOpen] = useState(false)
-  const canSend = Boolean(input.trim() || pendingImage) && !sending
-  const recording = ['listening', 'resuming'].includes(voiceInputState)
+  const voiceSessionPhase = voiceSession?.phase || 'idle'
+  const voiceSessionActive = voiceSessionPhase !== 'idle'
+  const voiceSessionCaptureActive = ['starting', 'listening'].includes(voiceSessionPhase)
+  const voiceSessionLocksComposer = ['starting', 'listening', 'thinking', 'speaking'].includes(voiceSessionPhase)
+  const canSend = Boolean(input.trim() || pendingImage) && !sending && !voiceSessionActive
+  const recording = voiceSessionCaptureActive || ['listening', 'resuming'].includes(voiceInputState)
   const voiceError = voiceInputState === 'error'
   const voiceStatus = voiceInputState === 'listening'
     ? 'Live dictation is flowing into your message. Pause or correct yourself; send when ready.'
@@ -92,8 +97,11 @@ export function ChatComposer({
   }
 
   function toggleVoiceInput() {
-    if (recording) onVoiceFinish()
-    else onVoiceStart()
+    if (voiceSessionActive) {
+      if (voiceSessionCaptureActive) onVoiceFinish()
+      return
+    }
+    onVoiceStart()
   }
 
   function releaseVoicePointer(event, { cancelled = false } = {}) {
@@ -119,6 +127,7 @@ export function ChatComposer({
 
   function beginVoicePointer(event) {
     if (event.button !== 0) return
+    if (voiceSessionActive && !voiceSessionCaptureActive) return
     pointerIdRef.current = event.pointerId
     pressedWhileRecordingRef.current = recording
     heldToDictateRef.current = false
@@ -149,7 +158,7 @@ export function ChatComposer({
             <button type="button" onClick={() => onPendingImage(null)} aria-label="Remove image" style={{ background: 'transparent', border: 'none', color: C.t2, cursor: 'pointer', fontSize: 17 }}>×</button>
           </div>
         )}
-        {voiceStatus && (
+        {!voiceSessionActive && voiceStatus && (
           <div className={`fl-chat-dictation-status ${listening ? 'is-listening' : ''} ${voiceError ? 'is-error' : ''}`} role="status" aria-live="polite">
             <span aria-hidden="true" className="fl-chat-dictation-status-dot" />
             <span className="fl-chat-dictation-status-copy"><strong>{listening ? 'Listening live' : voiceError ? 'Dictation paused' : 'Reconnecting'}</strong>{voiceStatus}</span>
@@ -162,7 +171,7 @@ export function ChatComposer({
           style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${recording ? (listening ? C.red : C.borderFocus) : C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
           <input ref={fileRef} type="file" accept={ACCEPTED_IMAGE_TYPES} style={{ display: 'none' }} onChange={(event) => { attachFile(event.target.files?.[0]); event.target.value = '' }} />
           <div ref={actionMenuRef} className="fl-chat-composer-action-menu-anchor">
-            <button type="button" className="fl-chat-composer-attachment" onClick={() => setActionMenuOpen((open) => !open)} title="Add visual context" aria-label="Add visual context" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
+            <button type="button" className="fl-chat-composer-attachment" disabled={voiceSessionLocksComposer} onClick={() => setActionMenuOpen((open) => !open)} title="Add visual context" aria-label="Add visual context" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: voiceSessionLocksComposer ? 'not-allowed' : 'pointer', opacity: voiceSessionLocksComposer ? .45 : 1, padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
             {actionMenuOpen && (
               <div className="fl-chat-composer-action-menu" role="menu" aria-label="Add to message">
                 <div className="fl-chat-composer-action-menu-heading">
@@ -181,6 +190,7 @@ export function ChatComposer({
           <textarea
             ref={textRef}
             value={input}
+            disabled={voiceSessionLocksComposer}
             onChange={(event) => onInput(event.target.value)}
             onPaste={(event) => {
               const item = Array.from(event.clipboardData?.items || []).find((entry) => entry.type.startsWith('image/'))
@@ -192,11 +202,11 @@ export function ChatComposer({
               if (event.key === 'Escape' && sending) onStop()
             }}
             rows={1}
-            placeholder={recording ? (listening ? 'Listening… keep speaking when you are ready' : 'Waiting for your next phrase…') : 'Message FounderLab'}
+            placeholder={voiceSessionLocksComposer ? 'Voice session active… use the controls above' : voiceSessionPhase === 'ready' ? 'Review your voice message, then send it from the voice panel' : recording ? (listening ? 'Listening… keep speaking when you are ready' : 'Waiting for your next phrase…') : 'Message FounderLab'}
             aria-label="Message FounderLab"
             style={{ flex: 1, minWidth: 0, minHeight: 24, maxHeight: 200, overflowY: 'auto', resize: 'none', background: 'transparent', border: 'none', color: C.t1, outline: 'none', padding: '9px 3px', fontFamily: 'inherit', fontSize: 15, lineHeight: 1.55 }}
           />
-          <button type="button" className="fl-chat-composer-voice" onPointerDown={beginVoicePointer} onPointerUp={releaseVoicePointer} onPointerCancel={(event) => releaseVoicePointer(event, { cancelled: true })} onClick={() => { if (suppressVoiceClickRef.current) { suppressVoiceClickRef.current = false; return } toggleVoiceInput() }} title={recording ? 'Finish dictation' : voiceError ? 'Retry dictation' : 'Tap to dictate · hold while speaking'} aria-label={recording ? 'Finish dictation' : voiceError ? 'Retry dictation' : 'Start dictation'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: 'pointer', padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
+          <button type="button" className="fl-chat-composer-voice" disabled={voiceSessionActive && !voiceSessionCaptureActive} onPointerDown={beginVoicePointer} onPointerUp={releaseVoicePointer} onPointerCancel={(event) => releaseVoicePointer(event, { cancelled: true })} onClick={() => { if (suppressVoiceClickRef.current) { suppressVoiceClickRef.current = false; return } toggleVoiceInput() }} title={voiceSessionCaptureActive ? 'Stop and review voice message' : voiceSessionActive ? 'Use the voice session controls above' : 'Start a live voice session'} aria-label={voiceSessionCaptureActive ? 'Stop and review voice message' : voiceSessionActive ? 'Voice session controls are above' : 'Start a live voice session'} style={{ background: recording ? C.redM : 'transparent', border: `1px solid ${recording ? C.red : 'transparent'}`, borderRadius: 10, color: recording ? C.red : C.t2, cursor: voiceSessionActive && !voiceSessionCaptureActive ? 'not-allowed' : 'pointer', opacity: voiceSessionActive && !voiceSessionCaptureActive ? .45 : 1, padding: '8px 9px', fontSize: 16, lineHeight: 1 }}>{listening ? <WaveformBars /> : recording ? '◌' : '◉'}</button>
           {sending ? (
             <button type="button" onClick={onStop} title="Stop generating" aria-label="Stop generating" style={{ background: C.red, border: 'none', borderRadius: 10, color: '#fff', cursor: 'pointer', padding: '9px 12px', fontSize: 12, boxShadow: '0 3px 12px rgba(239,68,68,.25)' }}>■</button>
           ) : (
@@ -205,7 +215,7 @@ export function ChatComposer({
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, minHeight: 18, flexWrap: 'wrap' }}>
           {providerSwitcher}
-          <span style={{ color: C.t3, fontSize: 10.5 }}>{recording ? 'Tap to finish · you can keep typing' : 'Tap mic to dictate · hold to talk · Enter to send · Shift+Enter for a new line'}</span>
+          <span style={{ color: C.t3, fontSize: 10.5 }}>{voiceSessionActive ? 'Voice session controls stay above the composer.' : 'Tap mic for a live voice session · hold to talk · Enter to send · Shift+Enter for a new line'}</span>
         </div>
       </div>
     </div>

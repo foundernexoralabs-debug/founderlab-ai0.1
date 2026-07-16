@@ -165,6 +165,7 @@ test('provider availability resolves only configured providers and preserves Loc
 test('voice configuration centralizes the ElevenLabs model, voice IDs, and browser fallback capability', () => {
   const voice = getVoiceProvider('elevenlabs')
   assert.equal(voice.defaultModel, 'eleven_multilingual_v2')
+  assert.equal(voice.defaultVoice, 'male')
   assert.equal(voice.capabilities.browserFallback, true)
   assert.equal(voice.voices.male, 'nPczCjzI2devNBz1zQrb')
   assert.equal(voice.voiceLabels.female, 'Custom Female')

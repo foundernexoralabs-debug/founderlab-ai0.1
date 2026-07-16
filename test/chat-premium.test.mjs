@@ -16,6 +16,7 @@ import {
   isNearConversationBottom,
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
+import { createVoiceResponsePlan } from '../src/features/chat/voiceResponseUtils.js'
 import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
@@ -213,6 +214,23 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
 
+test('Voice sessions keep short answers conversational while preserving dense details and code in Chat', () => {
+  const short = createVoiceResponsePlan('Your investor update is ready. I tightened the opening and added a clear next step.')
+  assert.equal(short.mode, 'conversational')
+  assert.match(short.spokenText, /investor update/i)
+
+  const code = createVoiceResponsePlan('## API update\n\nHere is the implementation:\n```js\nconst secret = process.env.KEY\n```\n\nUse the endpoint after deployment.')
+  assert.equal(code.mode, 'code-summary')
+  assert.equal(code.spokenText.includes('process.env'), false)
+  assert.match(code.spokenText, /full code and details in the chat/i)
+  assert.match(code.note, /full code remains/i)
+
+  const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(30))
+  assert.equal(long.mode, 'summary')
+  assert.equal(long.spokenText.length <= 660, true)
+  assert.match(long.spokenText, /full breakdown in the chat/i)
+})
+
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
   const storage = new Map()
   const browserStorage = { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, String(value)) }
@@ -227,10 +245,13 @@ test('Voice preferences persist only safe, predictable playback choices', () => 
   assert.deepEqual(normalizeVoiceConfig({ provider: 'elevenlabs', gender: 'female', speed: 130 }), {
     provider: 'elevenlabs', gender: 'female', speed: 150,
   })
-  assert.deepEqual(normalizeVoiceConfig({ provider: 'unknown', gender: 'other', speed: 999 }), {
-    provider: 'browser', gender: 'male', speed: 150,
+  assert.deepEqual(normalizeVoiceConfig({ provider: 'browser', gender: 'male', speed: 0 }), {
+    provider: 'browser', gender: 'male', speed: 0,
   })
-  assert.deepEqual(normalizeVoiceConfig(null), { provider: 'browser', gender: 'male', speed: 0 })
+  assert.deepEqual(normalizeVoiceConfig({ provider: 'unknown', gender: 'other', speed: 999 }), {
+    provider: 'elevenlabs', gender: 'male', speed: 150,
+  })
+  assert.deepEqual(normalizeVoiceConfig(null), { provider: 'elevenlabs', gender: 'male', speed: 0 })
   assert.deepEqual(VOICE_SPEED_OPTIONS.map((option) => option.label), ['0.5×', '1×', '1.5×', '2×', '2.5×'])
   assert.equal(getVoiceSpeedLabel(100), '2×')
 })
@@ -244,6 +265,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const scrollSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/useConversationScroll.js'), 'utf8')
   const messageSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatMessage.jsx'), 'utf8')
   const confirmationSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatConfirmDialog.jsx'), 'utf8')
+  const voiceSessionSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatVoiceSession.jsx'), 'utf8')
+  const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
@@ -255,13 +278,15 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /getChatErrorPresentation/)
   assert.match(workspaceSource, /ChatHistory/)
   assert.match(workspaceSource, /ChatConfirmDialog/)
+  assert.match(workspaceSource, /ChatVoiceSession/)
+  assert.match(workspaceSource, /createVoiceResponsePlan/)
   assert.doesNotMatch(workspaceSource, /window\.confirm/)
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
   assert.match(composerSource, /pause or correct/i)
-  assert.match(composerSource, /Finish dictation/)
-  assert.match(composerSource, /Retry dictation/)
+  assert.match(composerSource, /Start a live voice session/)
+  assert.match(composerSource, /Voice session controls stay above the composer/)
   assert.match(composerSource, /Upload an image/)
   assert.match(composerSource, /paste an image directly/i)
   assert.match(composerSource, /Live dictation is flowing/i)
@@ -280,6 +305,11 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
   assert.match(messageSource, /Best available browser voice/)
   assert.match(messageSource, /getChatUserInitials/)
+  assert.match(voiceSessionSource, /Cancel capture/)
+  assert.match(voiceSessionSource, /Stop & review/)
+  assert.match(voiceSessionSource, /Stop speaking/)
+  assert.match(voiceSessionSource, /End voice/)
+  assert.match(voiceResponseSource, /full code and details in the chat/i)
   assert.match(confirmationSource, /role="alertdialog"/)
   assert.match(confirmationSource, /aria-modal="true"/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)
@@ -301,6 +331,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
   assert.match(css, /fl-chat-dictation-status/)
+  assert.match(css, /fl-chat-voice-session/)
+  assert.match(css, /flChatVoiceListen/)
   assert.match(css, /fl-chat-avatar\.is-user/)
   assert.match(css, /fl-chat-composer-action-menu/)
   assert.match(css, /fl-chat-provider-menu/)

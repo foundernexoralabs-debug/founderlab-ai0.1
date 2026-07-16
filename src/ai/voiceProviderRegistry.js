@@ -5,6 +5,7 @@ const voiceProviderEntries = [
     keyEnv: 'ELEVENLABS_API_KEY',
     docsUrl: 'https://elevenlabs.io/app/settings/api-keys',
     defaultModel: 'eleven_multilingual_v2',
+    defaultVoice: 'male',
     capabilities: { cloud: true, audioOutput: true, browserFallback: true },
     voices: {
       male: 'nPczCjzI2devNBz1zQrb',

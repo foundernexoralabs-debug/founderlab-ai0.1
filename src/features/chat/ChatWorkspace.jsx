@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { C } from '@/app/theme'
 import { toast } from '@/app/toast'
+import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
 import { copyText, flConsumeHandoff, flNavigate, ts, uid } from '@/lib/appUtils'
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
 import { useTextToSpeech } from '@/hooks/useTextToSpeech'
 import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
-import { mergeLiveTranscript } from '@/hooks/speechRecognitionUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
 import {
   discoverLocalOllama,
@@ -23,6 +23,7 @@ import { ChatConfirmDialog } from './ChatConfirmDialog'
 import { ChatHistory } from './ChatHistory'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
+import { ChatVoiceSession } from './ChatVoiceSession'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
 import { getChatProviderPresentation } from './chatProviderUtils'
 import { useConversationScroll } from './useConversationScroll'
@@ -34,11 +35,15 @@ import {
   normalizeConversations,
   toChatRequestMessages,
 } from './chatUtils'
+import { createVoiceResponsePlan } from './voiceResponseUtils'
 import './chatPremium.css'
 
 function uniqueMessageId() {
   return uid()
 }
+
+const EMPTY_VOICE_SESSION = Object.freeze({ phase: 'idle', transcript: '', note: '', error: '' })
+const ELEVENLABS_VOICE_PROVIDER = getVoiceProvider('elevenlabs')
 
 export function ChatWorkspace({ user }) {
   const [conversations, setConversations] = useState([])
@@ -56,6 +61,7 @@ export function ChatWorkspace({ user }) {
   const [errorState, setErrorState] = useState(null)
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
+  const [voiceSession, setVoiceSession] = useState(EMPTY_VOICE_SESSION)
   const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
   const [providerSelection, setProviderSelection] = useState(() => {
     const providerId = getAIProvider()
@@ -68,12 +74,11 @@ export function ChatWorkspace({ user }) {
   const saveTimerRef = useRef(null)
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
-  const liveDictationRef = useRef({ active: false, lastTranscript: '' })
+  const voiceSessionRef = useRef({ active: false, transcript: '' })
 
   const {
     listening,
     clearVoiceDraft,
-    hasRecognizedSpeech,
     voiceInputState,
     start: startRecognition,
     stop: stopRecognition,
@@ -90,6 +95,9 @@ export function ChatWorkspace({ user }) {
     return { ...getChatProviderPresentation(providerSelection.id, providerSelection.model), modelId: providerSelection.model }
   }, [providerSelection])
   const activeError = errorState?.conversationId === activeId ? errorState : null
+  const voiceSessionLabel = activeVoiceProvider === 'elevenlabs'
+    ? `ElevenLabs · ${ELEVENLABS_VOICE_PROVIDER?.voiceLabels[voiceConfig.gender] || 'Premium voice'}`
+    : 'Best available browser voice'
 
   useEffect(() => {
     let alive = true
@@ -143,6 +151,18 @@ export function ChatWorkspace({ user }) {
   useEffect(() => {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false)
   }, [])
+
+  useEffect(() => {
+    if (!voiceSessionRef.current.active) return
+    if (voiceInputState === 'error') {
+      voiceSessionRef.current.active = false
+      setVoiceSession((current) => ({
+        ...current,
+        phase: 'error',
+        error: 'Voice capture stopped before FounderLab could finish your message. Your existing chat is unchanged.',
+      }))
+    }
+  }, [voiceInputState])
 
   function changeHistoryOpen(next) {
     setHistoryOpen(next)
@@ -205,26 +225,70 @@ export function ChatWorkspace({ user }) {
     setPendingImage(null)
   }
 
-  function startDictation() {
-    const initialTranscript = input
-    liveDictationRef.current = { active: true, lastTranscript: initialTranscript }
-    return startRecognition((nextTranscript) => {
-      setInput((current) => {
-        const liveDictation = liveDictationRef.current
-        if (!liveDictation.active) return current
-        const next = mergeLiveTranscript(current, liveDictation.lastTranscript, nextTranscript)
-        liveDictation.lastTranscript = nextTranscript
-        return next
-      })
-    }, { initialTranscript }).then((started) => {
-      if (!started) liveDictationRef.current.active = false
-      return started
+  async function startVoiceSession() {
+    if (sending) {
+      toast('Wait for the current response or stop it before starting a voice session.', 'error')
+      return false
+    }
+    stopTTS()
+    setActiveTTS(null)
+    voiceSessionRef.current = { active: true, transcript: '', initialInput: input }
+    setVoiceSession({ phase: 'starting', transcript: '', note: '', error: '' })
+    const started = await startRecognition((nextTranscript) => {
+      if (!voiceSessionRef.current.active) return
+      voiceSessionRef.current.transcript = nextTranscript
+      setVoiceSession((current) => ['starting', 'listening'].includes(current.phase)
+        ? { ...current, phase: 'listening' }
+        : current)
     })
+    if (!started) {
+      voiceSessionRef.current.active = false
+      setVoiceSession({ phase: 'error', transcript: '', note: '', error: 'FounderLab could not start voice capture. Check microphone access and try again.' })
+    }
+    return started
   }
 
-  function finishDictation() {
-    liveDictationRef.current.active = false
+  function finishVoiceCapture() {
+    const spokenTranscript = voiceSessionRef.current.transcript.trim()
+    const initialInput = typeof voiceSessionRef.current.initialInput === 'string' ? voiceSessionRef.current.initialInput.trim() : ''
+    const transcript = [initialInput, spokenTranscript].filter(Boolean).join(initialInput && spokenTranscript ? ' ' : '').trim()
+    voiceSessionRef.current = { active: false, transcript, cancelled: false }
     stopRecognition()
+    if (!transcript) {
+      setVoiceSession({ phase: 'error', transcript: '', note: '', error: 'No words were captured. Try again when you are ready.' })
+      return
+    }
+    setInput(transcript)
+    setVoiceSession({ phase: 'ready', transcript, note: '', error: '' })
+  }
+
+  function cancelVoiceCapture({ quiet = false } = {}) {
+    voiceSessionRef.current = { active: false, transcript: '' }
+    stopRecognition()
+    clearVoiceDraft()
+    setVoiceSession(EMPTY_VOICE_SESSION)
+    if (!quiet) toast('Voice capture discarded', 'success')
+  }
+
+  function endVoiceSession() {
+    const current = voiceSession
+    const cancellingRequest = current.phase === 'thinking'
+    if (cancellingRequest) {
+      voiceSessionRef.current.cancelled = true
+      stopGenerating()
+    }
+    if (current.phase === 'speaking') stopTTS()
+    if (current.phase === 'error' && current.transcript && !input.trim()) setInput(current.transcript)
+    voiceSessionRef.current = { active: false, transcript: '', cancelled: cancellingRequest }
+    stopRecognition()
+    clearVoiceDraft()
+    setActiveTTS(null)
+    setVoiceSession(EMPTY_VOICE_SESSION)
+  }
+
+  function editVoiceDraft() {
+    if (voiceSession.transcript) setInput(voiceSession.transcript)
+    setVoiceSession(EMPTY_VOICE_SESSION)
   }
 
   function selectChatProvider(providerId) {
@@ -287,7 +351,7 @@ export function ChatWorkspace({ user }) {
       localOllamaAllowed: true,
     }, { signal: controller.signal })
 
-    if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) return
+    if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) return { ok: false, cancelled: true }
     requestAbortRef.current = null
     setSending(false)
 
@@ -296,7 +360,7 @@ export function ChatWorkspace({ user }) {
         conversationId,
         ...getChatErrorPresentation({ ...result.error, provider: result.provider, model: result.model }, providerId),
       })
-      return
+      return { ok: false, error: result.error }
     }
 
     const assistantMessage = {
@@ -312,9 +376,10 @@ export function ChatWorkspace({ user }) {
       ? { ...conversation, messages: [...conversation.messages, assistantMessage], updated_at: ts() }
       : conversation)
     persist(next)
+    return { ok: true, message: assistantMessage }
   }
 
-  async function send(textOverride) {
+  async function send(textOverride, { source: sourceOverride } = {}) {
     const content = typeof textOverride === 'string' ? textOverride.trim() : input.trim()
     if ((!content && !pendingImage) || sending) return
 
@@ -325,8 +390,7 @@ export function ChatWorkspace({ user }) {
       return
     }
     const image = pendingImage
-    const source = hasRecognizedSpeech ? 'voice' : undefined
-    liveDictationRef.current.active = false
+    const source = sourceOverride
     setInput('')
     setPendingImage(null)
     clearVoiceDraft()
@@ -379,7 +443,7 @@ export function ChatWorkspace({ user }) {
     const active = next.find((conversation) => conversation.id === conversationId)
     next = [active, ...next.filter((conversation) => conversation.id !== conversationId)]
     persist(next)
-    await requestAssistantReply({ conversationId, conversationMessages: outgoingMessages, providerId, modelId })
+    return requestAssistantReply({ conversationId, conversationMessages: outgoingMessages, providerId, modelId })
   }
 
   async function regenerate(messageId) {
@@ -409,6 +473,59 @@ export function ChatWorkspace({ user }) {
       providerId: providerSelection.id,
       modelId: providerSelection.model,
     })
+  }
+
+  async function sendVoiceSession() {
+    const transcript = (voiceSessionRef.current.transcript || voiceSession.transcript || input).trim()
+    if (!transcript) {
+      setVoiceSession({ phase: 'error', transcript: '', note: '', error: 'There is no captured voice message to send yet.' })
+      return
+    }
+    voiceSessionRef.current = { active: false, transcript, cancelled: false }
+    stopRecognition()
+    setVoiceSession({ phase: 'thinking', transcript, note: '', error: '' })
+    const response = await send(transcript, { source: 'voice' })
+    if (voiceSessionRef.current.cancelled) return
+    if (!response?.ok || !response.message) {
+      setVoiceSession({
+        phase: 'error',
+        transcript,
+        note: '',
+        error: response?.cancelled ? 'The voice request was stopped. Your message remains in the conversation.' : 'FounderLab could not complete that voice response. You can retry from the chat.',
+      })
+      return
+    }
+
+    const plan = createVoiceResponsePlan(response.message.content)
+    if (!plan.spokenText) {
+      setVoiceSession({ phase: 'complete', transcript: '', note: 'The response is ready in the conversation.', error: '' })
+      return
+    }
+
+    setVoiceSession({ phase: 'speaking', transcript: '', note: plan.note, error: '', responseId: response.message.id })
+    setActiveTTS(response.message.id)
+    try {
+      await speak(plan.spokenText)
+      setVoiceSession((current) => current.phase === 'speaking'
+        ? { phase: 'complete', transcript: '', note: 'The complete response is ready in the conversation.', error: '' }
+        : current)
+    } finally {
+      setActiveTTS((current) => current === response.message.id ? null : current)
+    }
+  }
+
+  function stopVoiceSessionActivity() {
+    if (voiceSession.phase === 'thinking') {
+      voiceSessionRef.current.cancelled = true
+      stopGenerating()
+      setVoiceSession({ phase: 'complete', transcript: '', note: 'Request stopped. Your message remains in the conversation and can be retried there.', error: '' })
+      return
+    }
+    if (voiceSession.phase === 'speaking') {
+      stopTTS()
+      setActiveTTS(null)
+      setVoiceSession((current) => ({ ...current, phase: 'complete', note: 'Playback stopped. The complete response remains in the conversation.', error: '' }))
+    }
   }
 
   function stopGenerating() {
@@ -492,6 +609,7 @@ export function ChatWorkspace({ user }) {
       setActiveTTS(null)
       return
     }
+    if (['starting', 'listening'].includes(voiceSession.phase)) cancelVoiceCapture({ quiet: true })
     setActiveTTS(message.id)
     Promise.resolve(speak(message.content)).finally(() => setActiveTTS((current) => current === message.id ? null : current))
   }
@@ -571,6 +689,18 @@ export function ChatWorkspace({ user }) {
             </div>
           </>
         )}
+        <ChatVoiceSession
+          session={voiceSession}
+          provider={selectedProvider}
+          voiceLabel={voiceSessionLabel}
+          onFinish={finishVoiceCapture}
+          onCancel={cancelVoiceCapture}
+          onSend={sendVoiceSession}
+          onStop={stopVoiceSessionActivity}
+          onEnd={endVoiceSession}
+          onStartAgain={startVoiceSession}
+          onEditDraft={editVoiceDraft}
+        />
         <ChatComposer
           input={input}
           onInput={setInput}
@@ -581,8 +711,9 @@ export function ChatWorkspace({ user }) {
           onPendingImage={setPendingImage}
           listening={listening}
           voiceInputState={voiceInputState}
-          onVoiceStart={startDictation}
-          onVoiceFinish={finishDictation}
+          voiceSession={voiceSession}
+          onVoiceStart={startVoiceSession}
+          onVoiceFinish={finishVoiceCapture}
           providerSwitcher={<ChatProviderSwitcher
             provider={selectedProvider}
             availability={providerAvailability}

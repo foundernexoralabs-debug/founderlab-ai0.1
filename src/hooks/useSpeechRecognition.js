@@ -19,7 +19,6 @@ export function useSpeechRecognition() {
   const [listening, setListening] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [voiceInputState, setVoiceInputState] = useState('idle')
-  const [hasRecognizedSpeech, setHasRecognizedSpeech] = useState(false)
   const recognitionRef = useRef(null)
   const restartTimerRef = useRef(null)
   const desiredRef = useRef(false)
@@ -52,7 +51,6 @@ export function useSpeechRecognition() {
     protectedSegmentCountRef.current = 0
     lastPublishedTranscriptRef.current = ''
     setTranscript('')
-    setHasRecognizedSpeech(false)
   }, [])
 
   const start = useCallback(async (onUpdate, { initialTranscript = '' } = {}) => {
@@ -82,7 +80,6 @@ export function useSpeechRecognition() {
     protectedSegmentCountRef.current = finalizedSegmentsRef.current.length
     lastPublishedTranscriptRef.current = confirmedTranscriptRef.current
     setTranscript(confirmedTranscriptRef.current)
-    setHasRecognizedSpeech(false)
     setVoiceInputState('resuming')
 
     const publishTranscript = () => {
@@ -103,7 +100,6 @@ export function useSpeechRecognition() {
         protectedSegmentCountRef.current,
       )
       confirmedTranscriptRef.current = finalizedSegmentsRef.current.join(' ')
-      if (typeof phrase === 'string' && phrase.trim()) setHasRecognizedSpeech(true)
     }
 
     const beginRecognition = () => {
@@ -139,7 +135,6 @@ export function useSpeechRecognition() {
         }
         if (interim) {
           interimTranscriptRef.current = interim
-          setHasRecognizedSpeech(true)
         }
         publishTranscript()
       }
@@ -205,7 +200,6 @@ export function useSpeechRecognition() {
     transcript,
     setTranscript,
     clearVoiceDraft,
-    hasRecognizedSpeech,
     voiceInputState,
     start,
     stop,
