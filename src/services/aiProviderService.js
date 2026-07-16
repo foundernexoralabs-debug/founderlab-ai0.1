@@ -30,13 +30,18 @@ export {
 let providerAvailability = normalizeProviderAvailability()
 
 export const PROVIDER_CONNECTION_TEST_MAX_TOKENS = 256
+export const OLLAMA_CONNECTION_TEST_MAX_TOKENS = 24
 
 export function createProviderConnectionTestRequest({ provider, model } = {}) {
   return {
     provider,
     model,
     messages: [{ role: 'user', content: 'Say only: CONNECTED' }],
-    maxTokens: PROVIDER_CONNECTION_TEST_MAX_TOKENS,
+    // A local connection test proves the selected model can reply; it should
+    // not make a small laptop model generate a cloud-sized response.
+    maxTokens: provider === 'ollama'
+      ? OLLAMA_CONNECTION_TEST_MAX_TOKENS
+      : PROVIDER_CONNECTION_TEST_MAX_TOKENS,
     connectionTest: true,
   }
 }

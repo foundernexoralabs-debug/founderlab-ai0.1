@@ -3,6 +3,7 @@ import { createAIErrorResult, createAIResult } from '../normalizeResponse.js'
 
 export const OLLAMA_DISCOVERY_TIMEOUT_MS = 5000
 export const OLLAMA_CHAT_TIMEOUT_MS = 120000
+export const OLLAMA_LOOPBACK_ADDRESS_SPACE = 'loopback'
 
 function resolveElectronBridge(bridge) {
   if (bridge) return bridge
@@ -16,16 +17,21 @@ function timeoutSignal(timeout) {
     : undefined
 }
 
-function normalizeModelName(value) {
+export function normalizeOllamaModelName(value) {
   const name = typeof value === 'string' ? value.trim() : ''
   return name && name.length <= 160 ? name : ''
 }
 
-function normalizeModels(models) {
+/**
+ * Ollama's tags endpoint has used both `name` and `model` in client-facing
+ * integrations. Normalize either form once so selection, testing, and Chat
+ * always receive the exact installed name (including any tag).
+ */
+export function normalizeOllamaModels(models) {
   if (!Array.isArray(models)) return []
   const seen = new Set()
   return models.reduce((items, model) => {
-    const name = normalizeModelName(typeof model === 'string' ? model : model?.name || model?.model)
+    const name = normalizeOllamaModelName(typeof model === 'string' ? model : model?.name || model?.model)
     if (!name || seen.has(name)) return items
     seen.add(name)
     items.push(Object.freeze({
@@ -50,7 +56,7 @@ function unavailableInspection(code = 'OLLAMA_UNAVAILABLE') {
 }
 
 function availableInspection(models) {
-  const normalizedModels = normalizeModels(models)
+  const normalizedModels = normalizeOllamaModels(models)
   return Object.freeze({
     ok: true,
     state: normalizedModels.length ? 'models_available' : 'no_models',
@@ -58,6 +64,22 @@ function availableInspection(models) {
     models: Object.freeze(normalizedModels),
     error: null,
   })
+}
+
+/**
+ * Public HTTPS apps talking to a loopback HTTP service are subject to browser
+ * local-network controls in addition to CORS. Unsupported browsers ignore
+ * this standard request hint; supporting browsers can use it to apply their
+ * local-network permission flow instead of failing as opaque mixed content.
+ */
+function localOllamaFetchOptions(options) {
+  return {
+    mode: 'cors',
+    credentials: 'omit',
+    cache: 'no-store',
+    targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE,
+    ...options,
+  }
 }
 
 export function isElectronOllamaAvailable(bridge) {
@@ -79,12 +101,11 @@ export async function discoverOllama(base, { fetchImpl = globalThis.fetch, elect
       const result = await bridge.ollama.probe(url)
       return result?.running ? availableInspection(result.models) : unavailableInspection()
     }
-    const response = await fetchImpl(url + '/api/tags', {
+    const response = await fetchImpl(url + '/api/tags', localOllamaFetchOptions({
       method: 'GET',
       headers: { Accept: 'application/json' },
-      credentials: 'omit',
       signal: timeoutSignal(OLLAMA_DISCOVERY_TIMEOUT_MS),
-    })
+    }))
     if (!response.ok) return unavailableInspection('OLLAMA_UNAVAILABLE')
     const data = await response.json().catch(() => null)
     if (!data || !Array.isArray(data.models)) return unavailableInspection('MALFORMED_RESPONSE')
@@ -106,7 +127,7 @@ export async function requestOllama({
   ollamaUrl,
 }, { fetchImpl = globalThis.fetch, electronBridge } = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
-  const selectedModel = normalizeModelName(model)
+  const selectedModel = normalizeOllamaModelName(model)
   if (!base) return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_INVALID_URL' })
   if (!selectedModel) return createAIErrorResult({ provider: 'ollama', code: 'OLLAMA_MODEL_REQUIRED' })
   const fullMessages = system ? [{ role: 'system', content: system }, ...(messages || [])] : messages || []
@@ -132,10 +153,9 @@ export async function requestOllama({
     }
 
     if (typeof fetchImpl !== 'function') return createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_UNAVAILABLE' })
-    const response = await fetchImpl(base + '/api/chat', {
+    const response = await fetchImpl(base + '/api/chat', localOllamaFetchOptions({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'omit',
       body: JSON.stringify({
         model: selectedModel,
         messages: fullMessages,
@@ -143,7 +163,7 @@ export async function requestOllama({
         options: { num_predict: maxTokens, ...(temperature !== undefined && { temperature }) },
       }),
       signal: timeoutSignal(OLLAMA_CHAT_TIMEOUT_MS),
-    })
+    }))
     const data = await response.json().catch(() => null)
     if (!response.ok) {
       return createAIErrorResult({
@@ -156,7 +176,9 @@ export async function requestOllama({
     return createAIResult({
       provider: 'ollama',
       model: selectedModel,
-      text: data?.message?.content || '',
+      // `/api/chat` returns message.content. `response` is retained as a
+      // harmless compatibility fallback for older local Ollama builds.
+      text: typeof data?.message?.content === 'string' ? data.message.content : data?.response || '',
       usage: data?.eval_count ? { outputTokens: data.eval_count } : null,
       finishReason: data?.done_reason,
     })

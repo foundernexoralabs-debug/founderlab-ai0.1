@@ -16,7 +16,7 @@ import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
-import { discoverOllama } from '../src/ai/providers/ollama.js'
+import { discoverOllama, normalizeOllamaModels } from '../src/ai/providers/ollama.js'
 import {
   getProviderConnectionState,
   getProviderConnectionStatus,
@@ -30,6 +30,7 @@ import {
 } from '../src/ai/providerAvailability.js'
 import {
   createProviderConnectionTestRequest,
+  OLLAMA_CONNECTION_TEST_MAX_TOKENS,
   PROVIDER_CONNECTION_TEST_MAX_TOKENS,
   refreshProviderAvailability,
   requestAIResult,
@@ -355,6 +356,9 @@ test('Ollama discovery only reports a real readable local models response', asyn
     fetchImpl: async (url, options) => {
       assert.equal(url, 'http://localhost:11434/api/tags')
       assert.equal(options.credentials, 'omit')
+      assert.equal(options.mode, 'cors')
+      assert.equal(options.cache, 'no-store')
+      assert.equal(options.targetAddressSpace, 'loopback')
       return jsonResponse({ body: { models: [] } })
     },
   })
@@ -373,6 +377,16 @@ test('Ollama discovery only reports a real readable local models response', asyn
   assert.equal(discovered.state, 'models_available')
   assert.deepEqual(discovered.models.map((model) => model.id), ['gemma3:latest', 'qwen3:8b'])
   assert.equal(discovered.models[0].parameterSize, '4.3B')
+})
+
+test('Ollama model discovery preserves a valid model.model value and tagged names', () => {
+  const models = normalizeOllamaModels([
+    { model: 'llama3.2:3b-instruct-q4_K_M', details: { family: 'llama' } },
+    { name: 'llama3.2:3b-instruct-q4_K_M' },
+    { name: '  qwen3:8b  ' },
+    { name: '' },
+  ])
+  assert.deepEqual(models.map((model) => model.id), ['llama3.2:3b-instruct-q4_K_M', 'qwen3:8b'])
 })
 
 test('Ollama model and localhost preferences persist safely without accepting a remote endpoint', () => {
@@ -408,10 +422,14 @@ test('Ollama test and Chat route directly to localhost without cloud authenticat
     calls.push({ url, options })
     assert.equal(url, 'http://localhost:11434/api/chat')
     assert.equal(options.credentials, 'omit')
+    assert.equal(options.mode, 'cors')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.targetAddressSpace, 'loopback')
     assert.equal(options.headers.Authorization, undefined)
     const body = JSON.parse(options.body)
     assert.equal(body.stream, false)
     assert.equal(body.model, 'gemma3:latest')
+    assert.equal(body.options.num_predict, calls.length === 1 ? OLLAMA_CONNECTION_TEST_MAX_TOKENS : 300)
     return jsonResponse({ body: {
       message: { role: 'assistant', content: 'CONNECTED' },
       done_reason: 'stop',
