@@ -31,14 +31,15 @@ import {
   CHAT_STARTER_PROMPTS,
   getChatRequestContext,
   getChatSystemPrompt,
+  getLiveCallSystemPrompt,
   createConversation,
   getChatErrorPresentation,
   normalizeConversations,
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
-import { EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
-import { createVoiceResponsePlan } from './voiceResponseUtils'
+import { createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, LIVE_CALL_TURN_DELAY_MS, shouldQueueLiveCallTurn } from './liveCallUtils'
+import { createLiveCallResponsePlan, createVoiceResponsePlan } from './voiceResponseUtils'
 import './chatPremium.css'
 
 function uniqueMessageId() {
@@ -79,7 +80,7 @@ export function ChatWorkspace({ user }) {
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const voiceSessionRef = useRef({ active: false, transcript: '' })
-  const liveCallRef = useRef({ active: false, muted: false, transcript: '', turnTimer: null, turn: 0, inFlight: false })
+  const liveCallRef = useRef({ active: false, muted: false, transcript: '', turns: [], providerId: '', modelId: '', turnTimer: null, turn: 0, inFlight: false })
 
   const {
     clearVoiceDraft,
@@ -209,6 +210,10 @@ export function ChatWorkspace({ user }) {
   }
 
   function createNewConversation() {
+    if (liveCallRef.current.active) {
+      toast('End the live call before starting another conversation.', 'error')
+      return
+    }
     const conversation = createConversation({ id: uid(), now: ts() })
     persist([conversation, ...conversationsRef.current])
     setActiveId(conversation.id)
@@ -220,6 +225,10 @@ export function ChatWorkspace({ user }) {
   }
 
   function selectConversation(conversationId) {
+    if (liveCallRef.current.active) {
+      toast('End the live call before switching conversations.', 'error')
+      return
+    }
     setActiveId(conversationId)
     setEditingMessageId(null)
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) changeHistoryOpen(false)
@@ -387,7 +396,17 @@ export function ChatWorkspace({ user }) {
     if (voiceSession.phase !== 'idle') endVoiceSession()
     stopTTS()
     setActiveTTS(null)
-    liveCallRef.current = { active: true, muted: false, transcript: '', turnTimer: null, turn: 0, inFlight: false }
+    liveCallRef.current = {
+      active: true,
+      muted: false,
+      transcript: '',
+      turns: [],
+      providerId: providerSelection.id,
+      modelId: providerSelection.model,
+      turnTimer: null,
+      turn: 0,
+      inFlight: false,
+    }
     setErrorState(null)
     setLiveCall({ ...EMPTY_LIVE_CALL, phase: 'connecting' })
     return beginLiveCallListening({ connecting: true })
@@ -411,8 +430,16 @@ export function ChatWorkspace({ user }) {
     const turn = ++call.turn
     stopRecognition()
     clearVoiceDraft()
-    setLiveCall((current) => ({ ...current, phase: 'thinking', transcript: '', note: '', error: '' }))
-    const response = await send(transcript, { source: 'voice', preserveComposer: true })
+    const userTurn = { id: uniqueMessageId(), role: 'user', content: transcript, source: 'voice', ts: ts() }
+    call.turns = [...call.turns, userTurn]
+    setLiveCall((current) => ({ ...current, phase: 'thinking', transcript: '', turns: call.turns, note: '', error: '' }))
+    const baseMessages = conversationsRef.current.find((conversation) => conversation.id === activeId)?.messages || []
+    const response = await requestLiveCallReply({
+      conversationMessages: baseMessages,
+      liveTurns: call.turns,
+      providerId: call.providerId,
+      modelId: call.modelId,
+    })
     if (!call.active || turn !== call.turn) return
     call.inFlight = false
 
@@ -427,13 +454,15 @@ export function ChatWorkspace({ user }) {
       return
     }
 
-    const plan = createVoiceResponsePlan(response.message.content)
+    call.turns = [...call.turns, response.message]
+    const plan = createLiveCallResponsePlan(response.message.content)
     if (!plan.spokenText) {
+      setLiveCall((current) => ({ ...current, phase: 'listening', turns: call.turns, transcript: '', note: '', error: '' }))
       await beginLiveCallListening()
       return
     }
 
-    setLiveCall((current) => ({ ...current, phase: 'speaking', transcript: '', note: plan.note, error: '' }))
+    setLiveCall((current) => ({ ...current, phase: 'speaking', transcript: '', turns: call.turns, note: plan.note, error: '' }))
     setActiveTTS(response.message.id)
     try {
       await speak(plan.spokenText)
@@ -499,9 +528,40 @@ export function ChatWorkspace({ user }) {
     return beginLiveCallListening({ connecting: true })
   }
 
-  function endLiveCall({ quiet = false } = {}) {
+  function persistLiveCallRecap(call) {
+    if (call.recapSaved) return
+    const recap = createLiveCallRecap(call.turns)
+    if (!recap) return
+    call.recapSaved = true
+    let conversationId = activeId
+    let next = conversationsRef.current
+    if (!conversationId) {
+      const conversation = createConversation({ id: uid(), title: 'Live call', now: ts() })
+      conversationId = conversation.id
+      next = [conversation, ...next]
+      setActiveId(conversationId)
+    }
+    const target = next.find((conversation) => conversation.id === conversationId)
+    if (!target) return
+    const recapMessage = {
+      id: uniqueMessageId(),
+      role: 'assistant',
+      content: recap,
+      provider: call.providerId || providerSelection.id,
+      model: call.modelId || providerSelection.model,
+      ts: ts(),
+    }
+    next = next.map((conversation) => conversation.id === conversationId
+      ? { ...conversation, messages: [...conversation.messages, recapMessage], updated_at: ts() }
+      : conversation)
+    const active = next.find((conversation) => conversation.id === conversationId)
+    persist([active, ...next.filter((conversation) => conversation.id !== conversationId)])
+  }
+
+  function endLiveCall({ quiet = false, persistCall = true } = {}) {
     const call = liveCallRef.current
     const wasActive = call.active
+    if (persistCall) persistLiveCallRecap(call)
     call.active = false
     call.muted = false
     call.inFlight = false
@@ -612,11 +672,59 @@ export function ChatWorkspace({ user }) {
     return { ok: true, message: assistantMessage }
   }
 
-  async function send(textOverride, { source: sourceOverride, preserveComposer = false } = {}) {
+  /**
+   * Live Call deliberately shares the protected provider router but not the
+   * normal Chat persistence path. Its turns stay in the call surface until a
+   * concise recap is saved when the caller ends the session.
+   */
+  async function requestLiveCallReply({ conversationMessages, liveTurns, providerId, modelId }) {
+    const requestSequence = ++requestSequenceRef.current
+    const controller = new AbortController()
+    requestAbortRef.current = controller
+    setSending(true)
+    setErrorState(null)
+
+    const callMessages = [
+      ...(Array.isArray(conversationMessages) ? conversationMessages : []),
+      ...(Array.isArray(liveTurns) ? liveTurns : []),
+    ]
+    const result = await requestAIResult({
+      provider: providerId,
+      model: modelId,
+      messages: toChatRequestMessages(callMessages, providerId),
+      system: getLiveCallSystemPrompt(getChatRequestContext(callMessages)),
+      maxTokens: 360,
+      localOllamaAllowed: true,
+    }, { signal: controller.signal })
+
+    if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) return { ok: false, cancelled: true }
+    requestAbortRef.current = null
+    setSending(false)
+
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error,
+        presentation: getChatErrorPresentation({ ...result.error, provider: result.provider, model: result.model }, providerId),
+      }
+    }
+
+    return {
+      ok: true,
+      message: {
+        id: uniqueMessageId(),
+        role: 'assistant',
+        content: result.text,
+        provider: result.provider || providerId,
+        model: result.model || modelId,
+        ts: ts(),
+      },
+    }
+  }
+
+  async function send(textOverride, { source: sourceOverride } = {}) {
     const content = typeof textOverride === 'string' ? textOverride.trim() : input.trim()
-    // A live call is its own turn: it must never consume a draft or an image
-    // the caller was preparing in the normal composer.
-    const image = preserveComposer ? null : pendingImage
+    const image = pendingImage
     if ((!content && !image) || sending) return
 
     const providerId = providerSelection.id
@@ -626,10 +734,8 @@ export function ChatWorkspace({ user }) {
       return
     }
     const source = sourceOverride
-    if (!preserveComposer) {
-      setInput('')
-      setPendingImage(null)
-    }
+    setInput('')
+    setPendingImage(null)
     clearVoiceDraft()
     stopRecognition()
     setErrorState(null)
@@ -899,12 +1005,31 @@ export function ChatWorkspace({ user }) {
         onSearch={setSearch}
         onSelect={selectConversation}
         onNewChat={createNewConversation}
-        onRenameStart={(conversation) => { setRenamingId(conversation.id); setRenameValue(conversation.title) }}
+        onRenameStart={(conversation) => {
+          if (liveCallRef.current.active) {
+            toast('End the live call before changing this conversation.', 'error')
+            return
+          }
+          setRenamingId(conversation.id)
+          setRenameValue(conversation.title)
+        }}
         onRenameChange={setRenameValue}
         onRenameCommit={saveRename}
         onRenameCancel={() => setRenamingId(null)}
-        onTogglePin={togglePin}
-        onDelete={requestDeleteConversation}
+        onTogglePin={(conversationId) => {
+          if (liveCallRef.current.active) {
+            toast('End the live call before changing this conversation.', 'error')
+            return
+          }
+          togglePin(conversationId)
+        }}
+        onDelete={(conversationId) => {
+          if (liveCallRef.current.active) {
+            toast('End the live call before changing this conversation.', 'error')
+            return
+          }
+          requestDeleteConversation(conversationId)
+        }}
       />
       <ChatConfirmDialog action={confirmation} onCancel={() => setConfirmation(null)} onConfirm={confirmPendingAction} />
 
@@ -912,11 +1037,13 @@ export function ChatWorkspace({ user }) {
         <header className="fl-chat-topbar">
           <button type="button" className="fl-chat-history-toggle" onClick={() => changeHistoryOpen(!historyOpen)} aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'} aria-expanded={historyOpen}>☰</button>
           <div className="fl-chat-topbar-title">
-            <div>{activeConversation?.title || 'FounderLab Chat'}</div>
-            {activeConversation && <div>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
+            <div>{liveCall.phase === 'idle' ? activeConversation?.title || 'FounderLab Chat' : 'Live call'}</div>
+            <div>{liveCall.phase === 'idle'
+              ? activeConversation ? `${selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · ${selectedProvider.name}` : ''
+              : 'Your conversation is focused in the live session'}</div>
           </div>
           {liveCall.phase === 'idle' && <button type="button" className="fl-chat-live-call-start" onClick={startLiveCall} aria-label="Start a live voice call"><span aria-hidden="true">◌</span> Live call</button>}
-          {activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={requestClearConversation}>Clear</button>}
+          {liveCall.phase === 'idle' && activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={requestClearConversation}>Clear</button>}
           {elAvailable === true && <span title="Premium voice is available" className="fl-chat-voice-ready">● Voice</span>}
         </header>
 
@@ -928,7 +1055,19 @@ export function ChatWorkspace({ user }) {
           </div>
         )}
 
-        {!activeId ? (
+        {liveCall.phase !== 'idle' ? (
+          <section className="fl-chat-live-call-stage" aria-label="Live call session">
+            <ChatLiveCallSurface
+              call={liveCall}
+              provider={selectedProvider}
+              voiceLabel={voiceSessionLabel}
+              onToggleMute={toggleLiveCallMute}
+              onStopTurn={stopLiveCallTurn}
+              onResume={resumeLiveCall}
+              onEnd={endLiveCall}
+            />
+          </section>
+        ) : !activeId ? (
           <section style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'grid', placeItems: 'center', padding: 28 }} aria-labelledby="chat-welcome-title">
             <div style={{ width: 'min(100%, 680px)', textAlign: 'center' }}>
               <div aria-hidden="true" style={{ width: 56, height: 56, margin: '0 auto 20px', borderRadius: 17, display: 'grid', placeItems: 'center', fontSize: 25, color: '#fff', background: `linear-gradient(135deg, ${C.accent}, #a855f7)`, boxShadow: '0 10px 32px rgba(99,102,241,.32)' }}>✦</div>
@@ -952,19 +1091,7 @@ export function ChatWorkspace({ user }) {
             </div>
           </>
         )}
-        {liveCall.phase !== 'idle' ? (
-          <div className="fl-chat-live-call-wrap">
-            <ChatLiveCallSurface
-              call={liveCall}
-              provider={selectedProvider}
-              voiceLabel={voiceSessionLabel}
-              onToggleMute={toggleLiveCallMute}
-              onStopTurn={stopLiveCallTurn}
-              onResume={resumeLiveCall}
-              onEnd={endLiveCall}
-            />
-          </div>
-        ) : (
+        {liveCall.phase === 'idle' && (
           <ChatComposer
             input={input}
             onInput={setInput}

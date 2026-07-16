@@ -661,25 +661,24 @@
   flex: 0 0 auto;
 }
 
-/* Live Call replaces the composer temporarily, so voice state is never
-   duplicated between a large card and the action surface. */
-.fl-chat-live-call-wrap {
-  flex: 0 0 auto;
-  padding: 0 32px 22px;
+/* Live Call replaces both the composer and text thread while it is active. */
+.fl-chat-live-call-stage {
+  display: grid;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  place-items: center;
+  padding: clamp(24px, 6vh, 68px) 32px;
 }
-
 .fl-chat-live-call {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  width: min(100%, 860px);
-  min-height: 66px;
-  margin: 0 auto;
-  gap: 9px 14px;
-  padding: 10px 11px;
-  border: 1px solid rgba(165,180,252,.3);
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(29,29,57,.98), rgba(14,14,29,.99));
-  box-shadow: 0 15px 34px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.045);
+  width: min(100%, 620px);
+  gap: 14px;
+  padding: clamp(16px, 3.2vw, 24px);
+  border: 1px solid rgba(165,180,252,.32);
+  border-radius: 22px;
+  background: radial-gradient(circle at 50% 0, rgba(99,102,241,.16), transparent 46%), linear-gradient(145deg, rgba(29,29,57,.98), rgba(14,14,29,.99));
+  box-shadow: 0 24px 54px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.055);
   color: #f1f1fa;
   animation: flChatVoiceSessionIn .18s ease both;
 }
@@ -690,47 +689,75 @@
 .fl-chat-live-call.is-muted { border-color: rgba(148,163,184,.32); }
 .fl-chat-live-call.is-error { border-color: rgba(251,146,60,.46); }
 
-.fl-chat-live-call-state { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.fl-chat-live-call-header { display: flex; min-width: 0; align-items: center; gap: 13px; }
 .fl-chat-live-call-pulse {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 10px;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
   border-radius: 50%;
   background: #818cf8;
-  box-shadow: 0 0 0 5px rgba(129,140,248,.1);
+  box-shadow: 0 0 0 8px rgba(129,140,248,.1);
 }
-.fl-chat-live-call.is-listening .fl-chat-live-call-pulse { background: #fb7185; box-shadow: 0 0 0 5px rgba(251,113,133,.1); animation: flChatVoiceListen 1.25s ease-in-out infinite; }
-.fl-chat-live-call.is-speaking .fl-chat-live-call-pulse { background: #34d399; box-shadow: 0 0 0 5px rgba(52,211,153,.11); animation: flChatVoiceListen 1.1s ease-in-out infinite; }
-.fl-chat-live-call.is-muted .fl-chat-live-call-pulse { background: #94a3b8; box-shadow: 0 0 0 5px rgba(148,163,184,.09); }
-.fl-chat-live-call.is-error .fl-chat-live-call-pulse { background: #fb923c; box-shadow: 0 0 0 5px rgba(251,146,60,.1); }
+.fl-chat-live-call.is-listening .fl-chat-live-call-pulse { background: #fb7185; box-shadow: 0 0 0 8px rgba(251,113,133,.1); animation: flChatVoiceListen 1.25s ease-in-out infinite; }
+.fl-chat-live-call.is-speaking .fl-chat-live-call-pulse { background: #34d399; box-shadow: 0 0 0 8px rgba(52,211,153,.11); animation: flChatVoiceListen 1.1s ease-in-out infinite; }
+.fl-chat-live-call.is-muted .fl-chat-live-call-pulse { background: #94a3b8; box-shadow: 0 0 0 8px rgba(148,163,184,.09); }
+.fl-chat-live-call.is-error .fl-chat-live-call-pulse { background: #fb923c; box-shadow: 0 0 0 8px rgba(251,146,60,.1); }
 .fl-chat-live-call-copy { min-width: 0; }
-.fl-chat-live-call-copy > div { display: flex; min-width: 0; align-items: baseline; gap: 7px; }
-.fl-chat-live-call-copy strong { color: #fbfbff; font-size: 12.5px; letter-spacing: -.01em; }
-.fl-chat-live-call-copy span { overflow: hidden; color: #9e9eb5; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.fl-chat-live-call-copy p { margin: 2px 0 0; overflow: hidden; color: #b5b5ca; font-size: 10.5px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.fl-chat-live-call-transcript {
-  grid-column: 1 / -1;
-  max-height: 36px;
-  overflow: auto;
-  margin-top: -2px;
-  padding: 5px 8px;
-  border-radius: 8px;
-  background: rgba(255,255,255,.045);
-  color: #e9e9f6;
-  font-size: 11px;
-  font-style: italic;
-  line-height: 1.4;
+.fl-chat-live-call-eyebrow { display: block; color: #a5b4fc; font-size: 9.5px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.fl-chat-live-call-copy strong { display: block; margin-top: 3px; color: #fbfbff; font-size: 17px; letter-spacing: -.025em; }
+.fl-chat-live-call-copy p { margin: 4px 0 0; color: #b5b5ca; font-size: 12px; line-height: 1.45; }
+.fl-chat-live-call-provider {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 11px;
+  background: rgba(5,5,14,.25);
 }
-.fl-chat-live-call-controls { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.fl-chat-live-call-provider > span {
+  flex: 0 0 auto;
+  border: 1px solid rgba(165,180,252,.28);
+  border-radius: 99px;
+  background: rgba(99,102,241,.1);
+  color: #c7d2fe;
+  padding: 3px 6px;
+  font-size: 9.5px;
+  font-weight: 720;
+}
+.fl-chat-live-call-provider > span.is-local { border-color: rgba(52,211,153,.28); background: rgba(16,185,129,.1); color: #a7f3d0; }
+.fl-chat-live-call-provider strong { min-width: 0; color: #e9e9f7; font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.fl-chat-live-call-provider small { margin-left: auto; flex: 0 1 auto; color: #9b9bb3; font-size: 10px; line-height: 1.35; text-align: right; overflow-wrap: anywhere; }
+.fl-chat-live-call-exchange {
+  display: grid;
+  align-content: start;
+  min-height: 112px;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px;
+  background: rgba(4,4,13,.32);
+}
+.fl-chat-live-call-exchange > div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 9px; align-items: baseline; }
+.fl-chat-live-call-exchange > div > span { color: #9191aa; font-size: 10px; font-weight: 730; letter-spacing: .04em; text-transform: uppercase; }
+.fl-chat-live-call-exchange > div > p { margin: 0; color: #e7e7f3; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.fl-chat-live-call-exchange > .is-user > p { color: #dcdfff; }
+.fl-chat-live-call-exchange > .is-assistant > p { color: #dcfce7; }
+.fl-chat-live-call-exchange > .is-live > span { color: #fda4af; }
+.fl-chat-live-call-exchange > .is-live > p { color: #fce7f3; font-style: italic; }
+.fl-chat-live-call-exchange > .is-empty { display: block; align-self: center; }
+.fl-chat-live-call-exchange > .is-empty p { color: #9a9ab1; font-size: 11.5px; text-align: center; }
+.fl-chat-live-call-controls { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .fl-chat-live-call-controls button {
-  min-height: 30px;
+  min-height: 34px;
   border: 1px solid rgba(255,255,255,.13);
   border-radius: 8px;
   background: rgba(255,255,255,.04);
   color: #dbdbea;
   cursor: pointer;
-  padding: 5px 8px;
-  font: 650 10.5px inherit;
+  padding: 6px 10px;
+  font: 680 11px inherit;
   transition: border-color .14s ease, background .14s ease, color .14s ease, transform .14s ease;
 }
 .fl-chat-live-call-controls button:hover,
@@ -1301,11 +1328,15 @@
   .fl-chat-voice-ready { display: none; }
   .fl-chat-scroll { padding: 24px 16px 18px; }
   .fl-chat-composer-wrap { padding: 0 16px 16px; }
-  .fl-chat-live-call-wrap { padding: 0 16px 16px; }
-  .fl-chat-live-call { grid-template-columns: 1fr; gap: 8px; min-height: 0; padding: 9px; }
-  .fl-chat-live-call-controls { justify-content: flex-start; }
-  .fl-chat-live-call-copy > div { display: block; }
-  .fl-chat-live-call-copy span { display: block; margin-top: 2px; }
+  .fl-chat-live-call-stage { align-items: center; padding: 20px 16px; }
+  .fl-chat-live-call { width: min(100%, 540px); gap: 12px; padding: 15px; border-radius: 18px; }
+  .fl-chat-live-call-provider { align-items: flex-start; flex-wrap: wrap; }
+  .fl-chat-live-call-provider strong { flex: 1 1 180px; }
+  .fl-chat-live-call-provider small { width: 100%; margin-left: 0; text-align: left; }
+  .fl-chat-live-call-exchange { min-height: 104px; }
+  .fl-chat-live-call-exchange > div { grid-template-columns: 1fr; gap: 3px; }
+  .fl-chat-live-call-controls { justify-content: stretch; }
+  .fl-chat-live-call-controls button { flex: 1 1 0; padding: 6px 7px; }
   .fl-chat-live-call-start { padding: 6px 8px; }
   .fl-chat-live-call-start { font-size: 0; }
   .fl-chat-live-call-start > span { font-size: 16px; }

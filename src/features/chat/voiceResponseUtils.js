@@ -1,6 +1,7 @@
 import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTextUtils.js'
 
 const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 340
 
 function shortenAtSentence(text, limit = MAX_CONVERSATIONAL_SPEECH_LENGTH) {
   if (text.length <= limit) return text
@@ -68,5 +69,38 @@ export function createVoiceResponsePlan(content = '') {
     spokenText: `${overview}${suffix}`,
     mode: hasCode ? 'code-summary' : hasStructuredContent ? 'structured-summary' : 'summary',
     note: hasCode ? 'A concise voice overview is playing; full code remains in the chat.' : 'A concise voice overview is playing; full details remain in the chat.',
+  }
+}
+
+/**
+ * A live call needs a much tighter spoken turn than a read-aloud message.
+ * The original response stays available to the session recap, while this
+ * plan protects the caller from an essay being read back to them.
+ */
+export function createLiveCallResponsePlan(content = '') {
+  const source = typeof content === 'string' ? content.trim() : ''
+  if (!source) return { spokenText: '', mode: 'none', note: '' }
+
+  const profile = getSpeechContentProfile(source)
+  const withoutCode = source.replace(/```[\s\S]*?```/g, ' ').trim()
+  const spokenBase = cleanTextForSpeech(withoutCode)
+  if (!spokenBase) {
+    return {
+      spokenText: 'I have the technical detail ready. I can walk you through it after the call.',
+      mode: 'call-summary',
+      note: 'A concise call summary is playing.',
+    }
+  }
+
+  const needsSummary = profile.hasCode || profile.hasStructuredContent || profile.hasReferences || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
+  const suffix = needsSummary ? ' I can expand on that after the call.' : ''
+  const limit = Math.max(150, MAX_LIVE_CALL_SPEECH_LENGTH - suffix.length)
+  const overview = profile.hasStructuredContent
+    ? createStructuredOverview(source, spokenBase, limit)
+    : shortenAtSentence(spokenBase, limit)
+  return {
+    spokenText: `${overview}${suffix}`.trim(),
+    mode: needsSummary ? 'call-summary' : 'call-conversational',
+    note: needsSummary ? 'A concise live-call answer is playing.' : '',
   }
 }

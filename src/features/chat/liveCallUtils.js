@@ -1,4 +1,6 @@
 export const LIVE_CALL_TURN_DELAY_MS = 950
+export const LIVE_CALL_MAX_SPOKEN_LENGTH = 340
+export const LIVE_CALL_RECAP_TURN_LIMIT = 4
 
 export const EMPTY_LIVE_CALL = Object.freeze({
   phase: 'idle',
@@ -6,6 +8,7 @@ export const EMPTY_LIVE_CALL = Object.freeze({
   note: '',
   error: '',
   muted: false,
+  turns: Object.freeze([]),
 })
 
 export const LIVE_CALL_COPY = Object.freeze({
@@ -42,4 +45,27 @@ export function shouldQueueLiveCallTurn({ active = false, muted = false, isFinal
 
 export function getLiveCallCopy(phase) {
   return LIVE_CALL_COPY[phase] || LIVE_CALL_COPY.error
+}
+
+export function truncateLiveCallText(value, limit = LIVE_CALL_MAX_SPOKEN_LENGTH) {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+  if (!text || text.length <= limit) return text
+  const clipped = text.slice(0, limit + 1)
+  const boundary = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('? '), clipped.lastIndexOf('! '))
+  return `${(boundary > Math.floor(limit * .5) ? clipped.slice(0, boundary + 1) : clipped.slice(0, limit)).trim()}…`
+}
+
+/** Only a compact, end-of-call recap is written into normal Chat history. */
+export function createLiveCallRecap(turns = []) {
+  const safeTurns = Array.isArray(turns)
+    ? turns.filter((turn) => ['user', 'assistant'].includes(turn?.role) && typeof turn.content === 'string' && turn.content.trim())
+    : []
+  const finalAssistantIndex = safeTurns.map((turn) => turn.role).lastIndexOf('assistant')
+  if (finalAssistantIndex < 0) return ''
+  const latestTurns = safeTurns.slice(0, finalAssistantIndex + 1).slice(-LIVE_CALL_RECAP_TURN_LIMIT)
+  const items = latestTurns.map((turn) => {
+    const label = turn.role === 'user' ? 'You' : 'FounderLab'
+    return `- **${label}:** ${truncateLiveCallText(turn.content, 220)}`
+  })
+  return `## Live call recap\n\n${items.join('\n')}`
 }

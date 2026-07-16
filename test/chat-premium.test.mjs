@@ -17,13 +17,15 @@ import {
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
-import { createVoiceResponsePlan } from '../src/features/chat/voiceResponseUtils.js'
+import { createLiveCallResponsePlan, createVoiceResponsePlan, MAX_LIVE_CALL_SPEECH_LENGTH } from '../src/features/chat/voiceResponseUtils.js'
 import {
+  createLiveCallRecap,
   EMPTY_LIVE_CALL,
   getLiveCallCopy,
   getLiveCallProviderSupport,
   LIVE_CALL_TURN_DELAY_MS,
   shouldQueueLiveCallTurn,
+  truncateLiveCallText,
 } from '../src/features/chat/liveCallUtils.js'
 import {
   buildChatHandoffPayload,
@@ -49,6 +51,7 @@ import {
   getChatErrorPresentation,
   getChatRequestContext,
   getChatSystemPrompt,
+  getLiveCallSystemPrompt,
   hasExplicitSelfCorrection,
   getChatUserInitials,
   getProviderPresentation,
@@ -339,6 +342,33 @@ test('Live Call uses one bounded turn model and accurately describes local and c
   assert.match(getLiveCallCopy('unknown').title, /Call needs attention/i)
 })
 
+test('Live Call keeps turns ephemeral, saves one compact recap, and asks providers for conversational answers', () => {
+  const recap = createLiveCallRecap([
+    { role: 'user', content: 'Help me sharpen my launch positioning.' },
+    { role: 'assistant', content: 'Lead with the concrete customer outcome, then support it with one clear proof point.' },
+    { role: 'user', content: 'What should I test first?' },
+    { role: 'assistant', content: 'Test the headline against the current version with a small, measurable audience.' },
+    { role: 'user', content: 'This unfinished turn should not be written into the recap.' },
+  ])
+  assert.match(recap, /^## Live call recap/m)
+  assert.match(recap, /What should I test first/i)
+  assert.equal(recap.includes('This unfinished turn'), false)
+  assert.match(recap, /FounderLab/i)
+  assert.equal(createLiveCallRecap([{ role: 'user', content: 'No response yet.' }]), '')
+  assert.equal(truncateLiveCallText('A useful answer. '.repeat(60), 120).length <= 121, true)
+
+  const longPlan = createLiveCallResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test a sharper headline\n- Measure conversion\n\nUse this detail to plan the rest of the week. '.repeat(8))
+  assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
+  assert.equal(longPlan.mode, 'call-summary')
+  assert.match(longPlan.spokenText, /after the call/i)
+
+  const simpleAnswer = createLiveCallResponsePlan('Start with the audience that already feels the problem most sharply.')
+  assert.equal(simpleAnswer.mode, 'call-conversational')
+  assert.match(simpleAnswer.spokenText, /audience/i)
+  assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
+  assert.match(getLiveCallSystemPrompt(), /one to three short sentences/i)
+})
+
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
   const narration = cleanTextForSpeech('## Launch update!!! 🚀\nUse `npm test` / `npm run build`; see [the guide](https://example.com/docs).\n```js\nconsole.log("internal")\n```')
   assert.equal(narration.includes('🚀'), false)
@@ -415,7 +445,11 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /finishRequested/)
   assert.match(workspaceSource, /startLiveCall/)
   assert.match(workspaceSource, /sendLiveCallTurn/)
-  assert.match(workspaceSource, /preserveComposer: true/)
+  assert.match(workspaceSource, /requestLiveCallReply/)
+  assert.match(workspaceSource, /getLiveCallSystemPrompt/)
+  assert.match(workspaceSource, /createLiveCallResponsePlan/)
+  assert.match(workspaceSource, /createLiveCallRecap/)
+  assert.doesNotMatch(workspaceSource, /send\(transcript, \{ source: 'voice', preserveComposer: true \}\)/)
   assert.match(workspaceSource, /ChatLiveCallSurface/)
   assert.match(workspaceSource, /Start a live voice call/)
   assert.match(workspaceSource, /voiceSession\.phase === 'idle'/)
@@ -462,11 +496,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(voiceSessionSource, /End/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
   assert.match(liveCallSource, /Live call/)
+  assert.match(liveCallSource, /Live call exchange/)
+  assert.match(liveCallSource, /Local & private/)
   assert.match(liveCallSource, /Mute/)
   assert.match(liveCallSource, /Stop response/)
   assert.match(liveCallSource, /End call/)
   assert.match(liveCallUtilsSource, /Private local call/)
   assert.match(liveCallUtilsSource, /shouldQueueLiveCallTurn/)
+  assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)
   assert.match(confirmationSource, /role="alertdialog"/)
@@ -491,6 +528,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-composer-image-action/)
   assert.match(css, /fl-chat-voice-dock/)
   assert.match(css, /fl-chat-live-call/)
+  assert.match(css, /fl-chat-live-call-stage/)
   assert.match(css, /fl-chat-live-call-start/)
   assert.doesNotMatch(css, /fl-chat-voice-session/)
   assert.doesNotMatch(css, /fl-chat-dictation-status/)

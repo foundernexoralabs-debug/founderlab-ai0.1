@@ -26,6 +26,13 @@ export const CHAT_CONTROL_CENTER_PROMPT = `FounderLab workflow guidance:
 - When a user asks for YouTube content, create a usable content brief and suggest continuing in YouTube AI when it would help.
 - Keep tool handoffs scoped and reversible. Never imply a cloud provider, Local Ollama, Builder, Code AI, or GitHub action was used unless the user selected that action.`
 
+export const LIVE_CALL_SYSTEM_PROMPT = `Live-call response rules:
+- You are speaking in a real-time FounderLab voice call, not drafting a text-chat essay.
+- Respond naturally in one to three short sentences by default. Prefer a direct answer, one useful next step, and an optional brief follow-up question only when it helps the conversation continue.
+- Do not use Markdown, headings, long lists, tables, citations, or code blocks in a live reply. Do not narrate formatting.
+- If the user asks for a broad, technical, or multi-step answer, give the useful spoken summary first and offer to expand after the call. Do not deliver a long written plan aloud.
+- Preserve the conversation-intelligence rules above: resolve likely harmless transcription noise from context, respect a later self-correction, and ask one short clarification only when it is genuinely needed.`
+
 export function hasExplicitSelfCorrection(value) {
   if (typeof value !== 'string') return false
   return /\b(?:i\s+(?:mean|meant)|let me rephrase|correction|actually|to be clear)\b/i.test(value)
@@ -63,6 +70,11 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
 
 Current-input note:
 - ${notes.join('\n- ')} This note is not part of the user's request and must not be mentioned unless it helps them.`
+}
+
+/** A live call is intentionally voice-first and therefore has stricter output bounds than text Chat. */
+export function getLiveCallSystemPrompt(context = {}) {
+  return `${getChatSystemPrompt(context)}\n\n${LIVE_CALL_SYSTEM_PROMPT}`
 }
 
 export const CHAT_STARTER_PROMPTS = Object.freeze([
