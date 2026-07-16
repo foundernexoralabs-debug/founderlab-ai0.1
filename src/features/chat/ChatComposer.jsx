@@ -21,10 +21,9 @@ export function ChatComposer({
   voiceInputState = 'idle',
   onVoiceStart,
   onVoiceFinish,
-  provider,
+  providerSwitcher,
   editing,
   onCancelEdit,
-  onOpenProviders,
 }) {
   const fileRef = useRef(null)
   const textRef = useRef(null)
@@ -166,6 +165,7 @@ export function ChatComposer({
             <button type="button" className="fl-chat-composer-attachment" onClick={() => setActionMenuOpen((open) => !open)} title="Add to message" aria-label="Add to message" aria-expanded={actionMenuOpen} style={{ background: pendingImage || actionMenuOpen ? C.accentM : 'transparent', border: `1px solid ${pendingImage || actionMenuOpen ? C.borderFocus : C.border}`, borderRadius: 10, color: pendingImage || actionMenuOpen ? C.accent : C.t2, cursor: 'pointer', padding: '7px 9px', fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}><span aria-hidden="true" style={{ fontSize: 18, lineHeight: 0 }}>+</span></button>
             {actionMenuOpen && (
               <div className="fl-chat-composer-action-menu" role="menu" aria-label="Add to message">
+                <span className="fl-chat-composer-action-menu-label">Add to this message</span>
                 <button type="button" role="menuitem" onClick={openImagePicker}>
                   <span aria-hidden="true">◫</span>
                   <span><strong>Add image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
@@ -199,12 +199,7 @@ export function ChatComposer({
           )}
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, minHeight: 18, flexWrap: 'wrap' }}>
-          <button type="button" onClick={onOpenProviders} title="Open AI Providers" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 7px', borderRadius: 99, background: provider.local ? 'rgba(16,185,129,.08)' : C.accentM, border: `1px solid ${provider.local ? 'rgba(16,185,129,.22)' : C.borderFocus}`, color: provider.local ? C.green : C.accent, cursor: 'pointer', fontSize: 10.5, fontWeight: 700, fontFamily: 'inherit' }}>
-            <span>{provider.local ? 'Local' : 'Cloud'}</span>
-            <span style={{ opacity: .65 }}>·</span>
-            <span>{provider.name}</span>
-            <span style={{ opacity: .72, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{provider.model}</span>
-          </button>
+          {providerSwitcher}
           <span style={{ color: C.t3, fontSize: 10.5 }}>{recording ? 'Tap to finish · you can keep typing' : 'Tap mic to dictate · hold to talk · Enter to send · Shift+Enter for a new line'}</span>
         </div>
       </div>

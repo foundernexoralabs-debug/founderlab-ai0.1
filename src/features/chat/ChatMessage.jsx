@@ -18,7 +18,7 @@ function ActionButton({ label, icon, onClick, active = false, danger = false, ex
   )
 }
 
-function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable, onClose }) {
+function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable, onClose, onPreviewVoice, previewing }) {
   return (
     <section className="fl-chat-voice-popover" role="dialog" aria-label="Voice playback controls">
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
@@ -64,7 +64,10 @@ function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable, onClose }
           }}>{option.label}</button>
         ))}
       </div>
-      <div style={{ color: C.t3, fontSize: 10.5 }}>Selected speed: {getVoiceSpeedLabel(voiceCfg.speed)}</div>
+      <div className="fl-chat-voice-preview-row">
+        <span>Selected speed: {getVoiceSpeedLabel(voiceCfg.speed)}</span>
+        <button type="button" onClick={onPreviewVoice}>{previewing ? 'Stop preview' : 'Preview voice'}</button>
+      </div>
     </section>
   )
 }
@@ -82,6 +85,7 @@ export function ChatMessage({
   onCreateTask,
   onReact,
   onReadAloud,
+  onPreviewVoice,
   voiceCfg,
   onVoiceChange,
   elevenLabsAvailable,
@@ -147,7 +151,7 @@ export function ChatMessage({
             <ActionButton label={ttsActive ? 'Stop reading' : 'Read aloud'} icon={ttsActive ? '■' : '◖'} active={ttsActive} onClick={() => onReadAloud(message)} />
             <div ref={voiceMenuRef} className="fl-chat-voice-control">
               <ActionButton label="Voice settings" icon="⚙" active={voiceMenuOpen} expanded={voiceMenuOpen} onClick={() => setVoiceMenuOpen((open) => !open)} />
-              {voiceMenuOpen && <VoiceSettings voiceCfg={voiceCfg} onVoiceChange={onVoiceChange} elevenLabsAvailable={elevenLabsAvailable} onClose={() => setVoiceMenuOpen(false)} />}
+              {voiceMenuOpen && <VoiceSettings voiceCfg={voiceCfg} onVoiceChange={onVoiceChange} elevenLabsAvailable={elevenLabsAvailable} onClose={() => setVoiceMenuOpen(false)} onPreviewVoice={onPreviewVoice} previewing={activeTTS === 'voice-preview'} />}
             </div>
             {!sending && <ActionButton label="Regenerate response" icon="↻" onClick={() => onRegenerate(message.id)} />}
             <ActionButton label="Good response" icon="↑" active={reaction === 'up'} onClick={() => react('up')} />

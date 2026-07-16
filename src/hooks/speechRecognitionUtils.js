@@ -1,7 +1,7 @@
 // A browser recognition session can end after a quiet beat even when
 // `continuous` is enabled. This short handoff keeps dictation live without
 // forcing the user to restart after every natural pause.
-export const VOICE_INPUT_RESTART_DELAY_MS = 250
+export const VOICE_INPUT_RESTART_DELAY_MS = 350
 
 export function appendVoiceTranscript(existing = '', addition = '') {
   const prefix = typeof existing === 'string' ? existing.trim() : ''
@@ -15,7 +15,7 @@ export function commitInterimTranscript(confirmed = '', interim = '') {
   return appendVoiceTranscript(confirmed, interim)
 }
 
-const SPOKEN_CORRECTION = /^(?:(?:no|sorry|actually)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction)[:,;]?\s+(.+)$/i
+const SPOKEN_CORRECTION = /^(?:(?:no|sorry)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction|actually)[:,;]?\s+(.+)$/i
 
 /**
  * Browser-final recognition results are normally the source of truth. When a

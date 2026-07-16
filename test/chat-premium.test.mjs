@@ -5,6 +5,16 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
+import {
+  getChatModelOptions,
+  getChatProviderOptions,
+  getChatProviderPresentation,
+} from '../src/features/chat/chatProviderUtils.js'
+import {
+  CONVERSATION_BOTTOM_THRESHOLD,
+  distanceToConversationBottom,
+  isNearConversationBottom,
+} from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import {
   applyFinalSpeechPhrase,
@@ -81,6 +91,33 @@ test('Chat labels the active local or cloud model clearly and keeps provider-spe
   assert.equal(CHAT_STARTER_PROMPTS.length >= 4, true)
 })
 
+test('Chat provider picker exposes configured cloud providers, Local Ollama, and only user-selectable models', () => {
+  const providers = getChatProviderOptions({
+    anthropic: { configured: false },
+    groq: { configured: true },
+    gemini: { configured: true },
+    ollama: { configured: true, local: true },
+  })
+  assert.deepEqual(providers.map((provider) => provider.id), ['groq', 'gemini', 'ollama'])
+  assert.equal(providers.find((provider) => provider.id === 'ollama').local, true)
+  assert.equal(getChatModelOptions('groq').some((model) => model.id === 'llama-3.3-70b-versatile'), false)
+  assert.deepEqual(getChatModelOptions('ollama', {
+    localModels: [{ id: 'llama3.2:3b-instruct-q4_K_M', family: 'llama', parameterSize: '3.2B' }],
+    selectedModel: 'llama3.2:3b-instruct-q4_K_M',
+  }).map((model) => model.id), ['llama3.2:3b-instruct-q4_K_M'])
+  assert.deepEqual(getChatProviderPresentation('gemini', 'gemini-3.5-flash'), {
+    id: 'gemini', name: 'Google Gemini', model: 'Gemini 3.5 Flash (recommended)', local: false, icon: '✶',
+  })
+})
+
+test('Chat reading flow only follows new content near the bottom and calculates a stable return-to-latest threshold', () => {
+  assert.equal(distanceToConversationBottom({ scrollTop: 200, clientHeight: 500, scrollHeight: 1000 }), 300)
+  assert.equal(distanceToConversationBottom({ scrollTop: 700, clientHeight: 500, scrollHeight: 1000 }), 0)
+  assert.equal(isNearConversationBottom({ scrollTop: 405, clientHeight: 500, scrollHeight: 1000 }), true)
+  assert.equal(isNearConversationBottom({ scrollTop: 350, clientHeight: 500, scrollHeight: 1000 }), false)
+  assert.equal(CONVERSATION_BOTTOM_THRESHOLD, 96)
+})
+
 test('Chat keeps image input on capable providers and gives local/cloud text models an honest image limitation', () => {
   const messages = [{ role: 'user', content: 'Review this screenshot', image: 'data:image/png;base64,abc' }]
   const anthropic = toChatRequestMessages(messages, 'anthropic')
@@ -146,6 +183,10 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
     applyFinalSpeechPhrase(['Typed opening'], 'I mean add a clearer CTA', 1),
     ['Typed opening', 'add a clearer CTA'],
   )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Typed opening', 'Draft an announcement'], 'Actually, draft an investor update', 1),
+    ['Typed opening', 'draft an investor update'],
+  )
   assert.equal(mergeLiveTranscript('Launch plan', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA')
   assert.equal(mergeLiveTranscript('Launch plan please', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA please')
   assert.equal(mergeLiveTranscript('Manual revision', 'Launch plan', 'Launch plan with a stronger CTA'), 'Manual revision with a stronger CTA')
@@ -184,12 +225,17 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const workspaceSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatWorkspace.jsx'), 'utf8')
   const css = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatPremium.css'), 'utf8')
   const composerSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatComposer.jsx'), 'utf8')
+  const providerSwitcherSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatProviderSwitcher.jsx'), 'utf8')
+  const providerUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatProviderUtils.js'), 'utf8')
+  const scrollSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/useConversationScroll.js'), 'utf8')
   const messageSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatMessage.jsx'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
   assert.match(workspaceSource, /signal: controller\.signal/)
-  assert.match(workspaceSource, /scrollContainer\.scrollTo/)
+  assert.match(workspaceSource, /useConversationScroll/)
+  assert.match(workspaceSource, /ChatProviderSwitcher/)
+  assert.match(workspaceSource, /refreshProviderAvailability/)
   assert.doesNotMatch(workspaceSource, /scrollIntoView/)
   assert.match(workspaceSource, /getChatErrorPresentation/)
   assert.match(workspaceSource, /ChatHistory/)
@@ -203,6 +249,13 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
   assert.match(composerSource, /role="menu"/)
+  assert.match(composerSource, /providerSwitcher/)
+  assert.match(providerSwitcherSource, /Choose your AI/)
+  assert.match(providerSwitcherSource, /Refresh local models/)
+  assert.match(providerUtilsSource, /internalOnly/)
+  assert.match(scrollSource, /showJumpToLatest/)
+  assert.match(scrollSource, /CONVERSATION_BOTTOM_THRESHOLD/)
+  assert.match(scrollSource, /startedSending/)
   assert.match(messageSource, /document\.addEventListener\('pointerdown'/)
   assert.match(messageSource, /event\.key === 'Escape'/)
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
@@ -222,6 +275,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /scrollbar-gutter: stable/)
   assert.match(css, /fl-chat-voice-popover/)
   assert.match(css, /fl-chat-composer-action-menu/)
+  assert.match(css, /fl-chat-provider-menu/)
+  assert.match(css, /fl-chat-jump-latest/)
+  assert.match(css, /fl-chat-history-item\.is-active/)
   assert.match(css, /flChatSpeakingGlow/)
   assert.match(css, /margin-left: auto/)
   assert.match(css, /@media \(max-width: 760px\)/)

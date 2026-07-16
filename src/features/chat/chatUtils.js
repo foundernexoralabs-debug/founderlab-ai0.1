@@ -8,6 +8,7 @@ Response style:
 - Give complete, actionable advice with specific examples when useful.
 - Use Markdown thoughtfully: bold for key terms, code formatting for technical terms, and fenced blocks for code.
 - Match the requested depth. Do not turn a quick question into an essay.
+- Keep a warm, calm, capable tone. Be helpful without performative personality or generic reassurance.
 
 Voice-transcription handling:
 - Some user messages may be transcribed from speech and can contain small homophone, punctuation, or wording errors.
@@ -186,7 +187,7 @@ export function getChatErrorPresentation(error = {}, providerId) {
     },
     MISSING_CONFIGURATION: {
       title: `${provider.name} is not configured`,
-      message: 'Choose another provider in AI Providers, then try again.',
+      message: 'Choose another provider from the AI picker below the composer, then try again.',
       retryable: false,
     },
     OLLAMA_BROWSER_UNSUPPORTED: {
@@ -206,17 +207,17 @@ export function getChatErrorPresentation(error = {}, providerId) {
     },
     OLLAMA_UNAVAILABLE: {
       title: 'Local Ollama is not reachable',
-      message: 'Start Ollama on this Mac, then use AI Providers to refresh your local connection.',
+      message: 'Start Ollama on this Mac, then refresh local models from the AI picker below the composer.',
       retryable: true,
     },
     OLLAMA_MODEL_REQUIRED: {
       title: 'Choose a local model first',
-      message: 'Open AI Providers, refresh Local Ollama, and select one of your installed models.',
+      message: 'Open the AI picker below the composer, refresh Local Ollama, and select one of your installed models.',
       retryable: false,
     },
     OLLAMA_MODEL_UNAVAILABLE: {
       title: 'That local model is unavailable',
-      message: 'Refresh your Local Ollama models and choose an installed model before retrying.',
+      message: 'Refresh your local models from the AI picker and choose an installed model before retrying.',
       retryable: false,
     },
     OLLAMA_TIMEOUT: {
@@ -231,7 +232,7 @@ export function getChatErrorPresentation(error = {}, providerId) {
     },
     INVALID_MODEL: {
       title: 'The selected model is unavailable',
-      message: 'Choose another model in AI Providers, then retry.',
+      message: 'Choose another model from the AI picker below the composer, then retry.',
       retryable: false,
     },
     NETWORK_FAILURE: {
@@ -246,7 +247,7 @@ export function getChatErrorPresentation(error = {}, providerId) {
     },
     EMPTY_RESPONSE: {
       title: `${provider.name} returned no answer`,
-      message: 'Try the message again. If it repeats, choose another model in AI Providers.',
+      message: 'Try the message again. If it repeats, choose another model from the AI picker below the composer.',
       retryable: true,
     },
   }

@@ -7,18 +7,29 @@ import { useTextToSpeech } from '@/hooks/useTextToSpeech'
 import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
 import { mergeLiveTranscript } from '@/hooks/speechRecognitionUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
-import { getAIProvider, getProviderModel, requestAIResult } from '@/services/aiProviderService'
+import {
+  discoverLocalOllama,
+  getAIProvider,
+  getProviderAvailability,
+  getProviderModel,
+  refreshProviderAvailability,
+  requestAIResult,
+  setAIProvider,
+  setProviderModel,
+} from '@/services/aiProviderService'
 import { loadWorkspaceData as load, saveWorkspaceData as save, workspaceStore } from '@/services/workspaceStore'
 import { ChatComposer } from './ChatComposer'
 import { ChatHistory } from './ChatHistory'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
+import { ChatProviderSwitcher } from './ChatProviderSwitcher'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
+import { getChatProviderPresentation } from './chatProviderUtils'
+import { useConversationScroll } from './useConversationScroll'
 import {
   CHAT_STARTER_PROMPTS,
   CHAT_SYSTEM_PROMPT,
   createConversation,
   getChatErrorPresentation,
-  getProviderPresentation,
   normalizeConversations,
   toChatRequestMessages,
 } from './chatUtils'
@@ -43,12 +54,18 @@ export function ChatWorkspace({ user }) {
   const [errorState, setErrorState] = useState(null)
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
+  const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
+  const [providerSelection, setProviderSelection] = useState(() => {
+    const providerId = getAIProvider()
+    return { id: providerId, model: getProviderModel(providerId) }
+  })
+  const [localModels, setLocalModels] = useState([])
+  const [localModelState, setLocalModelState] = useState('idle')
 
   const conversationsRef = useRef([])
   const saveTimerRef = useRef(null)
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
-  const conversationScrollRef = useRef(null)
   const liveDictationRef = useRef({ active: false, lastTranscript: '' })
 
   const {
@@ -62,10 +79,14 @@ export function ChatWorkspace({ user }) {
   const { speaking, speak, stop: stopTTS, activeProvider: activeVoiceProvider, elAvailable } = useTextToSpeech(voiceConfig)
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) || null
   const messages = activeConversation?.messages || []
+  const { scrollRef: conversationScrollRef, showJumpToLatest, scrollToLatest } = useConversationScroll({
+    conversationId: activeId,
+    messageCount: messages.length,
+    sending,
+  })
   const selectedProvider = useMemo(() => {
-    const providerId = getAIProvider()
-    return getProviderPresentation(providerId, getProviderModel(providerId))
-  }, [conversations, activeId, sending])
+    return { ...getChatProviderPresentation(providerSelection.id, providerSelection.model), modelId: providerSelection.model }
+  }, [providerSelection])
   const activeError = errorState?.conversationId === activeId ? errorState : null
 
   useEffect(() => {
@@ -84,6 +105,11 @@ export function ChatWorkspace({ user }) {
         setInput(handoff.message)
         save('fl_convos', next)
         toast('Message ready from Code AI — review it and press Enter to send.', 'success')
+      } else if (next[0]?.id) {
+        // Returning to the most recently persisted chat should feel like
+        // continuity, not a blank reset. New users still receive the calm
+        // welcome state because they have no saved conversation yet.
+        setActiveId(next[0].id)
       }
       conversationsRef.current = next
       setConversations(next)
@@ -98,10 +124,19 @@ export function ChatWorkspace({ user }) {
   }, [voiceConfig])
 
   useEffect(() => {
-    const scrollContainer = conversationScrollRef.current
-    if (!scrollContainer) return
-    scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: sending ? 'smooth' : 'auto' })
-  }, [activeId, messages.length, sending])
+    let active = true
+    refreshProviderAvailability().then(({ provider, providers }) => {
+      if (!active) return
+      setProviderAvailability(providers)
+      setProviderSelection((current) => {
+        // The persisted preference is read at completion so a selection made
+        // while the authenticated availability request is in flight wins.
+        const providerId = getAIProvider() || provider || current.id
+        return { id: providerId, model: getProviderModel(providerId) }
+      })
+    }).catch(() => {})
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false)
@@ -190,6 +225,50 @@ export function ChatWorkspace({ user }) {
     stopRecognition()
   }
 
+  function selectChatProvider(providerId) {
+    if (!setAIProvider(providerId)) {
+      toast('That AI provider is not available for this workspace.', 'error')
+      return
+    }
+    const model = getProviderModel(providerId)
+    setProviderSelection({ id: providerId, model })
+    setErrorState(null)
+  }
+
+  function selectChatModel(model) {
+    const providerId = providerSelection.id
+    if (!providerId || !setProviderModel(providerId, model)) {
+      toast('That model is not available. Choose another model and try again.', 'error')
+      return
+    }
+    setProviderSelection({ id: providerId, model })
+    setErrorState(null)
+  }
+
+  async function discoverChatOllamaModels() {
+    setLocalModelState('discovering')
+    let result
+    try {
+      result = await discoverLocalOllama()
+    } catch {
+      setLocalModelState('failed')
+      return
+    }
+    if (!result.ok) {
+      setLocalModelState('failed')
+      return
+    }
+    const models = Array.isArray(result.models) ? result.models : []
+    setLocalModels(models)
+    setLocalModelState(models.length ? 'ready' : 'empty')
+    if (!models.length) return
+
+    const remembered = getProviderModel('ollama')
+    const model = models.some((candidate) => candidate.id === remembered) ? remembered : models[0].id
+    if (model && model !== remembered) setProviderModel('ollama', model)
+    setProviderSelection((current) => current.id === 'ollama' ? { id: 'ollama', model } : current)
+  }
+
   async function requestAssistantReply({ conversationId, conversationMessages, providerId, modelId }) {
     const requestSequence = ++requestSequenceRef.current
     const controller = new AbortController()
@@ -237,8 +316,12 @@ export function ChatWorkspace({ user }) {
     const content = typeof textOverride === 'string' ? textOverride.trim() : input.trim()
     if ((!content && !pendingImage) || sending) return
 
-    const providerId = getAIProvider()
-    const modelId = getProviderModel(providerId)
+    const providerId = providerSelection.id
+    const modelId = providerSelection.model
+    if (!providerId) {
+      toast('Choose an AI provider below the composer before sending a message.', 'error')
+      return
+    }
     const image = pendingImage
     const source = hasRecognizedSpeech ? 'voice' : undefined
     liveDictationRef.current.active = false
@@ -306,8 +389,8 @@ export function ChatWorkspace({ user }) {
     await requestAssistantReply({
       conversationId: activeConversation.id,
       conversationMessages,
-      providerId: getAIProvider(),
-      modelId: getProviderModel(getAIProvider()),
+      providerId: providerSelection.id,
+      modelId: providerSelection.model,
       conversations: next,
     })
   }
@@ -321,8 +404,8 @@ export function ChatWorkspace({ user }) {
     await requestAssistantReply({
       conversationId: activeConversation.id,
       conversationMessages,
-      providerId: getAIProvider(),
-      modelId: getProviderModel(getAIProvider()),
+      providerId: providerSelection.id,
+      modelId: providerSelection.model,
     })
   }
 
@@ -418,14 +501,14 @@ export function ChatWorkspace({ user }) {
       />
 
       <main className="fl-chat-main" aria-label="FounderLab Chat">
-        <header style={{ minHeight: 57, display: 'flex', alignItems: 'center', gap: 10, padding: '11px 20px', borderBottom: `1px solid ${C.border}`, background: `${C.bg}dd`, backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', flexShrink: 0, zIndex: 2 }}>
-          <button type="button" onClick={() => changeHistoryOpen(!historyOpen)} aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'} aria-expanded={historyOpen} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.t2, cursor: 'pointer', borderRadius: 8, padding: '5px 7px', fontSize: 14, lineHeight: 1 }}>☰</button>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: C.t1, fontSize: 14, fontWeight: 680 }}>{activeConversation?.title || 'FounderLab Chat'}</div>
-            {activeConversation && <div style={{ color: C.t3, fontSize: 10.5, marginTop: 2 }}>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
+        <header className="fl-chat-topbar">
+          <button type="button" className="fl-chat-history-toggle" onClick={() => changeHistoryOpen(!historyOpen)} aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'} aria-expanded={historyOpen}>☰</button>
+          <div className="fl-chat-topbar-title">
+            <div>{activeConversation?.title || 'FounderLab Chat'}</div>
+            {activeConversation && <div>{selectedProvider.local ? 'Local, private AI' : 'Cloud AI'} · {selectedProvider.name}</div>}
           </div>
-          {activeConversation?.messages.length > 0 && <button type="button" onClick={clearConversation} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.t2, cursor: 'pointer', borderRadius: 8, padding: '5px 8px', fontSize: 11, fontFamily: 'inherit' }}>Clear</button>}
-          {elAvailable === true && <span title="Premium voice is available" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 7px', borderRadius: 99, background: C.greenM, border: '1px solid rgba(16,185,129,.22)', color: C.green, fontSize: 10, fontWeight: 700 }}>● Voice</span>}
+          {activeConversation?.messages.length > 0 && <button type="button" className="fl-chat-clear" onClick={clearConversation}>Clear</button>}
+          {elAvailable === true && <span title="Premium voice is available" className="fl-chat-voice-ready">● Voice</span>}
         </header>
 
         {activeTTS && speaking && (
@@ -452,14 +535,39 @@ export function ChatWorkspace({ user }) {
             <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
-                {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={deleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
+                {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={deleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
                 {sending && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
+                {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}
               </div>
             </div>
           </>
         )}
-        <ChatComposer input={input} onInput={setInput} onSend={send} sending={sending} onStop={stopGenerating} pendingImage={pendingImage} onPendingImage={setPendingImage} listening={listening} voiceInputState={voiceInputState} onVoiceStart={startDictation} onVoiceFinish={finishDictation} provider={selectedProvider} editing={Boolean(editingMessageId)} onCancelEdit={cancelEdit} onOpenProviders={() => flNavigate('settings')} />
+        <ChatComposer
+          input={input}
+          onInput={setInput}
+          onSend={send}
+          sending={sending}
+          onStop={stopGenerating}
+          pendingImage={pendingImage}
+          onPendingImage={setPendingImage}
+          listening={listening}
+          voiceInputState={voiceInputState}
+          onVoiceStart={startDictation}
+          onVoiceFinish={finishDictation}
+          providerSwitcher={<ChatProviderSwitcher
+            provider={selectedProvider}
+            availability={providerAvailability}
+            localModels={localModels}
+            localState={localModelState}
+            onSelectProvider={selectChatProvider}
+            onSelectModel={selectChatModel}
+            onDiscoverLocal={discoverChatOllamaModels}
+            onOpenSettings={() => flNavigate('settings')}
+          />}
+          editing={Boolean(editingMessageId)}
+          onCancelEdit={cancelEdit}
+        />
       </main>
     </div>
   )
@@ -474,7 +582,7 @@ function ChatErrorBanner({ error, onRetry, onDismiss, onOpenProviders }) {
         <div style={{ color: C.t2, fontSize: 12.5, lineHeight: 1.5 }}>{error.message}</div>
         <div style={{ display: 'flex', gap: 7, marginTop: 10, flexWrap: 'wrap' }}>
           {error.retryable && <button type="button" onClick={onRetry} style={{ background: C.accentM, border: `1px solid ${C.borderFocus}`, borderRadius: 7, color: C.accent, cursor: 'pointer', fontSize: 12, padding: '5px 9px', fontFamily: 'inherit' }}>Retry message</button>}
-          <button type="button" onClick={onOpenProviders} style={{ background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 7, color: C.t2, cursor: 'pointer', fontSize: 12, padding: '5px 9px', fontFamily: 'inherit' }}>AI Providers</button>
+          <button type="button" onClick={onOpenProviders} style={{ background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 7, color: C.t2, cursor: 'pointer', fontSize: 12, padding: '5px 9px', fontFamily: 'inherit' }}>Manage providers</button>
           <button type="button" onClick={onDismiss} style={{ background: 'transparent', border: 'none', color: C.t3, cursor: 'pointer', fontSize: 12, padding: '5px 7px', fontFamily: 'inherit' }}>Dismiss</button>
         </div>
       </div>
