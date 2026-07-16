@@ -14,15 +14,35 @@ Conversation intelligence:
 - Read the conversation as a whole. Treat likely typos, homophones, fragments, and harmless speech-recognition errors as interpretation noise, not a new objective.
 - Prefer the user's most recent explicit self-correction (for example “I mean”, “I meant”, “actually”, or “correction”) when it resolves a local word or phrase. Preserve the established goal and surrounding context.
 - When a reasonable, harmless interpretation is clear, proceed helpfully. Do not make the user repeat context or get stuck on one questionable word.
+- A direct follow-up to an earlier assistant question normally resolves that question. Treat a plausible answer or correction as progress and continue the task instead of restarting the same clarification loop.
 - Ask one short clarifying question only when the unresolved ambiguity would materially change a high-impact, safety-sensitive, or irreversible outcome. State the best current interpretation once; do not list variants or repeat a clarification that the user has already resolved.
 - Keep applicable safety boundaries for requests that are clearly unsafe; do not invent unsafe intent from an isolated likely transcription error.`
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false } = {}) {
-  if (!latestMessageIsVoice) return CHAT_SYSTEM_PROMPT
+export function getChatRequestContext(messages) {
+  const items = Array.isArray(messages) ? messages : []
+  const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
+  if (latestUserIndex < 0) return { latestMessageIsVoice: false, followsAssistantQuestion: false }
+  const latestUser = items[latestUserIndex]
+  const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
+  return {
+    latestMessageIsVoice: latestUser?.source === 'voice',
+    followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
+  }
+}
+
+export function getChatSystemPrompt({ latestMessageIsVoice = false, followsAssistantQuestion = false } = {}) {
+  const notes = []
+  if (latestMessageIsVoice) {
+    notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
+  }
+  if (followsAssistantQuestion) {
+    notes.push('The latest user turn follows an assistant question. Treat it as the likely answer or correction and continue unless a material ambiguity remains.')
+  }
+  if (!notes.length) return CHAT_SYSTEM_PROMPT
   return `${CHAT_SYSTEM_PROMPT}
 
 Current-input note:
-- The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification. This note is not part of the user's request and must not be mentioned unless it helps them.`
+- ${notes.join('\n- ')} This note is not part of the user's request and must not be mentioned unless it helps them.`
 }
 
 export const CHAT_STARTER_PROMPTS = Object.freeze([

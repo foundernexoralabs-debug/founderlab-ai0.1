@@ -1,42 +1,32 @@
 const VOICE_SESSION_COPY = {
   starting: {
-    title: 'Opening your microphone',
-    detail: 'FounderLab is preparing a private voice capture on this device.',
+    title: 'Connecting microphone',
+    detail: 'Preparing voice input.',
   },
   listening: {
-    title: 'I’m listening',
-    detail: 'Speak naturally. FounderLab will prepare your message when you finish.',
+    title: 'Listening',
+    detail: 'Speak naturally. FounderLab will wait for your review.',
   },
   ready: {
-    title: 'Your message is ready',
-    detail: 'Review it briefly, edit it if needed, then send when you are ready.',
+    title: 'Ready to review',
+    detail: 'Check the interpreted message, then send or edit it.',
   },
   thinking: {
-    title: 'FounderLab is thinking',
-    detail: 'Your message is saved in this conversation while the response is prepared.',
+    title: 'Thinking',
+    detail: 'Your message is safely in the conversation.',
   },
   speaking: {
-    title: 'FounderLab is speaking',
+    title: 'Speaking',
     detail: 'Keep reading or stop playback at any time.',
   },
   complete: {
-    title: 'Your response is ready',
-    detail: 'The complete answer is preserved in the conversation.',
+    title: 'Voice response complete',
+    detail: 'The complete answer is preserved in chat.',
   },
   error: {
-    title: 'Voice session needs attention',
-    detail: 'Your message is still available to review or try again.',
+    title: 'Voice needs attention',
+    detail: 'Your chat stays intact. Try again when ready.',
   },
-}
-
-function VoiceOrb({ phase }) {
-  return (
-    <div className={`fl-chat-voice-session-orb is-${phase}`} aria-hidden="true">
-      <span />
-      <i />
-      <b />
-    </div>
-  )
 }
 
 export function ChatVoiceSession({
@@ -55,41 +45,42 @@ export function ChatVoiceSession({
   const copy = VOICE_SESSION_COPY[session.phase] || VOICE_SESSION_COPY.error
   const isListening = ['starting', 'listening'].includes(session.phase)
   const isBusy = ['thinking', 'speaking'].includes(session.phase)
+  const sourceLabel = session.phase === 'speaking'
+    ? voiceLabel
+    : provider?.local
+      ? 'Private local AI'
+      : provider?.name || 'AI voice'
 
   return (
-    <section className={`fl-chat-voice-session is-${session.phase}`} aria-labelledby="fl-chat-voice-session-title" aria-live="polite">
-      <div className="fl-chat-voice-session-topline">
-        <span>FounderLab voice</span>
-        <span>{session.phase === 'speaking' ? voiceLabel : provider?.local ? 'Private local AI' : provider?.name || 'AI conversation'}</span>
-      </div>
-      <div className="fl-chat-voice-session-main">
-        <VoiceOrb phase={session.phase} />
-        <div className="fl-chat-voice-session-copy">
-          <h2 id="fl-chat-voice-session-title">{copy.title}</h2>
+    <section className={`fl-chat-voice-dock is-${session.phase}`} aria-labelledby="fl-chat-voice-session-title" aria-live="polite">
+      <div className="fl-chat-voice-dock-status">
+        <span className="fl-chat-voice-dock-pulse" aria-hidden="true" />
+        <div className="fl-chat-voice-dock-copy">
+          <div><strong id="fl-chat-voice-session-title">{copy.title}</strong><span>{sourceLabel}</span></div>
           <p>{session.error || session.note || copy.detail}</p>
-          {session.phase === 'ready' && session.transcript && <div className="fl-chat-voice-session-transcript">“{session.transcript}”</div>}
         </div>
       </div>
-      <div className="fl-chat-voice-session-actions">
+      {session.phase === 'ready' && session.transcript && <div className="fl-chat-voice-dock-transcript">“{session.transcript}”</div>}
+      <div className="fl-chat-voice-dock-actions">
         {isListening && <>
-          <button type="button" className="is-quiet" onClick={onCancel}>Cancel capture</button>
-          <button type="button" className="is-primary" onClick={onFinish}>Stop & review</button>
+          <button type="button" className="is-quiet" onClick={onCancel}>Cancel</button>
+          <button type="button" className="is-primary" onClick={onFinish}>Review</button>
         </>}
         {session.phase === 'ready' && <>
-          <button type="button" className="is-quiet" onClick={onEnd}>End voice</button>
-          <button type="button" className="is-quiet" onClick={onEditDraft}>Edit draft</button>
-          <button type="button" className="is-primary" onClick={onSend}>Send message</button>
+          <button type="button" className="is-quiet" onClick={onEnd}>End</button>
+          <button type="button" className="is-quiet" onClick={onEditDraft}>Edit</button>
+          <button type="button" className="is-primary" onClick={onSend}>Send</button>
         </>}
         {isBusy && <>
-          <button type="button" className="is-quiet" onClick={onEnd}>End voice</button>
-          <button type="button" className="is-primary" onClick={onStop}>{session.phase === 'speaking' ? 'Stop speaking' : 'Stop request'}</button>
+          <button type="button" className="is-quiet" onClick={onEnd}>End</button>
+          <button type="button" className="is-primary" onClick={onStop}>Stop</button>
         </>}
         {session.phase === 'complete' && <>
-          <button type="button" className="is-quiet" onClick={onEnd}>End voice</button>
+          <button type="button" className="is-quiet" onClick={onEnd}>End</button>
           <button type="button" className="is-primary" onClick={onStartAgain}>Speak again</button>
         </>}
         {session.phase === 'error' && <>
-          <button type="button" className="is-quiet" onClick={onEnd}>End voice</button>
+          <button type="button" className="is-quiet" onClick={onEnd}>End</button>
           <button type="button" className="is-primary" onClick={onStartAgain}>Try again</button>
         </>}
       </div>

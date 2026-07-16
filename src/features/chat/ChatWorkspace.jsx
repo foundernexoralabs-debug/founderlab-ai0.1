@@ -23,12 +23,12 @@ import { ChatConfirmDialog } from './ChatConfirmDialog'
 import { ChatHistory } from './ChatHistory'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
-import { ChatVoiceSession } from './ChatVoiceSession'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
 import { getChatProviderPresentation } from './chatProviderUtils'
 import { useConversationScroll } from './useConversationScroll'
 import {
   CHAT_STARTER_PROMPTS,
+  getChatRequestContext,
   getChatSystemPrompt,
   createConversation,
   getChatErrorPresentation,
@@ -77,7 +77,6 @@ export function ChatWorkspace({ user }) {
   const voiceSessionRef = useRef({ active: false, transcript: '' })
 
   const {
-    listening,
     clearVoiceDraft,
     voiceInputState,
     start: startRecognition,
@@ -232,7 +231,7 @@ export function ChatWorkspace({ user }) {
     }
     stopTTS()
     setActiveTTS(null)
-    voiceSessionRef.current = { active: true, transcript: '', initialInput: input }
+    voiceSessionRef.current = { active: true, starting: true, transcript: '', initialInput: input, finishRequested: false, cancelled: false }
     setVoiceSession({ phase: 'starting', transcript: '', note: '', error: '' })
     const started = await startRecognition((nextTranscript) => {
       if (!voiceSessionRef.current.active) return
@@ -242,13 +241,26 @@ export function ChatWorkspace({ user }) {
         : current)
     })
     if (!started) {
+      if (voiceSessionRef.current.cancelled) return false
       voiceSessionRef.current.active = false
       setVoiceSession({ phase: 'error', transcript: '', note: '', error: 'FounderLab could not start voice capture. Check microphone access and try again.' })
+      return false
     }
+    if (!voiceSessionRef.current.active || voiceSessionRef.current.cancelled) {
+      stopRecognition()
+      return false
+    }
+    const finishRequested = voiceSessionRef.current.finishRequested
+    voiceSessionRef.current.starting = false
+    if (finishRequested) finishVoiceCapture()
     return started
   }
 
   function finishVoiceCapture() {
+    if (voiceSessionRef.current.starting) {
+      voiceSessionRef.current.finishRequested = true
+      return
+    }
     const spokenTranscript = voiceSessionRef.current.transcript.trim()
     const initialInput = typeof voiceSessionRef.current.initialInput === 'string' ? voiceSessionRef.current.initialInput.trim() : ''
     const transcript = [initialInput, spokenTranscript].filter(Boolean).join(initialInput && spokenTranscript ? ' ' : '').trim()
@@ -263,7 +275,7 @@ export function ChatWorkspace({ user }) {
   }
 
   function cancelVoiceCapture({ quiet = false } = {}) {
-    voiceSessionRef.current = { active: false, transcript: '' }
+    voiceSessionRef.current = { active: false, transcript: '', cancelled: true }
     stopRecognition()
     clearVoiceDraft()
     setVoiceSession(EMPTY_VOICE_SESSION)
@@ -278,6 +290,7 @@ export function ChatWorkspace({ user }) {
       stopGenerating()
     }
     if (current.phase === 'speaking') stopTTS()
+    if (current.phase === 'error') setErrorState(null)
     if (current.phase === 'error' && current.transcript && !input.trim()) setInput(current.transcript)
     voiceSessionRef.current = { active: false, transcript: '', cancelled: cancellingRequest }
     stopRecognition()
@@ -346,9 +359,7 @@ export function ChatWorkspace({ user }) {
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(conversationMessages, providerId),
-      system: getChatSystemPrompt({
-        latestMessageIsVoice: [...conversationMessages].reverse().find((message) => message.role === 'user')?.source === 'voice',
-      }),
+      system: getChatSystemPrompt(getChatRequestContext(conversationMessages)),
       maxTokens: 1800,
       localOllamaAllowed: true,
     }, { signal: controller.signal })
@@ -358,11 +369,12 @@ export function ChatWorkspace({ user }) {
     setSending(false)
 
     if (!result.ok) {
-      setErrorState({
+      const presentation = {
         conversationId,
         ...getChatErrorPresentation({ ...result.error, provider: result.provider, model: result.model }, providerId),
-      })
-      return { ok: false, error: result.error }
+      }
+      setErrorState(presentation)
+      return { ok: false, error: result.error, presentation }
     }
 
     const assistantMessage = {
@@ -493,7 +505,9 @@ export function ChatWorkspace({ user }) {
         phase: 'error',
         transcript,
         note: '',
-        error: response?.cancelled ? 'The voice request was stopped. Your message remains in the conversation.' : 'FounderLab could not complete that voice response. You can retry from the chat.',
+        error: response?.cancelled
+          ? 'The voice request was stopped. Your message remains in the conversation.'
+          : response?.presentation?.message || 'FounderLab could not complete that voice response. You can retry from the chat.',
       })
       return
     }
@@ -659,7 +673,7 @@ export function ChatWorkspace({ user }) {
           {elAvailable === true && <span title="Premium voice is available" className="fl-chat-voice-ready">● Voice</span>}
         </header>
 
-        {activeTTS && speaking && (
+        {activeTTS && speaking && voiceSession.phase === 'idle' && (
           <div className="fl-chat-playback-dock" role="status" aria-live="polite">
             <span aria-hidden="true" className="fl-chat-playback-wave">◌</span>
             <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'System voice' : 'Starting playback'} · {getVoiceSpeedLabel(voiceConfig.speed)}</span>
@@ -684,25 +698,13 @@ export function ChatWorkspace({ user }) {
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
                 {messages.map((message) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} />)}
-                {sending && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
-                {activeError && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
+                {sending && voiceSession.phase === 'idle' && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
+                {activeError && voiceSession.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
                 {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}
               </div>
             </div>
           </>
         )}
-        <ChatVoiceSession
-          session={voiceSession}
-          provider={selectedProvider}
-          voiceLabel={voiceSessionLabel}
-          onFinish={finishVoiceCapture}
-          onCancel={cancelVoiceCapture}
-          onSend={sendVoiceSession}
-          onStop={stopVoiceSessionActivity}
-          onEnd={endVoiceSession}
-          onStartAgain={startVoiceSession}
-          onEditDraft={editVoiceDraft}
-        />
         <ChatComposer
           input={input}
           onInput={setInput}
@@ -711,9 +713,18 @@ export function ChatWorkspace({ user }) {
           onStop={stopGenerating}
           pendingImage={pendingImage}
           onPendingImage={setPendingImage}
-          listening={listening}
-          voiceInputState={voiceInputState}
           voiceSession={voiceSession}
+          voiceSessionActions={{
+            provider: selectedProvider,
+            voiceLabel: voiceSessionLabel,
+            onFinish: finishVoiceCapture,
+            onCancel: cancelVoiceCapture,
+            onSend: sendVoiceSession,
+            onStop: stopVoiceSessionActivity,
+            onEnd: endVoiceSession,
+            onStartAgain: startVoiceSession,
+            onEditDraft: editVoiceDraft,
+          }}
           onVoiceStart={startVoiceSession}
           onVoiceFinish={finishVoiceCapture}
           providerSwitcher={<ChatProviderSwitcher

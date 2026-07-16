@@ -34,6 +34,7 @@ import {
   filterConversations,
   getChatDestructiveActionCopy,
   getChatErrorPresentation,
+  getChatRequestContext,
   getChatSystemPrompt,
   getChatUserInitials,
   getProviderPresentation,
@@ -156,6 +157,14 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
   assert.equal(getChatSystemPrompt(), CHAT_SYSTEM_PROMPT)
+  assert.deepEqual(getChatRequestContext([
+    { role: 'assistant', content: 'Which launch are you referring to?' },
+    { role: 'user', source: 'voice', content: 'The investor launch.' },
+  ]), { latestMessageIsVoice: true, followsAssistantQuestion: true })
+  assert.match(getChatSystemPrompt(getChatRequestContext([
+    { role: 'assistant', content: 'Which launch are you referring to?' },
+    { role: 'user', content: 'The investor launch.' },
+  ])), /likely answer or correction/i)
 })
 
 test('Chat turns normalized provider errors into scoped, recoverable UI states without raw details', () => {
@@ -299,19 +308,24 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /getChatErrorPresentation/)
   assert.match(workspaceSource, /ChatHistory/)
   assert.match(workspaceSource, /ChatConfirmDialog/)
-  assert.match(workspaceSource, /ChatVoiceSession/)
   assert.match(workspaceSource, /createVoiceResponsePlan/)
+  assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
+  assert.match(workspaceSource, /finishRequested/)
+  assert.match(workspaceSource, /voiceSession\.phase === 'idle'/)
+  assert.match(workspaceSource, /sending && voiceSession\.phase === 'idle'/)
+  assert.match(workspaceSource, /activeError && voiceSession\.phase === 'idle'/)
+  assert.doesNotMatch(workspaceSource, /<ChatVoiceSession/)
   assert.doesNotMatch(workspaceSource, /window\.confirm/)
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
   assert.match(composerSource, /Shift\+Enter/)
-  assert.match(composerSource, /pause or correct/i)
   assert.match(composerSource, /Start a live voice session/)
-  assert.match(composerSource, /Voice session controls stay above the composer/)
+  assert.match(composerSource, /ChatVoiceSession/)
   assert.match(composerSource, /Upload an image/)
   assert.match(composerSource, /paste an image directly/i)
-  assert.match(composerSource, /Live dictation is flowing/i)
+  assert.match(composerSource, /voiceSessionActive && <ChatVoiceSession/)
+  assert.doesNotMatch(composerSource, /Live dictation is flowing/i)
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
   assert.match(composerSource, /role="menu"/)
@@ -327,10 +341,11 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /VOICE_SPEED_OPTIONS/)
   assert.match(messageSource, /Best available browser voice/)
   assert.match(messageSource, /getChatUserInitials/)
-  assert.match(voiceSessionSource, /Cancel capture/)
-  assert.match(voiceSessionSource, /Stop & review/)
-  assert.match(voiceSessionSource, /Stop speaking/)
-  assert.match(voiceSessionSource, /End voice/)
+  assert.match(voiceSessionSource, /fl-chat-voice-dock/)
+  assert.match(voiceSessionSource, /Cancel/)
+  assert.match(voiceSessionSource, /Review/)
+  assert.match(voiceSessionSource, /Stop/)
+  assert.match(voiceSessionSource, /End/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)
@@ -354,8 +369,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-voice-popover/)
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
-  assert.match(css, /fl-chat-dictation-status/)
-  assert.match(css, /fl-chat-voice-session/)
+  assert.match(css, /fl-chat-voice-dock/)
+  assert.doesNotMatch(css, /fl-chat-voice-session/)
+  assert.doesNotMatch(css, /fl-chat-dictation-status/)
   assert.match(css, /flChatVoiceListen/)
   assert.match(css, /fl-chat-avatar\.is-user/)
   assert.match(css, /fl-chat-composer-action-menu/)
