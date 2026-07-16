@@ -8,6 +8,7 @@ export async function routeAIRequest(input, {
   permissionQuery,
   diagnosticFlow,
   accessToken,
+  signal,
 } = {}) {
   const normalized = normalizeAIRequest(input, {
     enforceLimits: true,
@@ -26,7 +27,7 @@ export async function routeAIRequest(input, {
 
   const request = normalized.value
   if (request.provider === 'ollama') {
-    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow })
+    return requestOllama(request, { fetchImpl, electronBridge, permissionQuery, diagnosticFlow, signal })
   }
 
   if (typeof fetchImpl !== 'function') {
@@ -48,6 +49,7 @@ export async function routeAIRequest(input, {
         ...(request.system && { system: request.system }),
         ...(request.temperature !== undefined && { temperature: request.temperature }),
       }),
+      ...(signal ? { signal } : {}),
     })
     const payload = await response.json().catch(() => null)
     if (!payload) {

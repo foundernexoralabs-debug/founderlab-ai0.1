@@ -123,6 +123,20 @@ function timeoutSignal(timeout) {
     : undefined
 }
 
+function combinedSignal(timeout, signal) {
+  const timeoutAbortSignal = timeoutSignal(timeout)
+  if (!signal) return timeoutAbortSignal
+  if (!timeoutAbortSignal) return signal
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([signal, timeoutAbortSignal])
+  }
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal.addEventListener?.('abort', abort, { once: true })
+  timeoutAbortSignal.addEventListener?.('abort', abort, { once: true })
+  return controller.signal
+}
+
 export function normalizeOllamaModelName(value) {
   const name = typeof value === 'string' ? value.trim() : ''
   return name && name.length <= 160 ? name : ''
@@ -330,6 +344,7 @@ export async function requestOllama({
   permissionQuery,
   diagnosticFlow = 'chat',
   browserCompatibility,
+  signal,
 } = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
   const selectedModel = normalizeOllamaModelName(model)
@@ -413,7 +428,7 @@ export async function requestOllama({
         stream: false,
         options: { num_predict: maxTokens, ...(temperature !== undefined && { temperature }) },
       }),
-      signal: timeoutSignal(OLLAMA_CHAT_TIMEOUT_MS),
+      signal: combinedSignal(OLLAMA_CHAT_TIMEOUT_MS, signal),
     }))
     const permissionState = await permissionStatePromise
     const responseDiagnostic = {
