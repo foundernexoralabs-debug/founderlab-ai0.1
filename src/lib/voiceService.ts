@@ -1,6 +1,7 @@
 // Voice configuration types and constants
 import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
 import { DEFAULT_VOICE_PREFERENCE } from '@/lib/voicePreferencesUtils'
+import { cleanTextForSpeech } from '@/lib/speechTextUtils'
 
 export const BROWSER_VOICES = {
   male:   ['Microsoft Ryan Online (Natural) - English (United Kingdom)', 'Microsoft Ryan - English (United Kingdom)', 'Google UK English Male', 'Daniel', 'Arthur', 'Alex'],
@@ -58,12 +59,5 @@ export function pickBrowserVoice(gender: Gender, voices: SpeechSynthesisVoice[])
 }
 
 export function cleanForSpeech(text: string): string {
-  return text
-    .replace(/#{1,6}\s+/g, '')
-    .replace(/\*{1,2}([^*\n]+)\*{1,2}/g, '$1')
-    .replace(/`{1,3}[^`]*`{1,3}/g, 'code block')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/^\s*[-*•]\s+/gm, '')
-    .replace(/\n{2,}/g, '. ')
-    .trim()
+  return cleanTextForSpeech(text)
 }

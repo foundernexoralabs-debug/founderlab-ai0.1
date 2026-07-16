@@ -16,6 +16,7 @@ import {
   isNearConversationBottom,
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
+import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
 import { createVoiceResponsePlan } from '../src/features/chat/voiceResponseUtils.js'
 import {
   applyFinalSpeechPhrase,
@@ -33,6 +34,7 @@ import {
   filterConversations,
   getChatDestructiveActionCopy,
   getChatErrorPresentation,
+  getChatSystemPrompt,
   getChatUserInitials,
   getProviderPresentation,
   groupConversationsByRecency,
@@ -144,12 +146,16 @@ test('Chat keeps image input on capable providers and gives local/cloud text mod
   assert.match(ollama[0].content, /visual limitation/i)
 })
 
-test('Voice-transcribed messages preserve their harmless ambiguity context without weakening safety handling', () => {
+test('Voice requests use one contextual interpretation policy without polluting user message content', () => {
   const messages = toChatRequestMessages([{ role: 'user', source: 'voice', content: 'Please draft the next campaign message.' }], 'groq')
-  assert.match(messages[0].content, /Voice-transcription context/i)
-  assert.match(messages[0].content, /concise clarification/i)
+  assert.equal(messages[0].content, 'Please draft the next campaign message.')
+  const voicePrompt = getChatSystemPrompt({ latestMessageIsVoice: true })
+  assert.match(voicePrompt, /Current-input note/i)
+  assert.match(voicePrompt, /most recent explicit self-correction/i)
+  assert.match(voicePrompt, /Ask one short clarifying question/i)
   assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
+  assert.equal(getChatSystemPrompt(), CHAT_SYSTEM_PROMPT)
 })
 
 test('Chat turns normalized provider errors into scoped, recoverable UI states without raw details', () => {
@@ -202,6 +208,10 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
     applyFinalSpeechPhrase(['Typed opening', 'Draft an announcement'], 'Actually, draft an investor update', 1),
     ['Typed opening', 'draft an investor update'],
   )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Typed opening', 'Draft the launch'], 'Draft the launch email for investors', 1),
+    ['Typed opening', 'Draft the launch email for investors'],
+  )
   assert.equal(mergeLiveTranscript('Launch plan', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA')
   assert.equal(mergeLiveTranscript('Launch plan please', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA please')
   assert.equal(mergeLiveTranscript('Manual revision', 'Launch plan', 'Launch plan with a stronger CTA'), 'Manual revision with a stronger CTA')
@@ -229,6 +239,16 @@ test('Voice sessions keep short answers conversational while preserving dense de
   assert.equal(long.mode, 'summary')
   assert.equal(long.spokenText.length <= 660, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
+})
+
+test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
+  const narration = cleanTextForSpeech('## Launch update!!! 🚀\nUse `npm test` / `npm run build`; see [the guide](https://example.com/docs).\n```js\nconsole.log("internal")\n```')
+  assert.equal(narration.includes('🚀'), false)
+  assert.equal(narration.includes('https://'), false)
+  assert.equal(narration.includes('console.log'), false)
+  assert.equal(narration.includes('/'), false)
+  assert.match(narration, /npm test or npm run build/i)
+  assert.match(narration, /detailed code is available in the chat/i)
 })
 
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
@@ -267,6 +287,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const confirmationSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatConfirmDialog.jsx'), 'utf8')
   const voiceSessionSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatVoiceSession.jsx'), 'utf8')
   const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
+  const speechTextSource = fs.readFileSync(path.join(repositoryRoot, 'src/lib/speechTextUtils.js'), 'utf8')
   const recognitionSource = fs.readFileSync(path.join(repositoryRoot, 'src/hooks/useSpeechRecognition.js'), 'utf8')
   const speechSource = fs.readFileSync(path.join(repositoryRoot, 'src/services/speechService.ts'), 'utf8')
   assert.match(workspaceSource, /localOllamaAllowed: true/)
@@ -280,6 +301,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /ChatConfirmDialog/)
   assert.match(workspaceSource, /ChatVoiceSession/)
   assert.match(workspaceSource, /createVoiceResponsePlan/)
+  assert.match(workspaceSource, /getChatSystemPrompt/)
   assert.doesNotMatch(workspaceSource, /window\.confirm/)
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
@@ -310,6 +332,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(voiceSessionSource, /Stop speaking/)
   assert.match(voiceSessionSource, /End voice/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
+  assert.match(voiceResponseSource, /cleanTextForSpeech/)
+  assert.match(speechTextSource, /detailed code is available in the chat/i)
   assert.match(confirmationSource, /role="alertdialog"/)
   assert.match(confirmationSource, /aria-modal="true"/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)

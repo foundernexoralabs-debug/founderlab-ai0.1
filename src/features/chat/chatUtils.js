@@ -4,17 +4,26 @@ export const CHAT_SYSTEM_PROMPT = `You are FounderLab AI — a sharp, practical 
 
 Response style:
 - Be concise by default and answer immediately without filler.
-- Use short paragraphs, bullets, and headings only when they improve scanning.
+- Use short paragraphs for simple answers. Use a compact heading and 3–7 bullets or steps only when they make an actionable or multi-part answer easier to scan.
 - Give complete, actionable advice with specific examples when useful.
 - Use Markdown thoughtfully: bold for key terms, code formatting for technical terms, and fenced blocks for code.
 - Match the requested depth. Do not turn a quick question into an essay.
 - Keep a warm, calm, capable tone. Be helpful without performative personality or generic reassurance.
 
-Voice-transcription handling:
-- Some user messages may be transcribed from speech and can contain small homophone, punctuation, or wording errors.
-- Use the surrounding founder context to interpret a plausibly harmless message rather than overreacting to one ambiguous phrase.
-- If a materially important safety meaning is genuinely unclear, ask one short neutral clarifying question instead of assuming intent or giving an unnecessary hard refusal.
-- Keep applicable safety boundaries for requests that are clearly unsafe.`
+Conversation intelligence:
+- Read the conversation as a whole. Treat likely typos, homophones, fragments, and harmless speech-recognition errors as interpretation noise, not a new objective.
+- Prefer the user's most recent explicit self-correction (for example “I mean”, “I meant”, “actually”, or “correction”) when it resolves a local word or phrase. Preserve the established goal and surrounding context.
+- When a reasonable, harmless interpretation is clear, proceed helpfully. Do not make the user repeat context or get stuck on one questionable word.
+- Ask one short clarifying question only when the unresolved ambiguity would materially change a high-impact, safety-sensitive, or irreversible outcome. State the best current interpretation once; do not list variants or repeat a clarification that the user has already resolved.
+- Keep applicable safety boundaries for requests that are clearly unsafe; do not invent unsafe intent from an isolated likely transcription error.`
+
+export function getChatSystemPrompt({ latestMessageIsVoice = false } = {}) {
+  if (!latestMessageIsVoice) return CHAT_SYSTEM_PROMPT
+  return `${CHAT_SYSTEM_PROMPT}
+
+Current-input note:
+- The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification. This note is not part of the user's request and must not be mentioned unless it helps them.`
+}
 
 export const CHAT_STARTER_PROMPTS = Object.freeze([
   'Help me brainstorm a content strategy for my startup',
@@ -175,11 +184,6 @@ export function getProviderPresentation(providerId, modelId) {
   }
 }
 
-function withVoiceTranscriptionContext(content, source) {
-  if (source !== 'voice') return content
-  return `${content}\n\n[Voice-transcription context: This message was dictated and may contain small homophone or punctuation errors. Use the conversation context. If a phrase is materially ambiguous, ask a concise clarification rather than assuming harmful intent; follow safety requirements for clearly unsafe requests.]`
-}
-
 export function toChatRequestMessages(messages, providerId) {
   const supportsImages = getProvider(providerId)?.capabilities.imageInput === true
   return messages.map((message) => {
@@ -188,7 +192,10 @@ export function toChatRequestMessages(messages, providerId) {
       : message.content
     return {
       role: message.role,
-      content: withVoiceTranscriptionContext(content, message.source),
+      // Voice interpretation belongs in the system policy, not in the user
+      // content. Keeping the original text intact prevents the model from
+      // treating a technical annotation as part of the user's request.
+      content,
       ...(message.image && supportsImages ? { image: message.image } : {}),
     }
   })

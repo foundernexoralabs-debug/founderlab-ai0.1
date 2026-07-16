@@ -29,7 +29,7 @@ import { getChatProviderPresentation } from './chatProviderUtils'
 import { useConversationScroll } from './useConversationScroll'
 import {
   CHAT_STARTER_PROMPTS,
-  CHAT_SYSTEM_PROMPT,
+  getChatSystemPrompt,
   createConversation,
   getChatErrorPresentation,
   normalizeConversations,
@@ -346,7 +346,9 @@ export function ChatWorkspace({ user }) {
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(conversationMessages, providerId),
-      system: CHAT_SYSTEM_PROMPT,
+      system: getChatSystemPrompt({
+        latestMessageIsVoice: [...conversationMessages].reverse().find((message) => message.role === 'user')?.source === 'voice',
+      }),
       maxTokens: 1800,
       localOllamaAllowed: true,
     }, { signal: controller.signal })

@@ -17,6 +17,14 @@ export function commitInterimTranscript(confirmed = '', interim = '') {
 
 const SPOKEN_CORRECTION = /^(?:(?:no|sorry)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction|actually)[:,;]?\s+(.+)$/i
 
+function comparableSpeech(value = '') {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /**
  * Browser-final recognition results are normally the source of truth. When a
  * user clearly corrects their immediately preceding dictated phrase, preserve
@@ -30,9 +38,22 @@ export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegm
   const cleanPhrase = typeof phrase === 'string' ? phrase.trim() : ''
   if (!cleanPhrase) return safeSegments
   const correction = cleanPhrase.match(SPOKEN_CORRECTION)?.[1]?.trim()
-  if (!correction) return [...safeSegments, cleanPhrase]
-  if (safeSegments.length > protectedSegmentCount) return [...safeSegments.slice(0, -1), correction]
-  return [...safeSegments, correction]
+  const canReplaceLastSpokenSegment = safeSegments.length > protectedSegmentCount
+  if (correction && canReplaceLastSpokenSegment) return [...safeSegments.slice(0, -1), correction]
+  if (correction) return [...safeSegments, correction]
+
+  // Recognition engines can finalise a brief restart separately: “Draft the
+  // launch…” followed by “Draft the launch email.” If the later final phrase
+  // safely extends the last dictated segment, keep the more complete phrase
+  // instead of making the assistant infer through duplicated wording.
+  const lastSegment = safeSegments.at(-1) || ''
+  const previous = comparableSpeech(lastSegment)
+  const next = comparableSpeech(cleanPhrase)
+  const previousWordCount = previous ? previous.split(' ').length : 0
+  if (canReplaceLastSpokenSegment && previousWordCount >= 2 && next.length > previous.length && next.startsWith(previous)) {
+    return [...safeSegments.slice(0, -1), cleanPhrase]
+  }
+  return [...safeSegments, cleanPhrase]
 }
 
 /**

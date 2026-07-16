@@ -1,16 +1,6 @@
-const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
+import { cleanTextForSpeech } from '../../lib/speechTextUtils.js'
 
-function stripMarkdownForSpeech(value = '') {
-  return String(value)
-    .replace(/#{1,6}\s+/g, '')
-    .replace(/\*{1,2}([^*\n]+)\*{1,2}/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/^\s*[-*•]\s+/gm, '')
-    .replace(/\n{2,}/g, '. ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
+const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
 
 function shortenAtSentence(text, limit = MAX_CONVERSATIONAL_SPEECH_LENGTH) {
   if (text.length <= limit) return text
@@ -30,7 +20,7 @@ export function createVoiceResponsePlan(content = '') {
 
   const hasCode = /```[\s\S]*?```/.test(source)
   const withoutCode = source.replace(/```[\s\S]*?```/g, ' ').trim()
-  const spokenBase = stripMarkdownForSpeech(withoutCode)
+  const spokenBase = cleanTextForSpeech(withoutCode)
   if (!spokenBase) {
     return {
       spokenText: 'I’ve added the full technical result in the chat for you to review.',
