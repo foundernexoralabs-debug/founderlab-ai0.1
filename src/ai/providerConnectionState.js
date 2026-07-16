@@ -25,6 +25,7 @@ const PROVIDER_EXECUTION_ERROR_CODES = new Set([
   'REQUEST_INVALID',
   'OLLAMA_INVALID_URL',
   'OLLAMA_UNAVAILABLE',
+  'OLLAMA_BROWSER_UNSUPPORTED',
   'OLLAMA_BROWSER_ACCESS_DENIED',
   'OLLAMA_BROWSER_ACCESS_BLOCKED',
   'OLLAMA_TIMEOUT',
@@ -69,7 +70,12 @@ export function recordProviderConnectionResult(providerId, result, { connectionT
   const code = result.error?.code
   if (!PROVIDER_EXECUTION_ERROR_CODES.has(code)) return
   if (connectionTest && getProviderConnectionStatus(providerId) === 'connected') return
-  setProviderConnectionStatus(providerId, code === 'MISSING_CONFIGURATION' ? 'not_configured' : 'failed')
+  const state = code === 'MISSING_CONFIGURATION'
+    ? 'not_configured'
+    : code === 'OLLAMA_UNAVAILABLE' || code === 'OLLAMA_BROWSER_UNSUPPORTED'
+      ? 'unavailable'
+      : 'failed'
+  setProviderConnectionStatus(providerId, state)
 }
 
 export function subscribeProviderConnectionStatuses(listener) {

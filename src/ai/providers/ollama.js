@@ -16,8 +16,7 @@ function diagnosticHost(value) {
   }
 }
 
-function createDiagnostic(flow, base, path) {
-  const browserContext = getBrowserLoopbackContext()
+function createDiagnostic(flow, base, path, browserContext = getOllamaBrowserCompatibility()) {
   return {
     flow,
     requestStarted: false,
@@ -37,28 +36,53 @@ function createDiagnostic(flow, base, path) {
   }
 }
 
-function getBrowserLoopbackContext() {
-  if (typeof window === 'undefined') {
-    return { secureContext: 'not-browser', topLevelContext: 'not-browser', targetAddressSpaceSupported: null }
+/**
+ * Local Ollama from an HTTPS website relies on the browser's loopback
+ * address-space request capability. It is deliberately feature-detected
+ * instead of using a user-agent guess: Chromium-based browsers can expose it,
+ * while Safari currently cannot use this request path.
+ *
+ * The optional inputs keep the capability check independently testable without
+ * mutating browser globals.
+ */
+export function getOllamaBrowserCompatibility({
+  windowImpl = typeof window === 'undefined' ? null : window,
+  RequestImpl = typeof Request === 'undefined' ? null : Request,
+  secureContext = typeof globalThis.isSecureContext === 'boolean' ? globalThis.isSecureContext : false,
+} = {}) {
+  if (!windowImpl) {
+    return Object.freeze({
+      isBrowser: false,
+      secureContext: 'not-browser',
+      topLevelContext: 'not-browser',
+      targetAddressSpaceSupported: null,
+      loopbackAccessSupported: null,
+    })
   }
   let topLevelContext = false
   try {
-    topLevelContext = window.top === window
+    topLevelContext = windowImpl.top === windowImpl
   } catch {
     topLevelContext = false
   }
   let targetAddressSpaceSupported = false
   try {
-    const request = new Request('http://localhost:11434', { targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE })
+    const request = new RequestImpl('http://localhost:11434', { targetAddressSpace: OLLAMA_LOOPBACK_ADDRESS_SPACE })
     targetAddressSpaceSupported = request.targetAddressSpace === OLLAMA_LOOPBACK_ADDRESS_SPACE
   } catch {
     targetAddressSpaceSupported = false
   }
-  return {
-    secureContext: globalThis.isSecureContext ? 'secure' : 'insecure',
+  return Object.freeze({
+    isBrowser: true,
+    secureContext: secureContext ? 'secure' : 'insecure',
     topLevelContext,
     targetAddressSpaceSupported,
-  }
+    loopbackAccessSupported: targetAddressSpaceSupported,
+  })
+}
+
+function isUnsupportedBrowserForLoopback(browserContext) {
+  return browserContext.isBrowser && browserContext.loopbackAccessSupported === false
 }
 
 /**
@@ -137,6 +161,10 @@ function unavailableInspection(code = 'OLLAMA_UNAVAILABLE') {
   })
 }
 
+function unsupportedBrowserInspection() {
+  return unavailableInspection('OLLAMA_BROWSER_UNSUPPORTED')
+}
+
 function availableInspection(models) {
   const normalizedModels = normalizeOllamaModels(models)
   return Object.freeze({
@@ -192,9 +220,15 @@ export function isElectronOllamaAvailable(bridge) {
  * request produces an opaque response and cannot prove that this website can
  * actually use Ollama, so it must never be treated as a successful detection.
  */
-export async function discoverOllama(base, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery } = {}) {
+export async function discoverOllama(base, {
+  fetchImpl = globalThis.fetch,
+  electronBridge,
+  permissionQuery,
+  browserCompatibility,
+} = {}) {
   const url = normalizeOllamaUrl(base)
-  const diagnostic = createDiagnostic('discovery', url || base, '/api/tags')
+  const browserContext = browserCompatibility || getOllamaBrowserCompatibility()
+  const diagnostic = createDiagnostic('discovery', url || base, '/api/tags', browserContext)
   if (!url || typeof fetchImpl !== 'function') {
     return completeInspection(unavailableInspection('OLLAMA_UNAVAILABLE'), {
       ...diagnostic,
@@ -214,6 +248,13 @@ export async function discoverOllama(base, { fetchImpl = globalThis.fetch, elect
         modelListEmpty: Array.isArray(result?.models) ? result.models.length === 0 : null,
         permissionState: 'electron-bridge',
         failureStep: result?.running ? '' : 'electron-probe',
+      })
+    }
+    if (isUnsupportedBrowserForLoopback(browserContext)) {
+      return completeInspection(unsupportedBrowserInspection(), {
+        ...diagnostic,
+        permissionState: 'unsupported-browser',
+        failureStep: 'browser-capability',
       })
     }
     // Start the permission-gated fetch directly from the user's Refresh
@@ -283,10 +324,17 @@ export async function requestOllama({
   maxTokens,
   temperature,
   ollamaUrl,
-}, { fetchImpl = globalThis.fetch, electronBridge, permissionQuery, diagnosticFlow = 'chat' } = {}) {
+}, {
+  fetchImpl = globalThis.fetch,
+  electronBridge,
+  permissionQuery,
+  diagnosticFlow = 'chat',
+  browserCompatibility,
+} = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
   const selectedModel = normalizeOllamaModelName(model)
-  const diagnostic = createDiagnostic(diagnosticFlow, base || ollamaUrl, '/api/chat')
+  const browserContext = browserCompatibility || getOllamaBrowserCompatibility()
+  const diagnostic = createDiagnostic(diagnosticFlow, base || ollamaUrl, '/api/chat', browserContext)
   if (!base) {
     return completeRequest(createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'OLLAMA_INVALID_URL' }), diagnosticFlow, {
       ...diagnostic,
@@ -332,6 +380,18 @@ export async function requestOllama({
         responseReceived: true,
         jsonParsed: true,
         permissionState: 'electron-bridge',
+      })
+    }
+
+    if (isUnsupportedBrowserForLoopback(browserContext)) {
+      return completeRequest(createAIErrorResult({
+        provider: 'ollama',
+        model: selectedModel,
+        code: 'OLLAMA_BROWSER_UNSUPPORTED',
+      }), diagnosticFlow, {
+        ...diagnostic,
+        permissionState: 'unsupported-browser',
+        failureStep: 'browser-capability',
       })
     }
 

@@ -2805,6 +2805,54 @@ Generated with FounderLab AI Builder.
   )
 }
 
+function providerStatusBadgeColor(state) {
+  if (state === 'connected' || state === 'models_available' || state === 'ready' || state === 'local') return 'green'
+  if (state === 'testing' || state === 'detecting') return 'accent'
+  if (state === 'failed' || state === 'not_configured' || state === 'unavailable') return 'red'
+  return 'yellow'
+}
+
+function ProviderChoiceCard({ provider, active, connection, onSelect }) {
+  const isLocal = provider.capabilities.local
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={active}
+      style={{
+        minHeight: 126,
+        padding: '14px 15px',
+        borderRadius: 12,
+        border: `1px solid ${active ? C.accent : C.border}`,
+        boxShadow: active ? `0 0 0 3px ${C.accentM}` : 'none',
+        background: active ? C.accentM : C.bg,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
+        justifyContent: 'space-between',
+        gap: 10,
+        textAlign: 'left',
+        transition: 'border-color .15s, box-shadow .15s, background .15s',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, width: '100%' }}>
+        <span aria-hidden="true" style={{ fontSize: 21, lineHeight: 1 }}>{provider.icon}</span>
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: 'block', fontSize: 13, fontWeight: 700, color: C.t1 }}>{provider.name}</span>
+          <span style={{ display: 'block', marginTop: 3, fontSize: 11, color: C.t3, lineHeight: 1.4 }}>{provider.sub}</span>
+        </span>
+        {active && <Badge color="accent">Active</Badge>}
+      </div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Badge color={isLocal ? 'green' : 'gray'}>{isLocal ? 'Local' : 'Cloud'}</Badge>
+        <Badge color={providerStatusBadgeColor(connection.state)}>{connection.label}</Badge>
+      </div>
+    </button>
+  )
+}
+
 // ── SETTINGS ─────────────────────────────────────────────────
 function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [tab, setTab]       = useState('profile')
@@ -2966,6 +3014,20 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
     } catch { setTestStatus({ provider:aiProv, state:'failed', message:'The provider could not be tested. Check its configuration and try again.' }) }
   }
 
+  function connectionFor(provider) {
+    const configuration = getProviderConfigurationState(provider.id, providerAvailability)
+    const lastKnownState = providerConnectionStatuses[provider.id] || ''
+    const isTesting = testStatus?.provider === provider.id && testStatus.state === 'testing'
+    const fallbackTestState = testStatus?.provider === provider.id && !lastKnownState ? testStatus.state : ''
+    return getProviderConnectionState(configuration, isTesting ? 'testing' : lastKnownState || fallbackTestState)
+  }
+
+  function selectProvider(providerId) {
+    setAIProv(providerId)
+    setAIProviderLS(providerId)
+    setTestStatus(null)
+  }
+
   return (
     <div style={{ height:'100%', overflowY:'auto', padding:'32px 32px 48px', maxWidth:680 }}>
       <h2 style={{ margin:'0 0 24px', fontSize:22, fontWeight:700, color:C.t1 }}>Settings</h2>
@@ -2996,109 +3058,63 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       )}
 
       {tab==='ai' && (
-        <div style={{ maxWidth:540 }}>
-          <p style={{ margin:'0 0 20px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
-            Choose the intelligence behind <strong style={{color:C.t1}}>FounderLab Chat</strong>. Cloud providers use this deployment’s protected server path; Local Ollama stays private on your own Mac. Server-backed tools may require a supported cloud provider.
-          </p>
-
-          {/* ── Provider cards ── */}
-          <div style={{ display:'flex', flexDirection:'column', gap:12, marginBottom:20 }}>
-            <span style={{ color:C.t3, fontSize:11, fontWeight:600, letterSpacing:'.06em', textTransform:'uppercase' }}>Cloud providers</span>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-            {Object.values(PROVIDERS).filter(p => !p.capabilities.local).map(p => {
-              const active = aiProv === p.id
-              const configuration = getProviderConfigurationState(p.id, providerAvailability)
-              const lastKnownState = providerConnectionStatuses[p.id] || ''
-              const isTesting = testStatus?.provider === p.id && testStatus.state === 'testing'
-              const fallbackTestState = testStatus?.provider === p.id && !lastKnownState ? testStatus.state : ''
-              const connection = getProviderConnectionState(configuration, isTesting ? 'testing' : lastKnownState || fallbackTestState)
-              const configurationLabel = connection.label
-              const configurationColor = connection.state === 'connected' ? C.green
-                : connection.state === 'testing' ? C.accent
-                  : connection.state === 'failed' || connection.state === 'not_configured' ? C.red
-                    : connection.state === 'local' ? C.yellow : C.green
-              return (
-                <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus(null) }}
-                  style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
-                  <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}>
-                    <span style={{ fontSize:20 }}>{p.icon}</span>
-                    {active && <span style={{ marginLeft:'auto', fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}
-                  </div>
-                  <span style={{ fontSize:13, fontWeight:700, color:active?C.accent:C.t1 }}>{p.name}</span>
-                  <span style={{ fontSize:11, color:C.t3 }}>{p.sub}</span>
-                  <span style={{ fontSize:11, color:configurationColor }}>{configurationLabel}</span>
-                </button>
-              )
-            })}
-            </div>
-            <span style={{ color:C.t3, fontSize:11, fontWeight:600, letterSpacing:'.06em', textTransform:'uppercase', marginTop:2 }}>Local provider</span>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:10 }}>
-            {Object.values(PROVIDERS).filter(p => p.capabilities.local).map(p => {
-              const active = aiProv === p.id
-              const configuration = getProviderConfigurationState(p.id, providerAvailability)
-              const lastKnownState = providerConnectionStatuses[p.id] || ''
-              const connection = getProviderConnectionState(configuration, lastKnownState)
-              const configurationColor = connection.state === 'connected' ? C.green
-                : connection.state === 'testing' || connection.state === 'detecting' ? C.accent
-                  : connection.state === 'failed' || connection.state === 'unavailable' ? C.red
-                    : connection.state === 'no_models' ? C.yellow : C.green
-              return <button key={p.id} onClick={() => { setAIProv(p.id); setAIProviderLS(p.id); setTestStatus(null) }} style={{ padding:'14px 12px', borderRadius:12, border:`2px solid ${active?C.accent:C.border}`, background:active?C.accentM:C.surf, cursor:'pointer', fontFamily:'inherit', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:4, transition:'all .15s', textAlign:'left' }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8, width:'100%' }}><span style={{ fontSize:20 }}>{p.icon}</span>{active && <span style={{ marginLeft:'auto', fontSize:10, background:C.accent, color:'#fff', borderRadius:99, padding:'2px 8px', fontWeight:600 }}>Active</span>}</div>
-                <span style={{ fontSize:13, fontWeight:700, color:active?C.accent:C.t1 }}>{p.name}</span><span style={{ fontSize:11, color:C.t3 }}>{p.sub}</span><span style={{ fontSize:11, color:configurationColor }}>{connection.label}</span>
-              </button>
-            })}
-            </div>
+        <div style={{ maxWidth:680, display:'flex', flexDirection:'column', gap:16 }}>
+          <div>
+            <span style={{ color:C.accent, fontSize:11, fontWeight:700, letterSpacing:'.07em', textTransform:'uppercase' }}>AI providers</span>
+            <h3 style={{ margin:'6px 0 5px', fontSize:19, color:C.t1 }}>Choose how FounderLab thinks</h3>
+            <p style={{ margin:0, fontSize:13, color:C.t2, lineHeight:1.6 }}>Use a protected cloud provider, or keep Chat private with a local Ollama model on this Mac. Your choice is remembered for this device.</p>
           </div>
 
-          {/* ── Per-provider config panel ── */}
-          <Card style={{ padding:18, marginBottom:16 }}>
-            {!aiProv && (
-              <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
-                No cloud AI provider is configured for this deployment. Add one optional provider key on the server, or choose Local Ollama and test its connection. Authentication and the rest of FounderLab continue to work without an AI key.
-              </div>
-            )}
+          <Card style={{ padding:18 }}>
+            <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, marginBottom:12 }}>
+              <div><h4 style={{ margin:0, fontSize:14, color:C.t1 }}>Cloud providers</h4><p style={{ margin:'3px 0 0', fontSize:12, color:C.t3 }}>Fast, server-protected AI for Chat and supported workspace tools.</p></div>
+              <Badge color="gray">Cloud</Badge>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(155px, 1fr))', gap:10 }}>
+              {Object.values(PROVIDERS).filter(p => !p.capabilities.local).map(p => <ProviderChoiceCard key={p.id} provider={p} active={aiProv===p.id} connection={connectionFor(p)} onSelect={() => selectProvider(p.id)} />)}
+            </div>
+          </Card>
+
+          <Card style={{ padding:18 }}>
+            <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, marginBottom:12 }}>
+              <div><h4 style={{ margin:0, fontSize:14, color:C.t1 }}>Local AI</h4><p style={{ margin:'3px 0 0', fontSize:12, color:C.t3 }}>Use an installed Ollama model directly from this Mac.</p></div>
+              <Badge color="green">Private</Badge>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'minmax(0, 1fr)', gap:10 }}>
+              {Object.values(PROVIDERS).filter(p => p.capabilities.local).map(p => <ProviderChoiceCard key={p.id} provider={p} active={aiProv===p.id} connection={connectionFor(p)} onSelect={() => selectProvider(p.id)} />)}
+            </div>
+          </Card>
+
+          <Card style={{ padding:18 }}>
+            {!aiProv && <div style={{ padding:'12px 13px', background:C.bg, borderRadius:9, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.65 }}>Choose a provider to continue. FounderLab authentication and workspace features remain available even when no cloud AI provider is configured.</div>}
+
             {aiProv && aiProv !== 'ollama' && (() => {
               const p = PROVIDERS[aiProv]
-              return (
-                <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-                  <div style={{ padding:12, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t2, lineHeight:1.7 }}>
-                    Calls go <strong style={{color:C.t1}}>browser → Vercel server → {p.name}</strong>. Your API key is read from the server environment — never sent to the browser.
-                    {' '}<a href={p.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color:C.accent }}>Get API key →</a>
-                  </div>
-                  <div>
-                    <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t2, marginBottom:5, textTransform:'uppercase', letterSpacing:'.05em' }}>Model</label>
-                    <select
-                      value={modelMap[aiProv] || p.default}
-                      onChange={e => setModelMap(m => ({...m, [aiProv]: e.target.value}))}
-                      style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
-                      {p.models.filter(m => !m.internalOnly).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                    </select>
-                  </div>
-                  <div style={{ padding:10, background:C.bg, borderRadius:8, border:`1px solid ${C.border}`, fontSize:12, color:C.t3 }}>
-                    Server key variable: <code style={{color:C.accent}}>{p.keyEnv}</code> — add this to your <code style={{color:C.t2}}>.env.local</code> and to Vercel environment variables.
-                  </div>
+              const connection = connectionFor(p)
+              const isConfigured = getProviderConfigurationState(p.id, providerAvailability) !== 'not_configured'
+              return <div style={{ display:'flex', flexDirection:'column', gap:15 }}>
+                <div style={{ display:'flex', alignItems:'flex-start', gap:10 }}>
+                  <span aria-hidden="true" style={{ fontSize:21, lineHeight:1 }}>{p.icon}</span>
+                  <div style={{ flex:1 }}><div style={{ display:'flex', alignItems:'center', gap:7, flexWrap:'wrap' }}><strong style={{ color:C.t1, fontSize:15 }}>{p.name}</strong><Badge color="gray">Cloud</Badge><Badge color={providerStatusBadgeColor(connection.state)}>{connection.label}</Badge></div><p style={{ margin:'4px 0 0', color:C.t2, fontSize:12, lineHeight:1.5 }}>{isConfigured ? 'Credentials stay on the protected FounderLab server and are never sent to your browser.' : 'This provider is not configured for this deployment yet. You can still choose another provider or Local Ollama.'}</p></div>
                 </div>
-              )
+                <div>
+                  <label style={{ display:'block', fontSize:11, fontWeight:600, color:C.t2, marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Model</label>
+                  <select value={modelMap[aiProv] || p.default} onChange={e => setModelMap(m => ({...m, [aiProv]: e.target.value}))} style={{ width:'100%', background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none', cursor:'pointer' }}>
+                    {p.models.filter(m => !m.internalOnly).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                </div>
+                <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                  <Button onClick={testConnection} disabled={testStatus?.state==='testing'} variant="secondary" size="sm">{testStatus?.state==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : 'Test connection'}</Button>
+                  {testStatus && testStatus.provider===aiProv && testStatus.state !== 'testing' && <span role="status" style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.state==='connected'?C.green:testStatus.state==='not_configured'?C.yellow:C.red }}>{testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Failed'} — {testStatus.message}</span>}
+                </div>
+                <details><summary style={{ color:C.t2, cursor:'pointer', fontSize:12, fontWeight:600 }}>Provider setup and privacy</summary><p style={{ margin:'8px 0 0', color:C.t3, fontSize:12, lineHeight:1.6 }}>This deployment reads cloud credentials on its server and sends requests through its protected provider route. <a href={p.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color:C.accent }}>Open {p.name} setup →</a></p></details>
+              </div>
             })()}
 
             {aiProv === 'ollama' && <OllamaProviderPanel providerAvailability={providerAvailability} />}
           </Card>
 
-          {/* ── Cloud connection test ── */}
-          {aiProv !== 'ollama' && <Card style={{ padding:16, marginBottom:16 }}>
-            <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-              <Button onClick={testConnection} disabled={testStatus?.state==='testing'} variant="secondary" size="sm">
-                {testStatus?.state==='testing' ? <><Spinner size={12} color={C.accent}/> Testing…</> : '⚡ Test Connection'}
-              </Button>
-              {testStatus && testStatus.state !== 'testing' && (
-                <span style={{ fontSize:12, lineHeight:1.4, flex:1, color:testStatus.state==='connected'?C.green:testStatus.state==='not_configured'?C.yellow:C.red }}>
-                  {testStatus.state==='connected' ? 'Connected' : testStatus.state==='not_configured' ? 'Not configured' : 'Failed'} — {testStatus.message}
-                </span>
-              )}
-            </div>
-          </Card>}
-
-          <Button onClick={saveAISettings} full disabled={!aiProv}>Save &amp; Apply</Button>
+          <Button onClick={saveAISettings} full disabled={!aiProv}>Save provider preference</Button>
         </div>
       )}
 

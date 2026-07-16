@@ -15,6 +15,7 @@ const ERROR_MESSAGES = {
   OLLAMA_CHAT_ONLY: 'is currently available for FounderLab Chat only. Choose a cloud provider for this feature.',
   OLLAMA_INVALID_URL: 'needs a valid local Ollama address. Reset the local connection and try again.',
   OLLAMA_UNAVAILABLE: 'is not available on this device. Start Ollama, then try again.',
+  OLLAMA_BROWSER_UNSUPPORTED: 'currently requires a Chromium-based desktop browser such as Chrome, Edge, Brave, or Arc. This browser cannot use the local loopback connection required for Local Ollama.',
   OLLAMA_BROWSER_ACCESS_DENIED: 'was denied local-network access by this browser. Allow Local Network Access for this FounderLab Preview, reload, then try again.',
   OLLAMA_BROWSER_ACCESS_BLOCKED: 'was blocked by this browser before local Ollama could respond. Open FounderLab in a normal browser tab, allow Local Network Access if prompted, reload, then try again.',
   OLLAMA_TIMEOUT: 'took too long to respond. Check that the selected local model can run on this device, then try again.',

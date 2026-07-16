@@ -16,7 +16,13 @@ import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
-import { discoverOllama, getOllamaDiagnostics, normalizeOllamaModels, recordOllamaDiagnostic } from '../src/ai/providers/ollama.js'
+import {
+  discoverOllama,
+  getOllamaBrowserCompatibility,
+  getOllamaDiagnostics,
+  normalizeOllamaModels,
+  recordOllamaDiagnostic,
+} from '../src/ai/providers/ollama.js'
 import {
   getProviderConnectionState,
   getProviderConnectionStatus,
@@ -507,6 +513,44 @@ test('Ollama model discovery preserves a valid model.model value and tagged name
   assert.deepEqual(models.map((model) => model.id), ['llama3.2:3b-instruct-q4_K_M', 'qwen3:8b'])
 })
 
+test('Local Ollama identifies unsupported browser loopback capability before making a request', async () => {
+  const chromiumWindow = {}
+  chromiumWindow.top = chromiumWindow
+  class ChromiumRequest {
+    constructor(_url, options) { this.targetAddressSpace = options.targetAddressSpace }
+  }
+  const chromium = getOllamaBrowserCompatibility({
+    windowImpl: chromiumWindow,
+    RequestImpl: ChromiumRequest,
+    secureContext: true,
+  })
+  assert.equal(chromium.isBrowser, true)
+  assert.equal(chromium.loopbackAccessSupported, true)
+  assert.equal(chromium.targetAddressSpaceSupported, true)
+
+  const safariWindow = {}
+  safariWindow.top = safariWindow
+  class UnsupportedRequest {}
+  const safari = getOllamaBrowserCompatibility({
+    windowImpl: safariWindow,
+    RequestImpl: UnsupportedRequest,
+    secureContext: true,
+  })
+  assert.equal(safari.isBrowser, true)
+  assert.equal(safari.loopbackAccessSupported, false)
+  assert.equal(safari.targetAddressSpaceSupported, false)
+
+  const unsupported = await discoverOllama('http://localhost:11434', {
+    browserCompatibility: safari,
+    fetchImpl: async () => assert.fail('An unsupported browser must not start a local request'),
+  })
+  assert.equal(unsupported.ok, false)
+  assert.equal(unsupported.error.code, 'OLLAMA_BROWSER_UNSUPPORTED')
+  assert.equal(unsupported.diagnostic.failureStep, 'browser-capability')
+  assert.equal(unsupported.diagnostic.requestStarted, false)
+  assert.match(classifyAIError({ provider: 'ollama', code: unsupported.error.code }).message, /Chromium-based desktop browser/)
+})
+
 test('Ollama model and localhost preferences persist safely without accepting a remote endpoint', () => {
   const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   const store = new Map()
@@ -681,16 +725,20 @@ test('Ollama is presented as a first-class local provider without stale CORS set
   const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
   const panelSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/settings/OllamaProviderPanel.jsx'), 'utf8')
   assert.match(appSource, /Cloud providers/)
-  assert.match(appSource, /Local provider/)
+  assert.match(appSource, /Local AI/)
+  assert.match(appSource, /ProviderChoiceCard/)
   assert.match(appSource, /<OllamaProviderPanel/)
-  assert.match(panelSource, /Local · Free/)
+  assert.match(panelSource, /Local · Private · Free/)
   assert.match(panelSource, /Models available/)
   assert.match(panelSource, /Test connection/)
-  assert.match(panelSource, /Temporary local connection trace/)
+  assert.match(panelSource, /Connection details/)
   assert.match(panelSource, /Target host/)
   assert.match(panelSource, /Loopback permission/)
   assert.match(panelSource, /Allow local browser access/)
   assert.match(panelSource, /Check Local Ollama/)
+  assert.match(panelSource, /Local Ollama currently requires Chrome, Edge, Brave, or Arc on desktop/)
+  assert.match(panelSource, /Why this browser cannot use Local Ollama/)
+  assert.match(panelSource, /Setup and recovery help/)
   assert.doesNotMatch(panelSource, /void detect\(\)/)
   assert.match(panelSource, /State discarded after success/)
   assert.match(panelSource, /local app/)
