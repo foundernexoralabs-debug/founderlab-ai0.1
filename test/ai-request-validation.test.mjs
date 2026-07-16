@@ -509,7 +509,7 @@ test('Ollama failures remain isolated and an accidental server route is rejected
   }
 })
 
-test('Ollama is presented as a first-class local provider without the old unsafe CORS guidance', () => {
+test('Ollama is presented as a first-class local provider without stale CORS setup guidance', () => {
   const appSource = fs.readFileSync(path.join(repositoryRoot, 'src/App.jsx'), 'utf8')
   const panelSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/settings/OllamaProviderPanel.jsx'), 'utf8')
   assert.match(appSource, /Cloud providers/)
@@ -518,9 +518,9 @@ test('Ollama is presented as a first-class local provider without the old unsafe
   assert.match(panelSource, /Local · Free/)
   assert.match(panelSource, /Models available/)
   assert.match(panelSource, /Test connection/)
-  assert.match(panelSource, /OLLAMA_ORIGINS/)
+  assert.match(panelSource, /local app/)
   assert.doesNotMatch(appSource, /OLLAMA_ORIGINS=\*/)
-  assert.doesNotMatch(panelSource, /OLLAMA_ORIGINS=\*/)
+  assert.doesNotMatch(panelSource, /OLLAMA_ORIGINS/)
 })
 
 test('provider connection checks use the same normalized path as Chat and preserve a known successful provider', async () => {

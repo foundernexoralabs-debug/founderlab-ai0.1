@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { C } from '@/app/theme'
 import { Badge, Button, Spinner } from '@/components/ui/Primitives'
-import { copyText } from '@/lib/appUtils'
 import {
   createProviderConnectionTestRequest,
   discoverLocalOllama,
@@ -19,10 +18,6 @@ const INITIAL_INSPECTION = Object.freeze({
   models: Object.freeze([]),
   error: null,
 })
-
-function currentOrigin() {
-  return typeof window === 'undefined' ? '' : window.location.origin
-}
 
 function statePresentation(inspection, testing, testState, testMessage) {
   if (testing) return { title: 'Testing local Ollama', detail: 'Sending a short request to the selected model.', color: 'accent' }
@@ -115,9 +110,6 @@ export function OllamaProviderPanel() {
 
   const presentation = statePresentation(inspection, testing, testState, testMessage)
   const [background, foreground] = colorForState(presentation.color)
-  const setupOrigin = currentOrigin()
-  const originCommand = setupOrigin ? `launchctl setenv OLLAMA_ORIGINS "${setupOrigin}"` : ''
-
   return (
     <section aria-label="Local Ollama" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -157,7 +149,7 @@ export function OllamaProviderPanel() {
               <li>Download a local model in Terminal, for example <code style={{ color: C.t2 }}>ollama pull gemma3</code>.</li>
               <li>Return here and choose <strong style={{ color: C.t2 }}>Refresh</strong>.</li>
             </ol>
-            {setupOrigin && <div>If Ollama is installed but this hosted FounderLab page is still unavailable, allow this exact site origin, then restart Ollama:<div style={{ display: 'flex', gap: 6, marginTop: 6 }}><code style={{ flex: 1, overflowX: 'auto', background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: '6px 8px', color: C.t2 }}>{originCommand}</code><Button size="sm" variant="ghost" onClick={() => copyText(originCommand)}>Copy</Button></div></div>}
+            <div>If this browser asks to connect to a local app, allow FounderLab access to this Mac’s local Ollama service, then choose <strong style={{ color: C.t2 }}>Refresh</strong>.</div>
           </div>
         </details>
       )}

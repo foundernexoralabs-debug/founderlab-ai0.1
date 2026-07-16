@@ -26,26 +26,18 @@ uses FounderLab's normal workspace persistence and sync behavior.
    and run **Test connection**. A successful state requires a real
    `POST /api/chat` response from that selected model.
 
-3. A locally served FounderLab page (`localhost`) is allowed by Ollama's normal
-   loopback CORS policy. A hosted FounderLab site has a different browser origin
-   and must be explicitly approved by the local Ollama server. On macOS, use
-   the exact origin shown in Settings—not a wildcard—then quit and relaunch the
-   Ollama app:
+3. In a hosted FounderLab Preview or Production page, the browser may ask for
+   permission to reach a local application. Allow FounderLab to reach the
+   loopback service on this Mac, then choose **Refresh** in Settings. This is a
+   browser local-network permission separate from CORS; FounderLab declares the
+   target as loopback and never sends the local request through Vercel or a
+   cloud provider.
 
-   ```sh
-   launchctl setenv OLLAMA_ORIGINS "https://your-founderlab-origin.example"
-   ```
+   No FounderLab or Vercel environment variable is needed for Local Ollama.
 
-   For a Vercel Preview, the preview origin changes with the deployment; add
-   the exact Preview origin currently being tested. Use the stable production
-   FounderLab origin for Production. A wildcard `OLLAMA_ORIGINS` setting is
-   intentionally not recommended because it lets any website make browser
-   requests to the local Ollama service.
-
-If detection cannot read `/api/tags`, the browser cannot reliably distinguish a
-stopped service from an origin that Ollama has not approved. FounderLab reports
-this honestly as **Ollama is not available** and offers the scoped setup help;
-it never uses an opaque `no-cors` request as fake evidence of a connection.
+If detection cannot read `/api/tags`, FounderLab reports the scoped local
+connection state without pretending that an opaque `no-cors` request proves a
+working integration.
 
 ## Product boundaries
 
