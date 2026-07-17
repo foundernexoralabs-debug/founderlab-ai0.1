@@ -204,7 +204,7 @@ export function ChatComposer({
         </div>}
         {!voiceSessionActive && <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, minHeight: 18, flexWrap: 'wrap' }}>
           {providerSwitcher}
-          <span style={{ color: C.t3, fontSize: 10.5 }}>Tap mic for a live voice session · hold to talk · Enter to send · Shift+Enter for a new line</span>
+          <span className="fl-chat-composer-help" style={{ color: C.t3, fontSize: 10.5 }}>Tap mic for a live voice session · hold to talk · Enter to send · Shift+Enter for a new line</span>
         </div>}
       </div>
     </div>

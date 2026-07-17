@@ -483,6 +483,25 @@
   color: #fda4af !important;
 }
 
+.fl-chat-typing-copy { color: #a8a8c0; font-size: 11px; letter-spacing: -.005em; }
+
+.fl-message-code-copy {
+  min-width: 54px;
+  min-height: 27px;
+  transition: border-color .14s ease, background .14s ease, color .14s ease, transform .14s ease;
+}
+
+.fl-message-code-copy:hover,
+.fl-message-code-copy:focus-visible {
+  border-color: rgba(165,180,252,.56) !important;
+  background: rgba(99,102,241,.14) !important;
+  color: #e0e7ff !important;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.fl-message-code-copy.is-copied { box-shadow: 0 0 0 2px rgba(99,102,241,.09); }
+
 .fl-chat-message:hover .fl-chat-message-actions,
 .fl-chat-message:focus-within .fl-chat-message-actions,
 .fl-chat-message-actions.is-active {
@@ -1398,8 +1417,8 @@
   .fl-chat-live-call-focus { gap: 13px; }
   .fl-chat-live-call-caption { max-width: min(100%, 360px); }
   .fl-chat-live-call-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
-  .fl-chat-live-call-controls button { min-width: 0; padding: 7px 6px; }
-  .fl-chat-live-call-controls .is-end { grid-column: span 1; }
+  .fl-chat-live-call-controls { grid-template-columns: repeat(auto-fit, minmax(102px, 1fr)); }
+  .fl-chat-live-call-controls button { min-width: 0; padding: 7px 6px; font-size: 10.5px; }
   .fl-chat-live-call-start { padding: 6px 8px; }
   .fl-chat-live-call-start { font-size: 0; }
   .fl-chat-live-call-start > span { font-size: 16px; }
@@ -1416,12 +1435,14 @@
   .fl-chat-message.is-user .fl-chat-message-body { flex-basis: min(100%, calc(100% - 40px)); }
   .fl-chat-playback-dock { padding: 7px 16px; }
   .fl-chat-message-actions { opacity: 1; transform: none; }
+  .fl-chat-typing-copy { flex: 1 1 130px; }
   .fl-chat-control-actions { align-items: flex-start; flex-direction: column; gap: 6px; }
   .fl-chat-voice-popover { left: auto; right: 0; }
   .fl-chat-composer-action-menu { left: 0; right: auto; }
   .fl-chat-provider-menu { right: 0; left: auto; width: min(370px, calc(100vw - 24px)); }
   .fl-chat-provider-trigger { max-width: min(100%, 265px); }
   .fl-chat-history-actions { opacity: 1; }
+  .fl-chat-composer-help { line-height: 1.45; }
   .fl-chat-confirm-backdrop { padding: 16px; }
 }
 
@@ -1432,5 +1453,5 @@
   .fl-chat-live-call-orb { width: min(43vw, 150px); }
   .fl-chat-live-call-caption { font-size: 12px; }
   .fl-chat-live-call-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .fl-chat-live-call-controls .is-end { grid-column: span 2; }
+  .fl-chat-composer-help { max-width: 100%; font-size: 9.5px !important; }
 }

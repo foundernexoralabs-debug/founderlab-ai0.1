@@ -7,6 +7,20 @@ function stripCodeBlocks(value = '') {
   return { text, containedCode }
 }
 
+function addNaturalListTransitions(value = '') {
+  let itemIndex = 0
+  return String(value).split('\n').map((line) => {
+    const match = line.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.+)$/)
+    if (!match) {
+      if (line.trim()) itemIndex = 0
+      return line
+    }
+    const lead = itemIndex === 0 ? 'First, ' : itemIndex === 1 ? 'Next, ' : itemIndex === 2 ? 'Then, ' : 'Also, '
+    itemIndex += 1
+    return `${lead}${match[1]}`
+  }).join('\n')
+}
+
 // ElevenLabs and browser speech engines are more reliable with sentence-sized
 // requests. Keep every character in the audible answer while avoiding a
 // single oversized payload being silently truncated by a provider or engine.
@@ -102,7 +116,7 @@ export function cleanTextForSpeech(value = '') {
   const source = typeof value === 'string' ? value : ''
   if (!source.trim()) return ''
 
-  const { text: withoutCode, containedCode } = stripCodeBlocks(source)
+  const { text: withoutCode, containedCode } = stripCodeBlocks(addNaturalListTransitions(source))
   const cleaned = withoutCode
     .replace(/^\s*(?:---+|___+|\*\*\*+)\s*$/gm, ' ')
     .replace(/^\s*\|.+\|\s*$/gm, ' ')

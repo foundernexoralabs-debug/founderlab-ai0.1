@@ -21,6 +21,7 @@ import {
   MAX_SPEECH_PLAYBACK_CHUNK_LENGTH,
   splitSpeechForPlayback,
 } from '../src/lib/speechTextUtils.js'
+import { copyTextToClipboard } from '../src/components/content/messageContentUtils.js'
 import {
   getExplicitSelfCorrection,
   isLikelyRestartExtension,
@@ -79,6 +80,7 @@ import {
   getChatDestructiveActionCopy,
   getChatErrorPresentation,
   getChatRequestContext,
+  getConversationMemoryGuidance,
   getChatResponseGuidance,
   getChatSystemPrompt,
   getLiveCallSystemPrompt,
@@ -245,6 +247,36 @@ test('Chat gives providers adaptive response-shape guidance without forcing ever
   const context = getChatRequestContext([{ role: 'user', content: 'How should I test this landing page?' }])
   assert.match(context.responseGuidance, /direct recommendation|actionable explanation/i)
   assert.match(getChatSystemPrompt(context), /Current response-shape note/i)
+})
+
+test('Chat uses immediate conversation context instead of rewriting a recent answer by default', () => {
+  const referenced = [
+    { role: 'user', content: 'Can you write the onboarding component?' },
+    { role: 'assistant', content: 'Here is the component and how to mount it.' },
+    { role: 'user', content: 'How do I use that code in my app?' },
+  ]
+  const guidance = getConversationMemoryGuidance(referenced)
+  assert.match(guidance, /immediately preceding assistant answer/i)
+  assert.match(guidance, /avoid rewriting the whole answer/i)
+  const context = getChatRequestContext(referenced)
+  assert.match(context.memoryGuidance, /immediately preceding/i)
+  assert.match(getChatSystemPrompt(context), /Current conversation-memory note/i)
+
+  const repeat = getConversationMemoryGuidance([
+    ...referenced.slice(0, 2),
+    { role: 'user', content: 'Please show the full code again.' },
+  ])
+  assert.match(repeat, /explicitly asked to see recent content again/i)
+  assert.equal(getConversationMemoryGuidance([{ role: 'user', content: 'What should I do next?' }]), '')
+})
+
+test('Code copy uses the Clipboard API first and leaves empty code untouched', async () => {
+  const copied = []
+  assert.equal(await copyTextToClipboard('const launch = true', {
+    clipboard: { writeText: async (value) => copied.push(value) },
+  }), true)
+  assert.deepEqual(copied, ['const launch = true'])
+  assert.equal(await copyTextToClipboard('', { clipboard: { writeText: async () => {} } }), false)
 })
 
 test('Chat request intent keeps planning guidance and explicit handoffs aligned', () => {
@@ -559,7 +591,7 @@ test('Voice narration removes presentation artifacts, links, emojis, and code wh
   const structuredNarration = cleanTextForSpeech('> **Next steps**\n1. Confirm the plan\n2. Send the update\n| Owner | Status |\n| --- | --- |\n[^1]')
   assert.equal(structuredNarration.includes('Owner'), false)
   assert.equal(structuredNarration.includes('[^1]'), false)
-  assert.match(structuredNarration, /Confirm the plan\. Send the update/i)
+  assert.match(structuredNarration, /First, Confirm the plan\. Next, Send the update/i)
 })
 
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
@@ -704,6 +736,15 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)
+  const messageContentSource = fs.readFileSync(path.join(repositoryRoot, 'src/components/content/MessageContent.jsx'), 'utf8')
+  const clipboardSource = fs.readFileSync(path.join(repositoryRoot, 'src/components/content/messageContentUtils.js'), 'utf8')
+  assert.match(messageContentSource, /CodeBlock/)
+  assert.match(messageContentSource, /Copy code/)
+  assert.match(clipboardSource, /clipboard\.writeText/)
+  assert.match(workspaceSource, /function resetVoiceSession/)
+  assert.match(workspaceSource, /voiceSessionRequestRef/)
+  assert.match(workspaceSource, /voiceRequest !== voiceSessionRequestRef\.current/)
+  assert.match(workspaceSource, /if \(voiceRequest === voiceSessionRequestRef\.current\) resetVoiceSession\(\)/)
   assert.match(confirmationSource, /role="alertdialog"/)
   assert.match(confirmationSource, /aria-modal="true"/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)
@@ -730,6 +771,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
   assert.match(css, /fl-chat-composer-shell/)
+  assert.match(css, /fl-message-code-copy/)
   assert.match(css, /fl-chat-voice-dock/)
   assert.match(css, /fl-chat-live-call/)
   assert.match(css, /fl-chat-live-call-stage/)

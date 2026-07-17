@@ -188,6 +188,7 @@ export function ChatTypingIndicator({ provider, onStop }) {
           <div aria-hidden="true" style={{ display: 'flex', alignItems: 'center', gap: 5, height: 16 }}>
             {[0, 1, 2].map((index) => <span key={index} style={{ width: 6, height: 6, borderRadius: '50%', background: C.accent, animation: `flChatTyping 1.2s ease-in-out ${index * .14}s infinite` }} />)}
           </div>
+          <span className="fl-chat-typing-copy">Working through your request</span>
           <button type="button" onClick={onStop} style={{ border: `1px solid ${C.border}`, background: 'transparent', borderRadius: 7, color: C.t2, cursor: 'pointer', padding: '4px 9px', fontSize: 11, fontFamily: 'inherit' }}>Stop</button>
         </div>
       </div>

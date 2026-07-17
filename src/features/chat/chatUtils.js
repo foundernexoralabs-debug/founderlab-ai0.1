@@ -78,11 +78,32 @@ export function getChatResponseGuidance(value = '', intent = null) {
   return 'Keep this conversational and complete: answer directly in one to three natural sentences unless a short list clearly helps.'
 }
 
+/**
+ * Models receive the full conversation, but a short explicit reference cue
+ * prevents a common low-quality failure mode: rewriting the previous answer
+ * from scratch when the user is asking how to use, refine, or clarify it.
+ */
+export function getConversationMemoryGuidance(messages = []) {
+  const items = Array.isArray(messages) ? messages : []
+  const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
+  if (latestUserIndex < 1) return ''
+  const latestUser = typeof items[latestUserIndex]?.content === 'string' ? items[latestUserIndex].content.trim() : ''
+  const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant' && typeof message?.content === 'string' && message.content.trim())
+  if (!latestUser || !previousAssistant) return ''
+
+  const referencesRecentAnswer = /\b(?:that|this|it|the previous|above)\s+(?:answer|code|plan|example|snippet|implementation|approach)\b|\b(?:use|run|apply|change|improve|explain|summari[sz]e|fix|adapt|review)\s+(?:that|this|it)\b/i.test(latestUser)
+  const explicitlyRequestsFullRepeat = /\b(?:repeat|repost|resend|paste|show|print)\b[^.?!]{0,36}\b(?:again|full|entire|complete|all|code|answer)\b|\b(?:full|entire|complete)\s+(?:code|answer|plan)\b/i.test(latestUser)
+  if (!referencesRecentAnswer && !explicitlyRequestsFullRepeat) return ''
+  return explicitlyRequestsFullRepeat
+    ? 'The user explicitly asked to see recent content again. Reproduce the relevant answer or code cleanly, then add only the useful update.'
+    : 'The latest request likely refers to the immediately preceding assistant answer. Use that answer as context: briefly orient the user, explain, refine, or apply the relevant part, and avoid rewriting the whole answer unless they clearly ask for it again.'
+}
+
 export function getChatRequestContext(messages) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest(''), responseGuidance: getChatResponseGuidance('') }
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest(''), responseGuidance: getChatResponseGuidance(''), memoryGuidance: '' }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
@@ -93,10 +114,11 @@ export function getChatRequestContext(messages) {
     followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
     intent,
     responseGuidance: getChatResponseGuidance(latestUser?.content, intent),
+    memoryGuidance: getConversationMemoryGuidance(items),
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '' } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '' } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -113,6 +135,9 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   }
   if (responseGuidance) {
     notes.push(`Current response-shape note: ${responseGuidance}`)
+  }
+  if (memoryGuidance) {
+    notes.push(`Current conversation-memory note: ${memoryGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt
