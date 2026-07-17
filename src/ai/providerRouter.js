@@ -48,6 +48,7 @@ export async function routeAIRequest(input, {
         max_tokens: request.maxTokens,
         ...(request.system && { system: request.system }),
         ...(request.temperature !== undefined && { temperature: request.temperature }),
+        ...(request.responseFormat && { response_format: request.responseFormat }),
       }),
       ...(signal ? { signal } : {}),
     })
@@ -64,7 +65,7 @@ export async function routeAIRequest(input, {
     return createAIErrorResult({
       provider: request.provider,
       model: request.model,
-      code: 'NETWORK_FAILURE',
+      code: error?.name === 'AbortError' ? 'REQUEST_CANCELLED' : 'NETWORK_FAILURE',
       message: error?.message,
     })
   }

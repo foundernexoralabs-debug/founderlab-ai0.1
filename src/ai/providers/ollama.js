@@ -221,7 +221,8 @@ async function getLoopbackPermissionState(permissionQuery) {
   }
 }
 
-function localRequestFailureCode(error, permissionState) {
+function localRequestFailureCode(error, permissionState, signal) {
+  if (signal?.aborted) return 'REQUEST_CANCELLED'
   if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'OLLAMA_TIMEOUT'
   if (permissionState === 'denied') return 'OLLAMA_BROWSER_ACCESS_DENIED'
   return 'OLLAMA_BROWSER_ACCESS_BLOCKED'
@@ -479,13 +480,13 @@ export async function requestOllama({
     return completeRequest(createAIErrorResult({
       provider: 'ollama',
       model: selectedModel,
-      code: localRequestFailureCode(error, permissionState),
+      code: localRequestFailureCode(error, permissionState, signal),
     }), diagnosticFlow, {
       ...diagnostic,
       requestStarted: true,
       browserBlockedBeforeResponse: true,
       permissionState: permissionState || 'not-supported',
-      failureStep: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'fetch-before-response',
+      failureStep: signal?.aborted ? 'cancelled' : error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'fetch-before-response',
     })
   }
 }

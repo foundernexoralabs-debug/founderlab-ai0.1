@@ -34,6 +34,14 @@ function normalizeTemperature(value) {
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null
 }
 
+function normalizeResponseFormat(value) {
+  if (value === undefined || value === null) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const keys = Object.keys(value)
+  if (value.type !== 'json_object' || keys.length !== 1 || keys[0] !== 'type') return null
+  return { type: 'json_object' }
+}
+
 function normalizeMessages(messages, enforceLimits, supportsImageInput) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return requestError('REQUEST_INVALID', 'At least one message is required.')
@@ -111,6 +119,10 @@ export function normalizeAIRequest(input = {}, {
   if (temperature === null) {
     return requestError('REQUEST_INVALID', 'Temperature must be a number between 0 and 1.')
   }
+  const responseFormat = normalizeResponseFormat(input.responseFormat)
+  if (responseFormat === null) {
+    return requestError('REQUEST_INVALID', 'Response format is invalid.')
+  }
 
   const messages = normalizeMessages(input.messages, enforceLimits, getProvider(provider).capabilities.imageInput)
   if (!messages.ok) return messages
@@ -132,6 +144,7 @@ export function normalizeAIRequest(input = {}, {
       system: input.system || '',
       maxTokens: normalizeMaxTokens(provider, input.maxTokens),
       ...(temperature !== undefined ? { temperature } : {}),
+      ...(responseFormat ? { responseFormat } : {}),
       ...(ollamaUrl ? { ollamaUrl } : {}),
     },
   }
@@ -145,6 +158,7 @@ export function normalizeServerAIRequest(payload = {}) {
     system: payload.system,
     maxTokens: payload.max_tokens,
     temperature: payload.temperature,
+    responseFormat: payload.response_format,
     ollamaUrl: payload.ollamaUrl,
   }, { enforceLimits: true, restrictOllamaToLocal: true })
 }

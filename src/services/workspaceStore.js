@@ -463,18 +463,24 @@ export async function saveWorkspaceData(key, value) {
   const normalized = normalizeWorkspaceValue(key, value)
   const safeValue = normalized.value
   const storage = getBrowserStorage()
+  let localSaved = false
   try {
     storage?.setItem(key, JSON.stringify(safeValue))
+    localSaved = Boolean(storage)
   } catch {
     // Local persistence is a convenience fallback.
   }
-  if (!workspaceStore.session?.user_id) return
+  if (!workspaceStore.session?.user_id) {
+    return { localSaved, cloudSaved: false, remoteAttempted: false }
+  }
   try {
     await workspaceStore.setData(key, safeValue)
+    return { localSaved, cloudSaved: true, remoteAttempted: true }
   } catch (error) {
     if (import.meta.env.DEV) {
       console.warn('[workspace:save-failed]', { key, message: error?.message })
     }
+    return { localSaved, cloudSaved: false, remoteAttempted: true }
   }
 }
 

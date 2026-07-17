@@ -151,6 +151,7 @@ export async function requestAIResult({
   messages,
   system = '',
   maxTokens = 1200,
+  responseFormat,
   ollamaUrl,
   connectionTest = false,
   localOllamaAllowed = false,
@@ -193,6 +194,7 @@ export async function requestAIResult({
     messages,
     system,
     maxTokens,
+    responseFormat,
     ollamaUrl: provider === 'ollama' ? ollamaUrl || getOllamaURL() : undefined,
   }, {
     fetchImpl,

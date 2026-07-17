@@ -21,6 +21,7 @@ import { Sidebar } from '@/features/navigation/Navigation'
 import { AuthScreen, OnboardingModal, SetupScreen } from '@/features/auth/AuthScreens'
 import { Dashboard } from '@/features/dashboard/Dashboard'
 import { ChatWorkspace } from '@/features/chat/ChatWorkspace'
+import { BuilderWorkspace } from '@/features/builder/BuilderWorkspace'
 import { FeedbackModal } from '@/features/feedback/FeedbackModal'
 import { OllamaProviderPanel } from '@/features/settings/OllamaProviderPanel'
 import { copyText, flConsumeHandoff, flNavigate, fmtDate, ts, uid } from '@/lib/appUtils'
@@ -2545,7 +2546,7 @@ function AppInner() {
       case 'tasks':     return <TasksPage user={user} />
       case 'youtube':   return <YouTubeAIPage user={user} />
       case 'code':      return <CodeAIPage user={user} />
-      case 'builder':   return <BuilderPage user={user} />
+      case 'builder':   return <BuilderWorkspace user={user} />
       case 'settings':  return <SettingsPage user={user} profile={profile} onProfileUpdate={setProfile} onSignOut={signOut} />
       default:          return <Dashboard user={user} profile={profile} setPage={setPage} />
     }

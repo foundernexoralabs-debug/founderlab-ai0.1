@@ -42,6 +42,7 @@ async function callGemini({ apiKey, request, fetchImpl }) {
         generationConfig: {
           maxOutputTokens: request.maxTokens,
           ...(request.temperature !== undefined && { temperature: request.temperature }),
+          ...(request.responseFormat?.type === 'json_object' && { responseMimeType: 'application/json' }),
         },
         ...(request.system && { systemInstruction: { parts: [{ text: request.system }] } }),
       }),
