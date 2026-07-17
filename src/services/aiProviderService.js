@@ -19,6 +19,7 @@ import { createAIErrorResult, toLegacyAIText } from '../ai/normalizeResponse.js'
 import { routeAIRequest } from '../ai/providerRouter.js'
 import { recordProviderConnectionResult } from '../ai/providerConnectionState.js'
 import { discoverOllama, recordOllamaDiagnostic } from '../ai/providers/ollama.js'
+import { getCodeGenerationReadiness } from '../ai/localModelCapabilities.js'
 import { workspaceStore } from './workspaceStore.js'
 
 export {
@@ -215,6 +216,57 @@ export async function requestAIResult({
     }
   }
   return complete(result)
+}
+
+/**
+ * Builder and Code AI share a deliberate execution gate. Cloud providers use
+ * their existing protected route; Local Ollama is admitted only when the
+ * selected model is visibly code-specialised (for example Qwen Coder).
+ */
+export async function requestCodeGenerationAI({
+  provider = getAIProvider(),
+  model,
+  messages,
+  system = '',
+  maxTokens = 1200,
+  ollamaUrl,
+} = {}, options = {}) {
+  const providerId = provider || getAIProvider()
+  const modelId = model || getProviderModel(providerId)
+  if (!providerId) return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
+  if (providerId !== 'ollama') {
+    return requestAIResult({
+      provider: providerId,
+      model: modelId,
+      messages,
+      system,
+      maxTokens,
+      ollamaUrl,
+      localOllamaAllowed: false,
+    }, options)
+  }
+  const readiness = getCodeGenerationReadiness({ provider: providerId, model: modelId })
+  if (!readiness.ready) {
+    return createAIErrorResult({
+      provider: providerId,
+      model: modelId,
+      code: readiness.reason === 'coding-model-required' ? 'OLLAMA_CODE_MODEL_REQUIRED' : 'OLLAMA_MODEL_REQUIRED',
+    })
+  }
+  return requestAIResult({
+    provider: providerId,
+    model: modelId,
+    messages,
+    system,
+    maxTokens,
+    ollamaUrl,
+    localOllamaAllowed: readiness.local,
+  }, options)
+}
+
+export async function codeAI(messages, system = '', maxTokens = 1200, options = {}) {
+  const result = await requestCodeGenerationAI({ messages, system, maxTokens }, options)
+  return toLegacyAIText(result)
 }
 
 export async function ai(messages, system = '', maxTokens = 1200, { localOllamaAllowed = false } = {}) {

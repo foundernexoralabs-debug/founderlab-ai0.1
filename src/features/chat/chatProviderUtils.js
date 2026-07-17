@@ -1,4 +1,5 @@
 import { getProvider, getProviderModel, listProviders } from '../../ai/providerRegistry.js'
+import { getLocalModelCapabilities } from '../../ai/localModelCapabilities.js'
 
 function configuredCloudProvider(provider, availability) {
   return provider.capabilities.local || availability?.[provider.id]?.configured === true
@@ -39,12 +40,21 @@ export function getChatModelOptions(providerId, { localModels = [], selectedMode
     if (!id || seen.has(id)) return items
     seen.add(id)
     const details = typeof model === 'object' && model ? [model.parameterSize, model.family].filter(Boolean).join(' · ') : ''
-    items.push(Object.freeze({ id, label: details ? `${id} · ${details}` : id }))
+    const capabilities = getLocalModelCapabilities(id)
+    items.push(Object.freeze({
+      id,
+      label: details ? `${id} · ${details}` : id,
+      detail: capabilities.detail,
+      codeReady: capabilities.codeGeneration,
+    }))
     return items
   }, [])
 
   const remembered = typeof selectedModel === 'string' ? selectedModel.trim() : ''
-  if (remembered && !seen.has(remembered)) options.unshift(Object.freeze({ id: remembered, label: remembered }))
+  if (remembered && !seen.has(remembered)) {
+    const capabilities = getLocalModelCapabilities(remembered)
+    options.unshift(Object.freeze({ id: remembered, label: remembered, detail: capabilities.detail, codeReady: capabilities.codeGeneration }))
+  }
   return options
 }
 

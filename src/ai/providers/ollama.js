@@ -1,5 +1,6 @@
 import { normalizeOllamaUrl } from '../normalizeRequest.js'
 import { createAIErrorResult, createAIResult } from '../normalizeResponse.js'
+import { getLocalModelCapabilities } from '../localModelCapabilities.js'
 
 export const OLLAMA_DISCOVERY_TIMEOUT_MS = 5000
 export const OLLAMA_CHAT_TIMEOUT_MS = 120000
@@ -160,6 +161,7 @@ export function normalizeOllamaModels(models) {
       family: typeof model?.details?.family === 'string' ? model.details.family : '',
       parameterSize: typeof model?.details?.parameter_size === 'string' ? model.details.parameter_size : '',
       size: Number.isFinite(model?.size) ? model.size : null,
+      capabilities: getLocalModelCapabilities(name),
     }))
     return items
   }, [])

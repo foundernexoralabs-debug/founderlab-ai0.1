@@ -13,6 +13,7 @@ const ERROR_MESSAGES = {
   PROVIDER_UNAVAILABLE: 'is unavailable right now. Check the provider status and try again.',
   OLLAMA_LOCAL_ONLY: 'runs directly on this device and cannot be sent through the cloud API.',
   OLLAMA_CHAT_ONLY: 'is currently available for FounderLab Chat only. Choose a cloud provider for this feature.',
+  OLLAMA_CODE_MODEL_REQUIRED: 'is selected for Builder or Code AI, but it is a general chat model. Choose a local coding model such as Qwen Coder, then try again.',
   OLLAMA_INVALID_URL: 'needs a valid local Ollama address. Reset the local connection and try again.',
   OLLAMA_UNAVAILABLE: 'is not available on this device. Start Ollama, then try again.',
   OLLAMA_BROWSER_UNSUPPORTED: 'currently requires a Chromium-based desktop browser such as Chrome, Edge, Brave, or Arc. This browser cannot use the local loopback connection required for Local Ollama.',
@@ -63,7 +64,7 @@ export function classifyAIError({ provider, status, code, message } = {}) {
     ? status
     : resolvedCode === 'AUTHENTICATION_REQUIRED' || resolvedCode === 'AUTHENTICATION_INVALID' ? 401
       : resolvedCode === 'CORS_ORIGIN_DENIED' ? 403
-      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' || resolvedCode === 'OLLAMA_LOCAL_ONLY' || resolvedCode === 'OLLAMA_CHAT_ONLY' || resolvedCode === 'OLLAMA_INVALID_URL' || resolvedCode === 'OLLAMA_MODEL_REQUIRED' || resolvedCode === 'OLLAMA_MODEL_UNAVAILABLE' ? 400
+      : resolvedCode === 'REQUEST_INVALID' || resolvedCode === 'INVALID_MODEL' || resolvedCode === 'GEMINI_REQUEST_INVALID' || resolvedCode === 'GEMINI_BILLING_OR_REGION_REQUIRED' || resolvedCode === 'OLLAMA_LOCAL_ONLY' || resolvedCode === 'OLLAMA_CHAT_ONLY' || resolvedCode === 'OLLAMA_CODE_MODEL_REQUIRED' || resolvedCode === 'OLLAMA_INVALID_URL' || resolvedCode === 'OLLAMA_MODEL_REQUIRED' || resolvedCode === 'OLLAMA_MODEL_UNAVAILABLE' ? 400
       : resolvedCode === 'RATE_LIMITED' ? 429
         : resolvedCode === 'MISSING_CONFIGURATION' || resolvedCode === 'AUTHENTICATION_UNAVAILABLE' || resolvedCode === 'RATE_LIMIT_BACKEND_UNAVAILABLE' ? 503
           : 502

@@ -35,6 +35,7 @@ import {
 } from '@/ai/providerConnectionState'
 import {
   ai,
+  codeAI,
   getAIProvider,
   getProviderAvailability,
   getProviderModel,
@@ -990,7 +991,7 @@ function CodeAIPage({ user }) {
   // ── Generate / Explain / Improve ─────────────────────────────
   async function run(action, prompt, opts = {}) {
     setAct(action); setL(true); sb.logEvent('code','code')
-    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    const r = await codeAI([{ role:'user', content: prompt }], SYS, 2400)
     if (opts.into === 'rawOut') { setRawOut(r); setTab('code') }
     if (opts.into === 'explainOut') { setExplainOut(r); setTab('explain') }
     if (opts.into === 'testsOut') { setTestsOut(r); setTab('tests') }
@@ -1022,7 +1023,7 @@ Return ONLY valid JSON, no markdown fences, no prose outside the JSON, in exactl
 {"issues":[{"severity":"critical|warning|suggestion","title":"short title","why":"why this happens / why it matters","fix":"how to fix it, in plain English","fixedCode":"a short corrected code snippet, or null if not applicable"}]}
 
 If the code has no issues, return {"issues":[]}.`
-    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    const r = await codeAI([{ role:'user', content: prompt }], SYS, 2400)
     try {
       const jsonMatch = r.match(/\{[\s\S]*\}/)
       const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : r)
@@ -1055,14 +1056,14 @@ After the test code, add a section titled "AI-Estimated Coverage" listing:
 - Scenarios covered
 - Scenarios NOT covered / recommended additional tests
 This is an AI estimate, not a real coverage tool — label it as such.`
-    const r = await ai([{ role:'user', content: prompt }], SYS, 2400)
+    const r = await codeAI([{ role:'user', content: prompt }], SYS, 2400)
     setTestsOut(r); setTab('tests'); setL(false)
   }
 
   async function generateTerminal() {
     setAct('term'); setL(true)
     const prompt = `For this ${lang} project, list the exact terminal commands to: 1) install dependencies, 2) run it locally, 3) run tests, 4) build for production, 5) deploy. Use realistic tooling for ${lang}. Format as labelled shell code blocks, no extra prose.`
-    const r = await ai([{ role:'user', content: prompt }], SYS, 800)
+    const r = await codeAI([{ role:'user', content: prompt }], SYS, 800)
     setTerminalOut(r); setTab('terminal'); setL(false)
   }
 
@@ -1141,7 +1142,7 @@ This is an AI estimate, not a real coverage tool — label it as such.`
 
 Files:
 ${bundle}`
-    const r = await ai([{ role:'user', content: prompt }], 'You are a senior software engineer reviewing an unfamiliar codebase for the first time.', 3000)
+    const r = await codeAI([{ role:'user', content: prompt }], 'You are a senior software engineer reviewing an unfamiliar codebase for the first time.', 3000)
     setExplainOut(r); setTab('explain'); setL(false)
   }
 
@@ -1457,7 +1458,7 @@ const FILE_CONVENTIONS = `STRICT FILE CONVENTIONS (required — the code must co
 - Return each file as its own separate fenced code block.`
 
 async function callGenAI(prompt, maxTokens = 4000) {
-  return ai([{ role:'user', content: prompt }], 'You are a senior product designer and frontend engineer at a top design studio, building premium, modern, production-quality Next.js 14 App Router + TypeScript + Tailwind CSS SaaS websites. Every pixel is intentional. Nothing looks like a template.', maxTokens)
+  return codeAI([{ role:'user', content: prompt }], 'You are a senior product designer and frontend engineer at a top design studio, building premium, modern, production-quality Next.js 14 App Router + TypeScript + Tailwind CSS SaaS websites. Every pixel is intentional. Nothing looks like a template.', maxTokens)
 }
 
 // Runs one generation call, verifies every expected file path came back,

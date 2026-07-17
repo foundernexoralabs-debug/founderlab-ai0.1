@@ -40,6 +40,7 @@ export function ChatProviderSwitcher({
   const cloudOptions = options.filter((option) => !option.local)
   const localOption = options.find((option) => option.local)
   const modelOptions = getChatModelOptions(provider.id, { localModels, selectedModel: provider.modelId })
+  const hasLocalCodingModel = provider.local && modelOptions.some((model) => model.codeReady)
   const discovering = localState === 'discovering'
   const localFailure = localState === 'failed'
 
@@ -126,7 +127,10 @@ export function ChatProviderSwitcher({
                 <div className="fl-chat-provider-model-list">
                   {modelOptions.map((model) => (
                     <button key={model.id} type="button" className={provider.modelId === model.id ? 'is-active' : ''} aria-pressed={provider.modelId === model.id} onClick={() => chooseModel(model.id)}>
-                      <span>{model.label}</span>
+                      <span className="fl-chat-provider-model-copy">
+                        <span>{model.label}</span>
+                        {model.codeReady && <small>Code-ready · local Builder and Code AI</small>}
+                      </span>
                       {provider.modelId === model.id && <span aria-hidden="true">✓</span>}
                     </button>
                   ))}
@@ -134,6 +138,7 @@ export function ChatProviderSwitcher({
               ) : provider.local ? (
                 <button type="button" className="fl-chat-provider-discover" onClick={onDiscoverLocal} disabled={discovering}>{discovering ? 'Looking for local models…' : 'Find local models'}</button>
               ) : null}
+              {hasLocalCodingModel && <p className="fl-chat-provider-local-message">Coding models stay private on this device and can also power Builder and Code AI when selected.</p>}
             </section>
           )}
 

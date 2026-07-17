@@ -4,6 +4,9 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
+import { getCodeGenerationReadiness, getLocalModelCapabilities } from '../src/ai/localModelCapabilities.js'
+import { normalizeOllamaModels } from '../src/ai/providers/ollama.js'
+import { requestCodeGenerationAI } from '../src/services/aiProviderService.js'
 import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
 import {
   getChatModelOptions,
@@ -176,6 +179,73 @@ test('Chat provider picker exposes configured cloud providers, Local Ollama, and
   assert.deepEqual(getChatProviderPresentation('gemini', 'gemini-3.5-flash'), {
     id: 'gemini', name: 'Google Gemini', model: 'Gemini 3.5 Flash (recommended)', local: false, icon: '✶',
   })
+})
+
+test('Local Qwen Coder models are detected as code-ready without misclassifying general local chat models', () => {
+  assert.deepEqual(getLocalModelCapabilities('qwen2.5-coder:7b-instruct-q4_K_M'), {
+    codeGeneration: true,
+    label: 'Code-ready',
+    detail: 'Local coding model · Builder and Code AI ready',
+  })
+  assert.equal(getLocalModelCapabilities('qwen3:8b').codeGeneration, false)
+  assert.deepEqual(getCodeGenerationReadiness({ provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M' }), {
+    ready: true,
+    local: true,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:7b-instruct-q4_K_M',
+    reason: '',
+  })
+  assert.equal(getCodeGenerationReadiness({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }).reason, 'coding-model-required')
+
+  const models = normalizeOllamaModels([{ name: 'qwen2.5-coder:7b-instruct-q4_K_M', details: { family: 'qwen2' } }])
+  assert.equal(models[0].capabilities.codeGeneration, true)
+  const options = getChatModelOptions('ollama', { localModels: models })
+  assert.equal(options[0].codeReady, true)
+  assert.match(options[0].detail, /Builder and Code AI ready/)
+})
+
+test('Code-generation routing uses a selected local Qwen Coder directly and rejects a general local chat model honestly', async () => {
+  const requests = []
+  const result = await requestCodeGenerationAI({
+    provider: 'ollama',
+    model: 'qwen2.5-coder:7b-instruct-q4_K_M',
+    ollamaUrl: 'http://localhost:11434',
+    messages: [{ role: 'user', content: 'Write a small component.' }],
+    system: 'Return code only.',
+    maxTokens: 128,
+  }, {
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ message: { content: 'export default function Ready() { return null }' }, done: true }) }
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].url, 'http://localhost:11434/api/chat')
+  assert.equal(requests[0].body.model, 'qwen2.5-coder:7b-instruct-q4_K_M')
+
+  const blocked = await requestCodeGenerationAI({
+    provider: 'ollama',
+    model: 'llama3.2:3b-instruct-q4_K_M',
+    messages: [{ role: 'user', content: 'Write a component.' }],
+  })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.error.code, 'OLLAMA_CODE_MODEL_REQUIRED')
+
+  const cloud = await requestCodeGenerationAI({
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    messages: [{ role: 'user', content: 'Review this component.' }],
+  }, {
+    accessToken: 'verified-access-token',
+    fetchImpl: async (url, options) => {
+      assert.equal(url, '/api/ai')
+      assert.equal(options.headers.Authorization, 'Bearer verified-access-token')
+      return { ok: true, status: 200, json: async () => ({ ok: true, provider: 'groq', model: 'openai/gpt-oss-120b', text: 'Cloud route remains available.' }) }
+    },
+  })
+  assert.equal(cloud.ok, true)
+  assert.equal(cloud.text, 'Cloud route remains available.')
 })
 
 test('Chat reading flow only follows new content near the bottom and calculates a stable return-to-latest threshold', () => {
