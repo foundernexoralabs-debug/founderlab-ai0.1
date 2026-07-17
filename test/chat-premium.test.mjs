@@ -17,6 +17,7 @@ import {
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
 import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
+import { getExplicitSelfCorrection, isLikelyRestartExtension, normalizeFinalSpokenPhrase } from '../src/lib/conversationLanguage.js'
 import {
   createLiveCallResponsePlan,
   createVoiceResponsePlan,
@@ -56,6 +57,7 @@ import {
 import {
   CHAT_SYSTEM_PROMPT,
   CHAT_HARMLESS_SOCIAL_GUIDANCE,
+  CHAT_RESPONSE_OPTIONS,
   CHAT_CONTROL_CENTER_PROMPT,
   CHAT_STARTER_PROMPTS,
   createConversation,
@@ -66,6 +68,7 @@ import {
   getChatSystemPrompt,
   getLiveCallSystemPrompt,
   hasExplicitSelfCorrection,
+  LIVE_CALL_RESPONSE_OPTIONS,
   getChatUserInitials,
   getProviderPresentation,
   groupConversationsByRecency,
@@ -188,6 +191,7 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /Choose the response shape/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
   assert.match(CHAT_SYSTEM_PROMPT, /another version of the same question/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /low-risk assumption/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /dating/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /without a blanket refusal/i)
   assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
@@ -197,6 +201,7 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'user', source: 'voice', content: 'The investor launch.' },
   ]), { latestMessageIsVoice: true, latestMessageHasCorrection: false, followsAssistantQuestion: true })
   assert.equal(hasExplicitSelfCorrection('Actually, I meant the investor launch.'), true)
+  assert.equal(hasExplicitSelfCorrection('Draft a marketing page, actually a launch page.'), true)
   assert.equal(hasExplicitSelfCorrection('Please draft the investor launch.'), false)
   const correctionContext = getChatRequestContext([
     { role: 'assistant', content: 'Which launch are you referring to?' },
@@ -208,6 +213,8 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', content: 'The investor launch.' },
   ])), /likely answer or correction/i)
+  assert.deepEqual(CHAT_RESPONSE_OPTIONS, { maxTokens: 1500, temperature: 0.52 })
+  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 128, temperature: 0.42 })
 })
 
 test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
@@ -291,6 +298,22 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
     applyFinalSpeechPhrase(['Typed opening', 'Draft the launch'], 'Draft the launch email for investors', 1),
     ['Typed opening', 'Draft the launch email for investors'],
   )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Draft the gim plan'], 'Draft the gym plan for investors'),
+    ['Draft the gym plan for investors'],
+  )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Draft the launch plan'], 'Draft the launch plan'),
+    ['Draft the launch plan'],
+  )
+  assert.deepEqual(
+    applyFinalSpeechPhrase(['Draft a marketing plan'], 'Draft a marketing plan, actually draft a launch plan'),
+    ['draft a launch plan'],
+  )
+  assert.equal(normalizeFinalSpokenPhrase(' um, draft the launch plan '), 'draft the launch plan')
+  assert.equal(getExplicitSelfCorrection('Draft a marketing plan; actually draft a launch plan'), 'draft a launch plan')
+  assert.equal(isLikelyRestartExtension('Draft the gim plan', 'Draft the gym plan for investors'), true)
+  assert.equal(isLikelyRestartExtension('Draft the launch plan', 'Draft the budget plan for investors'), false)
   assert.equal(mergeLiveTranscript('Launch plan', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA')
   assert.equal(mergeLiveTranscript('Launch plan please', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA please')
   assert.equal(mergeLiveTranscript('Manual revision', 'Launch plan', 'Launch plan with a stronger CTA'), 'Manual revision with a stronger CTA')
@@ -298,7 +321,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.equal(shouldResumeVoiceInput({ desired: true, error: '' }), true)
   assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'not-allowed' }), false)
-  assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 150 && VOICE_INPUT_RESTART_DELAY_MS <= 350, true)
+  assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 150 && VOICE_INPUT_RESTART_DELAY_MS <= 250, true)
   assert.match(voiceInputStatusCopy('listening'), /pause naturally/i)
   assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
@@ -320,7 +343,7 @@ test('Voice sessions keep short answers conversational while preserving dense de
 
   const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(30))
   assert.equal(long.mode, 'summary')
-  assert.equal(long.spokenText.length <= 660, true)
+  assert.equal(long.spokenText.length <= 500, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
 
   const structured = createVoiceResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test the onboarding flow\n- Measure conversion before scaling\n\n[Research](https://example.com/research)')
@@ -333,7 +356,7 @@ test('Voice sessions keep short answers conversational while preserving dense de
 
 test('Live Call uses one bounded turn model and accurately describes local and cloud provider support', () => {
   assert.equal(EMPTY_LIVE_CALL.phase, 'idle')
-  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 400 && LIVE_CALL_TURN_DELAY_MS <= 650, true)
+  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 400 && LIVE_CALL_TURN_DELAY_MS <= 500, true)
   assert.equal(getLiveCallTurnDelay('Help me shape the launch message.'), LIVE_CALL_TURN_DELAY_MS)
   assert.equal(getLiveCallTurnDelay('Hmm'), LIVE_CALL_SHORT_TURN_DELAY_MS)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: 'Help me plan a launch.' }), true)
@@ -393,7 +416,7 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.equal(simpleAnswer.mode, 'call-conversational')
   assert.match(simpleAnswer.spokenText, /audience/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
-  assert.match(getLiveCallSystemPrompt(), /two to four concise sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /one to four concise sentences/i)
 })
 
 test('Live Call bounds context for faster turns without dropping the newest spoken request', () => {
@@ -412,7 +435,7 @@ test('Live Call bounds context for faster turns without dropping the newest spok
   assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
   assert.equal(context.at(-1)?.source, 'voice')
   assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 9000, true)
-  assert.equal(LIVE_CALL_MAX_OUTPUT_TOKENS, 160)
+  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 128)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -550,11 +573,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(liveCallSource, /Stop response/)
   assert.match(liveCallSource, /Cancel capture/)
   assert.match(liveCallSource, /End call/)
+  assert.match(liveCallSource, /showTranscript/)
   assert.match(liveCallUtilsSource, /Private local call/)
   assert.match(liveCallUtilsSource, /shouldQueueLiveCallTurn/)
   assert.match(liveCallUtilsSource, /canInterruptLiveCall/)
   assert.match(workspaceSource, /beginLiveCallInterruptionMonitor/)
-  assert.match(workspaceSource, /LIVE_CALL_MAX_OUTPUT_TOKENS/)
+  assert.match(workspaceSource, /LIVE_CALL_RESPONSE_OPTIONS/)
+  assert.match(workspaceSource, /temperature: CHAT_RESPONSE_OPTIONS.temperature/)
+  assert.match(workspaceSource, /temperature: LIVE_CALL_RESPONSE_OPTIONS.temperature/)
   assert.match(workspaceSource, /buildLiveCallRequestContext/)
   assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)

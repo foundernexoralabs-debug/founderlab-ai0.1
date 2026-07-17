@@ -16,6 +16,7 @@ export function getSpeechContentProfile(value = '') {
   const { text, containedCode } = stripCodeBlocks(source)
   const listItemCount = (text.match(/^\s*(?:[-*+•]|\d+[.)])\s+/gm) || []).length
   const tableLineCount = (text.match(/^\s*\|.+\|\s*$/gm) || []).length
+  const headingCount = (text.match(/^\s*#{1,6}\s+.+$/gm) || []).length
   const referenceCount = (text.match(/(?:https?:\/\/|\[[^\]]+\]\([^)]+\)|\[\^?\d+\])/gi) || []).length
   return {
     // Inline code often represents a short command or product term that can
@@ -23,9 +24,10 @@ export function getSpeechContentProfile(value = '') {
     // narration path.
     hasCode: containedCode,
     hasInlineCode: /`[^`]+`/.test(text),
-    hasStructuredContent: listItemCount >= 2 || tableLineCount >= 2,
+    hasStructuredContent: listItemCount >= 2 || tableLineCount >= 2 || headingCount >= 2,
     hasReferences: referenceCount > 0,
     listItemCount,
+    headingCount,
   }
 }
 

@@ -28,7 +28,9 @@ import { getChatUIPreferences, persistChatUIPreferences } from './chatPreference
 import { getChatProviderPresentation } from './chatProviderUtils'
 import { useConversationScroll } from './useConversationScroll'
 import {
+  CHAT_RESPONSE_OPTIONS,
   CHAT_STARTER_PROMPTS,
+  LIVE_CALL_RESPONSE_OPTIONS,
   getChatRequestContext,
   getChatSystemPrompt,
   getLiveCallSystemPrompt,
@@ -38,7 +40,7 @@ import {
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
-import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, LIVE_CALL_MAX_OUTPUT_TOKENS, shouldQueueLiveCallTurn } from './liveCallUtils'
+import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
 
@@ -715,7 +717,8 @@ export function ChatWorkspace({ user }) {
       model: modelId,
       messages: toChatRequestMessages(conversationMessages, providerId),
       system: getChatSystemPrompt(getChatRequestContext(conversationMessages)),
-      maxTokens: 1800,
+      maxTokens: CHAT_RESPONSE_OPTIONS.maxTokens,
+      temperature: CHAT_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
     }, { signal: controller.signal })
 
@@ -766,7 +769,8 @@ export function ChatWorkspace({ user }) {
       model: modelId,
       messages: toChatRequestMessages(callMessages, providerId),
       system: getLiveCallSystemPrompt(getChatRequestContext(callMessages)),
-      maxTokens: LIVE_CALL_MAX_OUTPUT_TOKENS,
+      maxTokens: LIVE_CALL_RESPONSE_OPTIONS.maxTokens,
+      temperature: LIVE_CALL_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
     }, { signal: controller.signal })
 

@@ -18,8 +18,12 @@ export function ChatLiveCallSurface({
   const busy = ['thinking', 'speaking'].includes(call.phase)
   const capturing = ['connecting', 'ready', 'listening', 'interrupted', 'reconnecting'].includes(call.phase)
   const transcript = typeof call.transcript === 'string' ? call.transcript.trim() : ''
+  // Interim browser transcription is noisy and changes several times per
+  // second. Keep the voice-first surface calm while listening; show the
+  // compact captured turn only when it is being processed or interrupted.
+  const showTranscript = ['thinking', 'interrupted'].includes(call.phase)
   const providerKind = providerSupport.local ? 'Local & private' : 'Cloud AI'
-  const caption = transcript
+  const caption = showTranscript && transcript
     ? `“${getLiveCallTranscriptPreview(transcript)}”`
     : call.error || call.note || copy.detail
 

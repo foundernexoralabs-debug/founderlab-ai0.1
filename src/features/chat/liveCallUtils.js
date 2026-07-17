@@ -1,8 +1,8 @@
 // A browser final result already represents a meaningful pause. Keep only a
 // short guard window so FounderLab feels responsive without sending a phrase
 // while the caller is still correcting a very short fragment.
-export const LIVE_CALL_TURN_DELAY_MS = 500
-export const LIVE_CALL_SHORT_TURN_DELAY_MS = 800
+export const LIVE_CALL_TURN_DELAY_MS = 450
+export const LIVE_CALL_SHORT_TURN_DELAY_MS = 700
 export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
 export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 6
@@ -44,7 +44,7 @@ export const LIVE_CALL_COPY = Object.freeze({
   connecting: Object.freeze({ title: 'Connecting', detail: 'Preparing your microphone.' }),
   ready: Object.freeze({ title: 'Ready', detail: 'Your live call is ready when you are.' }),
   listening: Object.freeze({ title: 'Listening', detail: 'Speak naturally. FounderLab will take the next turn after a short pause.' }),
-  thinking: Object.freeze({ title: 'Thinking', detail: 'I’ve got that — shaping a focused answer.' }),
+  thinking: Object.freeze({ title: 'Thinking', detail: 'Preparing a concise answer.' }),
   speaking: Object.freeze({ title: 'Responding', detail: 'Speak to interrupt, or stop the response at any time.' }),
   interrupted: Object.freeze({ title: 'I’m listening', detail: 'FounderLab paused so you can continue.' }),
   muted: Object.freeze({ title: 'Mic muted', detail: 'Unmute when you are ready to continue.' }),

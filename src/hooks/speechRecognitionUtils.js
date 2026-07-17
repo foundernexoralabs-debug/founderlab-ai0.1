@@ -1,7 +1,13 @@
+import {
+  getExplicitSelfCorrection,
+  isLikelyRestartExtension,
+  normalizeFinalSpokenPhrase,
+} from '../lib/conversationLanguage.js'
+
 // A browser recognition session can end after a quiet beat even when
 // `continuous` is enabled. This short handoff keeps dictation live without
 // forcing the user to restart after every natural pause.
-export const VOICE_INPUT_RESTART_DELAY_MS = 350
+export const VOICE_INPUT_RESTART_DELAY_MS = 180
 
 export function appendVoiceTranscript(existing = '', addition = '') {
   const prefix = typeof existing === 'string' ? existing.trim() : ''
@@ -14,8 +20,6 @@ export function appendVoiceTranscript(existing = '', addition = '') {
 export function commitInterimTranscript(confirmed = '', interim = '') {
   return appendVoiceTranscript(confirmed, interim)
 }
-
-const SPOKEN_CORRECTION = /^(?:(?:no|sorry)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction|actually)[:,;]?\s+(.+)$/i
 
 function comparableSpeech(value = '') {
   return String(value)
@@ -35,9 +39,9 @@ export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegm
   const safeSegments = Array.isArray(segments)
     ? segments.map((segment) => typeof segment === 'string' ? segment.trim() : '').filter(Boolean)
     : []
-  const cleanPhrase = typeof phrase === 'string' ? phrase.trim() : ''
+  const cleanPhrase = normalizeFinalSpokenPhrase(phrase)
   if (!cleanPhrase) return safeSegments
-  const correction = cleanPhrase.match(SPOKEN_CORRECTION)?.[1]?.trim()
+  const correction = getExplicitSelfCorrection(cleanPhrase)
   const canReplaceLastSpokenSegment = safeSegments.length > protectedSegmentCount
   if (correction && canReplaceLastSpokenSegment) return [...safeSegments.slice(0, -1), correction]
   if (correction) return [...safeSegments, correction]
@@ -49,8 +53,9 @@ export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegm
   const lastSegment = safeSegments.at(-1) || ''
   const previous = comparableSpeech(lastSegment)
   const next = comparableSpeech(cleanPhrase)
+  if (canReplaceLastSpokenSegment && previous && previous === next) return safeSegments
   const previousWordCount = previous ? previous.split(' ').length : 0
-  if (canReplaceLastSpokenSegment && previousWordCount >= 2 && next.length > previous.length && next.startsWith(previous)) {
+  if (canReplaceLastSpokenSegment && previousWordCount >= 2 && isLikelyRestartExtension(lastSegment, cleanPhrase)) {
     return [...safeSegments.slice(0, -1), cleanPhrase]
   }
   return [...safeSegments, cleanPhrase]
