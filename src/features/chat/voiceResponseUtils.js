@@ -6,7 +6,10 @@ import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTex
 export const MAX_FULL_READ_ALOUD_LENGTH = 8000
 export const MAX_FULL_VOICE_RESPONSE_LENGTH = 6000
 export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 5000
-export const MAX_LIVE_CALL_SPEECH_LENGTH = 540
+// This aligns with the live prompt's 55–125-word target. It is enough room
+// for a direct answer, a concrete reason, and a next move without turning the
+// call into normal read-aloud.
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 680
 
 /** Keep the active call in the present instead of deferring useful help. */
 export function normalizeLiveCallResponseText(value = '') {

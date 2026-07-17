@@ -9,7 +9,7 @@ export const LIVE_CALL_SHORT_TURN_DELAY_MS = 560
 // A live answer should be concise, not underpowered. This supports a useful
 // recommendation plus a reason and next move without turning a call into a
 // read-aloud session.
-export const LIVE_CALL_MAX_SPOKEN_LENGTH = 540
+export const LIVE_CALL_MAX_SPOKEN_LENGTH = 680
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
 export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 4
 export const LIVE_CALL_TURN_CONTEXT_LIMIT = 6
