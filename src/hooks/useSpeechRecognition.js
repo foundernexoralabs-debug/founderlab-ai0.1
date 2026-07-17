@@ -30,6 +30,25 @@ export function useSpeechRecognition() {
   const onUpdateRef = useRef(null)
   const lastPublishedTranscriptRef = useRef('')
   const microphonePermissionReadyRef = useRef(false)
+  const microphonePreparationRef = useRef(null)
+
+  const prepare = useCallback(async ({ quiet = false } = {}) => {
+    if (microphonePermissionReadyRef.current) return true
+    if (microphonePreparationRef.current) return microphonePreparationRef.current
+    const preparation = getMicrophoneStream()
+      .then((stream) => {
+        stream.getTracks().forEach((track) => track.stop())
+        microphonePermissionReadyRef.current = true
+        return true
+      })
+      .catch((error) => {
+        if (!quiet) toast(error.message, 'error')
+        return false
+      })
+      .finally(() => { microphonePreparationRef.current = null })
+    microphonePreparationRef.current = preparation
+    return preparation
+  }, [])
 
   const stop = useCallback(() => {
     // Invalidate both an active recognition instance and a microphone
@@ -64,14 +83,8 @@ export function useSpeechRecognition() {
 
     const session = ++sessionRef.current
     if (!microphonePermissionReadyRef.current) {
-      let stream
-      try {
-        stream = await getMicrophoneStream()
-      } catch (error) {
-        toast(error.message, 'error')
-        return false
-      }
-      stream.getTracks().forEach((track) => track.stop())
+      const prepared = await prepare()
+      if (!prepared) return false
       // The first preflight captures the browser permission. Later turns can
       // start recognition immediately instead of waiting on another
       // getUserMedia round-trip before the listening state appears.
@@ -205,7 +218,7 @@ export function useSpeechRecognition() {
 
     beginRecognition()
     return true
-  }, [])
+  }, [prepare])
 
   useEffect(() => () => {
     desiredRef.current = false
@@ -218,6 +231,7 @@ export function useSpeechRecognition() {
     transcript,
     setTranscript,
     clearVoiceDraft,
+    prepare,
     voiceInputState,
     start,
     stop,

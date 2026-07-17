@@ -1,11 +1,12 @@
 import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTextUtils.js'
 
-// A response with ordinary bullets, headings, or a link can still be brief
-// enough to hear in full. Only genuinely long or code-heavy content needs a
-// spoken overview; otherwise voice feels as if it stops before it is useful.
-export const MAX_FULL_VOICE_RESPONSE_LENGTH = 1100
-export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 900
-export const MAX_LIVE_CALL_SPEECH_LENGTH = 220
+// Normal read-aloud should be complete by default. These high limits are a
+// deliberate product boundary: only genuinely long, code-heavy, or tabular
+// content is summarized; ordinary prose, lists, and references are narrated.
+export const MAX_FULL_READ_ALOUD_LENGTH = 6000
+export const MAX_FULL_VOICE_RESPONSE_LENGTH = 4000
+export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 3000
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 360
 
 /** Keep the active call in the present instead of deferring useful help. */
 export function normalizeLiveCallResponseText(value = '') {
@@ -42,48 +43,88 @@ function createStructuredOverview(source, spokenBase, limit) {
   return shortenAtSentence(`Here’s the short version. ${naturalHighlights}.`, limit)
 }
 
-/**
- * Voice sessions should sound conversational without hiding the complete
- * result. Code and dense long-form details remain in the chat while the
- * spoken layer gives a truthful, short orientation to what FounderLab made.
- */
-export function createVoiceResponsePlan(content = '') {
+function createNormalNarrationPlan(content = '', {
+  fullLimit,
+  structuredLimit,
+  fullMode,
+  fullNote,
+} = {}) {
   const source = typeof content === 'string' ? content.trim() : ''
   if (!source) return { spokenText: '', mode: 'none', note: '' }
 
   const profile = getSpeechContentProfile(source)
-  const { hasCode, hasStructuredContent, hasReferences } = profile
+  const { hasCode, hasStructuredContent, tableLineCount, listItemCount } = profile
+  const hasRawTable = tableLineCount >= 2
+  const hasLargeStructuredData = listItemCount > 20
   const withoutCode = source.replace(/```[\s\S]*?```/g, ' ').trim()
   const spokenBase = cleanTextForSpeech(withoutCode)
   if (!spokenBase) {
     return {
       spokenText: hasCode
         ? 'I’ve added the full technical result in the chat for you to review.'
+        : hasRawTable
+          ? 'I’ve kept the full table in the chat. I can walk you through the important result.'
         : 'I’ve added the full structured result in the chat for you to review.',
-      mode: hasCode ? 'code-summary' : 'structured-summary',
-      note: hasCode ? 'Full code remains in the conversation.' : 'Full details remain in the conversation.',
+      mode: hasCode ? 'code-summary' : hasRawTable ? 'data-summary' : 'structured-summary',
+      note: hasCode ? 'Full code remains in the conversation.' : hasRawTable ? 'Full table remains in the conversation.' : 'Full details remain in the conversation.',
     }
   }
 
   const needsOverview = hasCode
-    || spokenBase.length > MAX_FULL_VOICE_RESPONSE_LENGTH
-    || ((hasStructuredContent || hasReferences) && spokenBase.length > MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH)
+    || hasRawTable
+    || hasLargeStructuredData
+    || spokenBase.length > fullLimit
+    || (hasStructuredContent && spokenBase.length > structuredLimit)
   if (!needsOverview) {
-    return { spokenText: spokenBase, mode: 'conversational', note: '' }
+    return { spokenText: spokenBase, mode: fullMode, note: fullNote }
   }
 
   const suffix = hasCode
     ? ' I’ve kept the full code and details in the chat for you.'
+    : hasRawTable
+      ? ' I’ve kept the full table in the chat for you.'
     : ' I’ve kept the full breakdown in the chat for you.'
-  const summaryLimit = Math.max(260, MAX_FULL_VOICE_RESPONSE_LENGTH - suffix.length)
-  const overview = hasStructuredContent
+  const summaryLimit = Math.max(360, Math.min(1000, fullLimit - suffix.length))
+  const overview = hasStructuredContent && !hasRawTable
     ? createStructuredOverview(source, spokenBase, summaryLimit)
     : shortenAtSentence(spokenBase, summaryLimit)
   return {
-    spokenText: `${overview}${suffix}`,
-    mode: hasCode ? 'code-summary' : hasStructuredContent ? 'structured-summary' : 'summary',
-    note: hasCode ? 'A concise voice overview is playing; full code remains in the chat.' : 'A concise voice overview is playing; full details remain in the chat.',
+    spokenText: `${overview}${suffix}`.trim(),
+    mode: hasCode ? 'code-summary' : hasRawTable || hasLargeStructuredData ? 'data-summary' : hasStructuredContent ? 'structured-summary' : 'summary',
+    note: hasCode
+      ? 'A concise technical overview is playing; full code remains in the chat.'
+      : hasRawTable || hasLargeStructuredData
+        ? 'A concise data overview is playing; full details remain in the chat.'
+        : 'A concise overview is playing; full details remain in the chat.',
   }
+}
+
+/**
+ * The explicit message action is the highest-fidelity narration path. It
+ * reads the full normal answer and only condenses material that is genuinely
+ * unsuitable for natural speech, such as code or a raw data table.
+ */
+export function createReadAloudPlan(content = '') {
+  return createNormalNarrationPlan(content, {
+    fullLimit: MAX_FULL_READ_ALOUD_LENGTH,
+    structuredLimit: MAX_FULL_READ_ALOUD_LENGTH,
+    fullMode: 'full-read-aloud',
+    fullNote: 'Reading the full response.',
+  })
+}
+
+/**
+ * A completed voice turn remains normal Chat, not a live-call shortcut. It
+ * therefore follows the same full-narration principle with a bounded but
+ * generous limit for comfortable day-to-day playback.
+ */
+export function createVoiceResponsePlan(content = '') {
+  return createNormalNarrationPlan(content, {
+    fullLimit: MAX_FULL_VOICE_RESPONSE_LENGTH,
+    structuredLimit: MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH,
+    fullMode: 'conversational',
+    fullNote: '',
+  })
 }
 
 /**

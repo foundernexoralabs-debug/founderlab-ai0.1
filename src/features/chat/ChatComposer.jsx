@@ -18,6 +18,7 @@ export function ChatComposer({
   onPendingImage,
   onVoiceStart,
   onVoiceFinish,
+  onVoicePrepare,
   voiceSession = null,
   voiceSessionActions = {},
   providerSwitcher,
@@ -98,15 +99,14 @@ export function ChatComposer({
     const heldToDictate = heldToDictateRef.current
     pointerIdRef.current = null
     heldToDictateRef.current = false
+    if (cancelled) return
     if (heldToDictate) {
-      if (!cancelled) onVoiceFinish()
+      onVoiceFinish()
       suppressVoiceClickRef.current = true
       return
     }
-    if (!cancelled) {
-      onVoiceStart()
-      suppressVoiceClickRef.current = true
-    }
+    onVoiceStart()
+    suppressVoiceClickRef.current = true
   }
 
   function beginVoicePointer(event) {
@@ -114,11 +114,14 @@ export function ChatComposer({
     pointerIdRef.current = event.pointerId
     heldToDictateRef.current = false
     try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch {}
+    // Start the permission/device preflight immediately, but keep the tap and
+    // hold interaction model stable. A quick release can begin recognition as
+    // soon as this preparation resolves instead of paying the full setup time.
+    void onVoicePrepare?.({ quiet: true })
     clearTimeout(holdTimerRef.current)
     holdTimerRef.current = setTimeout(() => {
       if (pointerIdRef.current !== event.pointerId) return
       heldToDictateRef.current = true
-      onVoiceStart()
     }, HOLD_TO_DICTATE_DELAY_MS)
   }
 

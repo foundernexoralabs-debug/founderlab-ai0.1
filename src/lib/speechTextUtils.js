@@ -86,6 +86,7 @@ export function getSpeechContentProfile(value = '') {
     hasReferences: referenceCount > 0,
     listItemCount,
     headingCount,
+    tableLineCount,
   }
 }
 

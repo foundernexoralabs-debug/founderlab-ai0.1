@@ -88,7 +88,9 @@ export function ChatMessage({
 }) {
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false)
   const [reaction, setReaction] = useState(null)
+  const [copied, setCopied] = useState(false)
   const voiceMenuRef = useRef(null)
+  const copiedTimerRef = useRef(null)
   const assistant = message.role === 'assistant'
   const provider = assistant ? getProviderPresentation(message.provider, message.model) : null
   const time = message.ts ? new Date(message.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
@@ -112,10 +114,19 @@ export function ChatMessage({
     }
   }, [voiceMenuOpen])
 
+  useEffect(() => () => clearTimeout(copiedTimerRef.current), [])
+
   function react(value) {
     const next = reaction === value ? null : value
     setReaction(next)
     onReact(message.id, next)
+  }
+
+  function copyMessage() {
+    onCopy(message.content)
+    setCopied(true)
+    clearTimeout(copiedTimerRef.current)
+    copiedTimerRef.current = setTimeout(() => setCopied(false), 1600)
   }
 
   return (
@@ -146,7 +157,7 @@ export function ChatMessage({
         {assistant && <ChatControlActions actions={controlActions} onAction={(action) => onControlAction?.(action, message)} />}
 
         <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 7, flexWrap: 'wrap' }}>
-          <ActionButton label="Copy" icon="⧉" onClick={() => onCopy(message.content)} />
+          <ActionButton label={copied ? 'Copied' : 'Copy'} icon={copied ? '✓' : '⧉'} active={copied} onClick={copyMessage} />
           {assistant ? <>
             <ActionButton label={ttsActive ? 'Stop reading' : 'Read aloud'} icon={ttsActive ? '■' : '◖'} active={ttsActive} onClick={() => onReadAloud(message)} />
             <div ref={voiceMenuRef} className="fl-chat-voice-control">

@@ -24,7 +24,9 @@ import {
 import { getExplicitSelfCorrection, isLikelyRestartExtension, normalizeFinalSpokenPhrase } from '../src/lib/conversationLanguage.js'
 import {
   createLiveCallResponsePlan,
+  createReadAloudPlan,
   createVoiceResponsePlan,
+  MAX_FULL_READ_ALOUD_LENGTH,
   MAX_FULL_VOICE_RESPONSE_LENGTH,
   MAX_LIVE_CALL_SPEECH_LENGTH,
   MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH,
@@ -221,7 +223,7 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'user', content: 'The investor launch.' },
   ])), /likely answer or correction/i)
   assert.deepEqual(CHAT_RESPONSE_OPTIONS, { maxTokens: 1500, temperature: 0.52 })
-  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 128, temperature: 0.42 })
+  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 112, temperature: 0.4 })
 })
 
 test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
@@ -333,7 +335,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
 
-test('Voice sessions read ordinary short and medium structured answers in full before using a summary', () => {
+test('Normal read-aloud and voice sessions preserve full ordinary answers before using a summary', () => {
   const short = createVoiceResponsePlan('Your investor update is ready. I tightened the opening and added a clear next step.')
   assert.equal(short.mode, 'conversational')
   assert.match(short.spokenText, /investor update/i)
@@ -348,7 +350,7 @@ test('Voice sessions read ordinary short and medium structured answers in full b
   assert.match(code.spokenText, /full code and details in the chat/i)
   assert.match(code.note, /full code remains/i)
 
-  const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(30))
+  const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(100))
   assert.equal(long.mode, 'summary')
   assert.equal(long.spokenText.length <= MAX_FULL_VOICE_RESPONSE_LENGTH, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
@@ -363,6 +365,19 @@ test('Voice sessions read ordinary short and medium structured answers in full b
   const mediumStructured = createVoiceResponsePlan(`## Working plan\n\n${Array.from({ length: 5 }, (_, index) => `- Helpful action ${index + 1} that keeps the launch moving`).join('\n')}`)
   assert.equal(mediumStructured.spokenText.length < MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH, true)
   assert.equal(mediumStructured.mode, 'conversational')
+
+  const normalReadAloud = createReadAloudPlan('## Clear plan\n\n' + Array.from({ length: 18 }, (_, index) => `- Useful point ${index + 1} that remains readable aloud`).join('\n'))
+  assert.equal(normalReadAloud.mode, 'full-read-aloud')
+  assert.equal(normalReadAloud.spokenText.includes('full breakdown in the chat'), false)
+  assert.equal(normalReadAloud.spokenText.length < MAX_FULL_READ_ALOUD_LENGTH, true)
+
+  const technicalReadAloud = createReadAloudPlan('Here is the implementation:\n```js\nconst answer = buildLaunchPlan()\n```')
+  assert.equal(technicalReadAloud.mode, 'code-summary')
+  assert.match(technicalReadAloud.spokenText, /full code and details in the chat/i)
+
+  const tableReadAloud = createReadAloudPlan('| Owner | Status |\n| --- | --- |\n| Ada | Ready |\n| Sam | Review |')
+  assert.equal(tableReadAloud.mode, 'data-summary')
+  assert.match(tableReadAloud.spokenText, /full table in the chat/i)
 })
 
 test('Speech playback chunks long narration without truncating its ending', () => {
@@ -437,7 +452,7 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.equal(simpleAnswer.mode, 'call-conversational')
   assert.match(simpleAnswer.spokenText, /audience/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
-  assert.match(getLiveCallSystemPrompt(), /one to four concise sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /one to three concise sentences/i)
   assert.match(getLiveCallSystemPrompt(), /next one or two steps/i)
 })
 
@@ -457,7 +472,7 @@ test('Live Call bounds context for faster turns without dropping the newest spok
   assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
   assert.equal(context.at(-1)?.source, 'voice')
   assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 6000, true)
-  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 128)
+  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 112)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -529,6 +544,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /ChatHistory/)
   assert.match(workspaceSource, /ChatConfirmDialog/)
   assert.match(workspaceSource, /createVoiceResponsePlan/)
+  assert.match(workspaceSource, /createReadAloudPlan/)
   assert.match(workspaceSource, /continueFromChat/)
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
@@ -559,6 +575,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.doesNotMatch(composerSource, /Live dictation is flowing/i)
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
+  assert.match(composerSource, /void onVoicePrepare\?\.\(\{ quiet: true \}\)/)
+  assert.match(composerSource, /onVoicePrepare/)
+  assert.match(recognitionSource, /microphonePreparationRef/)
+  assert.match(workspaceSource, /prepare: prepareVoiceInput/)
   assert.match(composerSource, /role="menu"/)
   assert.match(composerSource, /providerSwitcher/)
   assert.match(providerSwitcherSource, /Choose your AI/)
@@ -573,6 +593,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /Best available browser voice/)
   assert.match(messageSource, /getChatUserInitials/)
   assert.match(messageSource, /ChatControlActions/)
+  assert.match(messageSource, /copyMessage/)
+  assert.match(messageSource, /Copied/)
   assert.match(controlActionsSource, /Continue in FounderLab/)
   assert.match(controlActionsSource, /completedActions/)
   assert.match(controlActionsSource, /mountedRef/)
@@ -586,6 +608,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(voiceSessionSource, /Stop/)
   assert.match(voiceSessionSource, /End/)
   assert.match(voiceResponseSource, /full code and details in the chat/i)
+  assert.match(voiceResponseSource, /createReadAloudPlan/)
   assert.match(liveCallSource, /Live call/)
   assert.match(liveCallSource, /Live turns stay focused here/)
   assert.match(liveCallSource, /fl-chat-live-call-orb/)

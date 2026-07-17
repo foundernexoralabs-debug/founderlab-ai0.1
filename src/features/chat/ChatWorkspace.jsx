@@ -41,7 +41,7 @@ import {
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
-import { createLiveCallResponsePlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
+import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
 
 function uniqueMessageId() {
@@ -67,6 +67,7 @@ export function ChatWorkspace({ user }) {
   const [errorState, setErrorState] = useState(null)
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
+  const [playbackNote, setPlaybackNote] = useState('')
   const [voiceSession, setVoiceSession] = useState(EMPTY_VOICE_SESSION)
   const [liveCall, setLiveCall] = useState(EMPTY_LIVE_CALL)
   const [providerAvailability, setProviderAvailability] = useState(getProviderAvailability)
@@ -86,6 +87,7 @@ export function ChatWorkspace({ user }) {
 
   const {
     clearVoiceDraft,
+    prepare: prepareVoiceInput,
     voiceInputState,
     start: startRecognition,
     stop: stopRecognition,
@@ -268,6 +270,7 @@ export function ChatWorkspace({ user }) {
     }
     stopTTS()
     setActiveTTS(null)
+    setPlaybackNote('')
     voiceSessionRef.current = { active: true, starting: true, transcript: '', initialInput: input, finishRequested: false, cancelled: false }
     setVoiceSession({ phase: 'starting', transcript: '', note: '', error: '' })
     const started = await startRecognition((nextTranscript) => {
@@ -333,6 +336,7 @@ export function ChatWorkspace({ user }) {
     stopRecognition()
     clearVoiceDraft()
     setActiveTTS(null)
+    setPlaybackNote('')
     setVoiceSession(EMPTY_VOICE_SESSION)
   }
 
@@ -1052,11 +1056,21 @@ export function ChatWorkspace({ user }) {
     if (activeTTS === message.id) {
       stopTTS()
       setActiveTTS(null)
+      setPlaybackNote('')
       return
     }
     if (['starting', 'listening'].includes(voiceSession.phase)) cancelVoiceCapture({ quiet: true })
+    const plan = createReadAloudPlan(message.content)
+    if (!plan.spokenText) {
+      toast('There is no readable text in this response.', 'error')
+      return
+    }
     setActiveTTS(message.id)
-    Promise.resolve(speak(message.content)).finally(() => setActiveTTS((current) => current === message.id ? null : current))
+    setPlaybackNote(plan.note || 'Reading aloud.')
+    Promise.resolve(speak(plan.spokenText)).finally(() => {
+      setActiveTTS((current) => current === message.id ? null : current)
+      setPlaybackNote('')
+    })
   }
 
   function changeVoiceConfig(change) {
@@ -1127,8 +1141,8 @@ export function ChatWorkspace({ user }) {
         {activeTTS && speaking && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && (
           <div className="fl-chat-playback-dock" role="status" aria-live="polite">
             <span aria-hidden="true" className="fl-chat-playback-wave">◌</span>
-            <span style={{ flex: 1, minWidth: 0 }}>Reading aloud · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'System voice' : 'Starting playback'} · {getVoiceSpeedLabel(voiceConfig.speed)}</span>
-            <button type="button" onClick={() => { stopTTS(); setActiveTTS(null) }}>Stop</button>
+            <span style={{ flex: 1, minWidth: 0 }}>{playbackNote || 'Reading aloud.'} · {activeVoiceProvider === 'elevenlabs' ? 'ElevenLabs voice' : activeVoiceProvider === 'browser' ? 'System voice' : 'Starting playback'} · {getVoiceSpeedLabel(voiceConfig.speed)}</span>
+            <button type="button" onClick={() => { stopTTS(); setActiveTTS(null); setPlaybackNote('') }}>Stop</button>
           </div>
         )}
 
@@ -1191,6 +1205,7 @@ export function ChatWorkspace({ user }) {
               onEditDraft: editVoiceDraft,
             }}
             onVoiceStart={startVoiceSession}
+            onVoicePrepare={prepareVoiceInput}
             onVoiceFinish={finishVoiceCapture}
             providerSwitcher={<ChatProviderSwitcher
               provider={selectedProvider}
