@@ -385,6 +385,38 @@ test('Local coding-model format failures remain bounded and explain the local st
   assert.equal(calls, 2)
 })
 
+test('Local Qwen Coder generation recovers the first file when the model writes raw unescaped newlines/quotes inside the JSON content string instead of failing with OLLAMA_STRUCTURED_OUTPUT_INVALID', async () => {
+  const manifest = createLandingPageManifest()
+  const calls = []
+  // Reproduces the exact reported failure: a small local model asked for
+  // {"path":"index.html","content":"..."} writes real HTML with literal
+  // newlines and an unescaped attribute quote inside the content string
+  // instead of properly escaping them — syntactically invalid JSON, but the
+  // real file content is fully present and recoverable.
+  const malformedIndexHtml = '{"path":"index.html","content":"<!DOCTYPE html>\n<html>\n<body><h1 class="hero">Welcome</h1></body>\n</html>"}'
+  const responses = [
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: malformedIndexHtml },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"styles.css","content":"body { margin: 0; }"}' },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"app.js","content":"document.body.dataset.ready = \\"true\\""}' },
+  ]
+  const service = createBuilderGenerationService({ request: async (input) => { calls.push(input); return responses.shift() } })
+  const generated = await service.continueMissingFiles({
+    brief: 'Build a meeting-notes website',
+    plan: { name: 'Minutes', summary: 'Notes', pages: [{ path: 'index.html' }] },
+    manifest,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+  })
+  assert.equal(generated.files.length, 3)
+  // Exactly one call per file — the malformed-but-recoverable response must
+  // not consume the local format-retry budget, since it was recovered, not
+  // failed.
+  assert.equal(calls.length, 3)
+  const indexFile = generated.files.find((file) => file.path === 'index.html')
+  assert.ok(indexFile.content.includes('<h1 class="hero">Welcome</h1>'))
+  assert.ok(indexFile.content.includes('\n'))
+})
+
 test('Builder edits retain the project generation provider and model instead of drifting to a later Settings choice', async () => {
   const requests = []
   const project = appendBuilderVersion({

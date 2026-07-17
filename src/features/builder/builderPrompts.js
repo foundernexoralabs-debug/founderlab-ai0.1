@@ -305,3 +305,60 @@ export class BuilderFormatError extends Error {
     this.code = 'GENERATION_FORMAT_ERROR'
   }
 }
+
+function unescapeJsonStringBody(body) {
+  // Best-effort unescape for a JSON string body that may contain a mix of
+  // valid \" \\ \n \t escapes AND raw, unescaped control characters — the
+  // known failure mode of small local coding models producing a long HTML
+  // string under Ollama's grammar-constrained JSON mode. Valid escapes are
+  // honored; anything else is passed through literally rather than
+  // rejected, since the source text is already known to be non-standard.
+  let out = ''
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i]
+    if (ch === '\\' && i + 1 < body.length) {
+      const next = body[i + 1]
+      const map = { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f' }
+      if (map[next] !== undefined) { out += map[next]; i += 1; continue }
+      if (next === 'u' && i + 5 < body.length) {
+        const hex = body.slice(i + 2, i + 6)
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 5; continue }
+      }
+    }
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Recovers a single-file {"path":"...","content":"..."} response even when
+ * a local coding model produced imperfect JSON: raw unescaped newlines or
+ * quotes inside the content string (very common when a small model writes
+ * long HTML/CSS as an escaped JSON string), or an unterminated final string
+ * when it ran out of output budget mid-content. Only ever used as a
+ * fallback after strict JSON parsing already failed for the known
+ * single-file shape, so it cannot change behavior for any response that
+ * already parses correctly.
+ */
+export function recoverBuilderFileJson(text, expectedPath) {
+  if (typeof text !== 'string' || !text.trim()) return null
+  const contentKeyMatch = text.match(/"content"\s*:\s*"/)
+  if (!contentKeyMatch) return null
+  const bodyStart = contentKeyMatch.index + contentKeyMatch[0].length
+  // Scan forward for the closing quote of the content string: an unescaped
+  // `"` followed (allowing whitespace) by `}` is the normal well-formed
+  // end. If none exists — the model ran out of tokens mid-string — fall
+  // back to treating the remainder of the response as the content.
+  let end = -1
+  for (let i = bodyStart; i < text.length; i += 1) {
+    if (text[i] === '\\') { i += 1; continue }
+    if (text[i] === '"') {
+      const rest = text.slice(i + 1).trimStart()
+      if (rest.startsWith('}') || rest.length === 0) { end = i; break }
+    }
+  }
+  const raw = end >= 0 ? text.slice(bodyStart, end) : text.slice(bodyStart).replace(/\\+$/, '')
+  const content = unescapeJsonStringBody(raw).trim()
+  if (!content) return null
+  return { path: expectedPath, content }
+}

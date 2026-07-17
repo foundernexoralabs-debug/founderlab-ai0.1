@@ -1,6 +1,6 @@
 import { requestCodeGenerationAI } from '../../services/aiProviderService.js'
 import { createBuilderProject, normalizeBuilderFile } from './builderProjectSchema.js'
-import { buildBuilderFilePrompt, buildBuilderFilesPrompt, buildBuilderManifestPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, BuilderFormatError, canUseLandingPageManifest, createLandingPageManifest, normalizeBuilderPlan, parseStrictBuilderJson } from './builderPrompts.js'
+import { buildBuilderFilePrompt, buildBuilderFilesPrompt, buildBuilderManifestPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, BuilderFormatError, canUseLandingPageManifest, createLandingPageManifest, normalizeBuilderPlan, parseStrictBuilderJson, recoverBuilderFileJson } from './builderPrompts.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest, validateBuilderPatch } from './builderValidation.js'
 import { appendBuilderVersion } from './builderVersions.js'
 
@@ -94,12 +94,13 @@ function structuredFailure(error, { provider, label } = {}) {
 }
 
 export function createBuilderGenerationService({ request = requestCodeGenerationAI } = {}) {
-  async function requestJson({ prompt, maxTokens, signal, label, provider, model, retries = 1, onRetry }) {
+  async function requestJson({ prompt, maxTokens, signal, label, provider, model, retries = 1, onRetry, recover }) {
     let lastFailure = null
     for (let attempt = 0; attempt <= retries; attempt += 1) {
+      let result
       try {
         if (signal?.aborted) throw new BuilderGenerationError('CANCELLED', 'Generation was cancelled.', { retryable: false })
-        const result = requireResult(await request({
+        result = requireResult(await request({
           ...(provider ? { provider } : {}),
           ...(model ? { model } : {}),
           messages: [{ role: 'user', content: prompt }],
@@ -117,6 +118,15 @@ export function createBuilderGenerationService({ request = requestCodeGeneration
         }
         return { value: parseStrictBuilderJson(result.text, label), result }
       } catch (error) {
+        // Small local coding models occasionally produce almost-valid JSON
+        // for the single-file shape (raw unescaped characters in a long
+        // HTML/CSS string, or an unterminated string when they run out of
+        // budget). Recover the file directly from the raw text instead of
+        // discarding a response that already contains the real content.
+        if (error instanceof BuilderFormatError && typeof recover === 'function' && result?.text) {
+          const recovered = recover(result.text)
+          if (recovered) return { value: recovered, result }
+        }
         const failure = structuredFailure(error, { provider, label })
         lastFailure = failure
         if (attempt >= retries || !shouldRetryGeneration(failure)) break
@@ -155,6 +165,7 @@ export function createBuilderGenerationService({ request = requestCodeGeneration
           // ever creating a hidden generation loop. Gemini retains its
           // provider-specific truncation retry below.
           retries: isLocalCodeGeneration ? 1 : 0,
+          recover: isLocalCodeGeneration ? (text) => recoverBuilderFileJson(text, file.path) : undefined,
         })
         let response
         try {
@@ -167,7 +178,14 @@ export function createBuilderGenerationService({ request = requestCodeGeneration
           response = await requestFile(retryMaxTokens)
         }
         const record = response.value
-        if (record?.path !== file.path || typeof record.content !== 'string' || !record.content.trim()) {
+        // The file's path is already authoritatively known from the manifest
+        // (it's what gets stored below, regardless of what the model echoes
+        // back) — so for local models, which are considerably less reliable
+        // at exactly repeating a JSON key's value verbatim, don't reject an
+        // otherwise-valid file purely because the echoed path didn't match.
+        const pathValid = isLocalCodeGeneration ? true : record?.path === file.path
+        const contentValid = typeof record?.content === 'string' && record.content.trim().length > 0
+        if (!pathValid || !contentValid) {
           throw new BuilderGenerationError(
             isLocalCodeGeneration ? 'OLLAMA_STRUCTURED_OUTPUT_INVALID' : 'GEMINI_STRUCTURED_OUTPUT_INVALID',
             `${isLocalCodeGeneration ? 'The selected local coding model' : 'Gemini'} returned an invalid structured file for ${file.path}.`,
