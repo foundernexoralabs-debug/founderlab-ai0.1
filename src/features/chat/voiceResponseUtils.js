@@ -1,8 +1,10 @@
 import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTextUtils.js'
 
-// Long uninterrupted narration gets tiring. Preserve full detail visually,
-// but keep spoken responses at a natural conversational turn length.
-const MAX_CONVERSATIONAL_SPEECH_LENGTH = 460
+// A response with ordinary bullets, headings, or a link can still be brief
+// enough to hear in full. Only genuinely long or code-heavy content needs a
+// spoken overview; otherwise voice feels as if it stops before it is useful.
+export const MAX_FULL_VOICE_RESPONSE_LENGTH = 1100
+export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 900
 export const MAX_LIVE_CALL_SPEECH_LENGTH = 220
 
 /** Keep the active call in the present instead of deferring useful help. */
@@ -13,7 +15,7 @@ export function normalizeLiveCallResponseText(value = '') {
     .trim()
 }
 
-function shortenAtSentence(text, limit = MAX_CONVERSATIONAL_SPEECH_LENGTH) {
+function shortenAtSentence(text, limit = MAX_FULL_VOICE_RESPONSE_LENGTH) {
   if (text.length <= limit) return text
   const clipped = text.slice(0, limit + 1)
   const boundary = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('? '), clipped.lastIndexOf('! '))
@@ -63,7 +65,9 @@ export function createVoiceResponsePlan(content = '') {
     }
   }
 
-  const needsOverview = hasCode || hasStructuredContent || hasReferences || spokenBase.length > MAX_CONVERSATIONAL_SPEECH_LENGTH
+  const needsOverview = hasCode
+    || spokenBase.length > MAX_FULL_VOICE_RESPONSE_LENGTH
+    || ((hasStructuredContent || hasReferences) && spokenBase.length > MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH)
   if (!needsOverview) {
     return { spokenText: spokenBase, mode: 'conversational', note: '' }
   }
@@ -71,7 +75,7 @@ export function createVoiceResponsePlan(content = '') {
   const suffix = hasCode
     ? ' I’ve kept the full code and details in the chat for you.'
     : ' I’ve kept the full breakdown in the chat for you.'
-  const summaryLimit = Math.max(180, MAX_CONVERSATIONAL_SPEECH_LENGTH - suffix.length)
+  const summaryLimit = Math.max(260, MAX_FULL_VOICE_RESPONSE_LENGTH - suffix.length)
   const overview = hasStructuredContent
     ? createStructuredOverview(source, spokenBase, summaryLimit)
     : shortenAtSentence(spokenBase, summaryLimit)
@@ -102,7 +106,7 @@ export function createLiveCallResponsePlan(content = '') {
     }
   }
 
-  const needsSummary = profile.hasCode || profile.hasStructuredContent || profile.hasReferences || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
+  const needsSummary = profile.hasCode || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
   const suffix = needsSummary ? ' I can expand on any part of that.' : ''
   const limit = Math.max(150, MAX_LIVE_CALL_SPEECH_LENGTH - suffix.length)
   const overview = profile.hasStructuredContent

@@ -29,6 +29,7 @@ export function useSpeechRecognition() {
   const protectedSegmentCountRef = useRef(0)
   const onUpdateRef = useRef(null)
   const lastPublishedTranscriptRef = useRef('')
+  const microphonePermissionReadyRef = useRef(false)
 
   const stop = useCallback(() => {
     // Invalidate both an active recognition instance and a microphone
@@ -62,14 +63,20 @@ export function useSpeechRecognition() {
     if (desiredRef.current) return true
 
     const session = ++sessionRef.current
-    let stream
-    try {
-      stream = await getMicrophoneStream()
-    } catch (error) {
-      toast(error.message, 'error')
-      return false
+    if (!microphonePermissionReadyRef.current) {
+      let stream
+      try {
+        stream = await getMicrophoneStream()
+      } catch (error) {
+        toast(error.message, 'error')
+        return false
+      }
+      stream.getTracks().forEach((track) => track.stop())
+      // The first preflight captures the browser permission. Later turns can
+      // start recognition immediately instead of waiting on another
+      // getUserMedia round-trip before the listening state appears.
+      microphonePermissionReadyRef.current = true
     }
-    stream.getTracks().forEach((track) => track.stop())
     if (session !== sessionRef.current) return false
 
     desiredRef.current = true
@@ -151,6 +158,9 @@ export function useSpeechRecognition() {
         if (lastError === 'no-speech') return
         if (lastError === 'aborted' && !desiredRef.current) return
         if (lastError) {
+          if (['not-allowed', 'audio-capture', 'service-not-allowed'].includes(lastError)) {
+            microphonePermissionReadyRef.current = false
+          }
           desiredRef.current = false
           setListening(false)
           setVoiceInputState('error')

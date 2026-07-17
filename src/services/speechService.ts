@@ -4,6 +4,7 @@
  * API keys never touch the frontend — the proxy reads process.env server-side.
  */
 import { VoiceConfig, pickBrowserVoice, cleanForSpeech } from '@/lib/voiceService'
+import { splitSpeechForPlayback } from '@/lib/speechTextUtils'
 import { authenticatedFetch } from '@/services/authenticatedFetch'
 
 let _browserVoices: SpeechSynthesisVoice[] = []
@@ -48,15 +49,15 @@ export async function synthesizeSpeech(config: VoiceConfig, text: string): Promi
   const generation = ++playbackGeneration
 
   if (config.provider === 'elevenlabs') {
-    const ok = await speakElevenLabs(config, clean)
+    const result = await speakElevenLabs(config, clean, generation)
     // An explicit stop or a newer response must not be misclassified as a
     // provider fallback and start browser speech after the user pressed Stop.
     if (generation !== playbackGeneration) return null
-    if (ok) return 'elevenlabs'
+    if (result === 'complete' || result === 'partial') return 'elevenlabs'
     // ElevenLabs failed (no key, quota, network) — fall through to browser
   }
   if (generation !== playbackGeneration) return null
-  await speakBrowser(config, clean)
+  await speakBrowser(config, clean, generation)
   if (generation !== playbackGeneration) return null
   return 'browser'
 }
@@ -67,19 +68,40 @@ export function stopSpeech(): void {
   window.speechSynthesis?.cancel()
 }
 
-async function speakElevenLabs(config: VoiceConfig, text: string): Promise<boolean> {
+type PlaybackResult = 'complete' | 'partial' | 'unavailable' | 'stopped'
+
+async function speakElevenLabs(config: VoiceConfig, text: string, generation: number): Promise<PlaybackResult> {
+  const chunks = splitSpeechForPlayback(text)
+  let playedChunk = false
+  for (const chunk of chunks) {
+    if (generation !== playbackGeneration) return 'stopped'
+    const result = await speakElevenLabsChunk(config, chunk, generation)
+    if (result === 'complete') {
+      playedChunk = true
+      continue
+    }
+    if (result === 'stopped') return 'stopped'
+    // Avoid replaying an already heard opening with a browser fallback when a
+    // later enhanced-voice chunk has a transient failure.
+    return playedChunk ? 'partial' : 'unavailable'
+  }
+  return playedChunk ? 'complete' : 'unavailable'
+}
+
+async function speakElevenLabsChunk(config: VoiceConfig, text: string, generation: number): Promise<'complete' | 'unavailable' | 'stopped'> {
   try {
     const r = await authenticatedFetch('/api/tts', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ text: text.slice(0, 2500), gender: config.gender }),
+      body:    JSON.stringify({ text, gender: config.gender }),
     })
+    if (generation !== playbackGeneration) return 'stopped'
     const ct = r.headers.get('Content-Type') || ''
-    if (!ct.includes('audio')) return false   // got JSON fallback response
+    if (!ct.includes('audio')) return 'unavailable' // got JSON fallback response
     const blob = await r.blob()
-    if (!blob.size) return false
+    if (!blob.size) return 'unavailable'
     const url = URL.createObjectURL(blob)
-    return new Promise(resolve => {
+    return new Promise<'complete' | 'unavailable' | 'stopped'>(resolve => {
       releaseActiveAudio()?.(false)
       const audio = new Audio(url)
       activeAudio = audio
@@ -88,15 +110,23 @@ async function speakElevenLabs(config: VoiceConfig, text: string): Promise<boole
       const complete = (ok: boolean) => {
         if (activeAudio === audio) releaseActiveAudio()?.(ok)
       }
-      activeAudioFinish = resolve
+      activeAudioFinish = (completed) => resolve(completed ? 'complete' : generation !== playbackGeneration ? 'stopped' : 'unavailable')
       audio.onended = () => complete(true)
       audio.onerror = () => complete(false)
       audio.play().catch(() => complete(false))
     })
-  } catch { return false }
+  } catch { return generation !== playbackGeneration ? 'stopped' : 'unavailable' }
 }
 
-function speakBrowser(config: VoiceConfig, text: string): Promise<void> {
+async function speakBrowser(config: VoiceConfig, text: string, generation: number): Promise<void> {
+  const chunks = splitSpeechForPlayback(text)
+  for (const chunk of chunks) {
+    if (generation !== playbackGeneration) return
+    await speakBrowserChunk(config, chunk)
+  }
+}
+
+function speakBrowserChunk(config: VoiceConfig, text: string): Promise<void> {
   return new Promise(resolve => {
     const synth = window.speechSynthesis
     if (!synth) { resolve(); return }

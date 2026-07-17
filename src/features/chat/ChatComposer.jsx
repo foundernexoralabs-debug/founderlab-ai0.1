@@ -4,7 +4,9 @@ import { toast } from '@/app/toast'
 import { ACCEPTED_IMAGE_TYPES, fileToBase64 } from '@/lib/files'
 import { ChatVoiceSession } from './ChatVoiceSession'
 
-const HOLD_TO_DICTATE_DELAY_MS = 180
+// A shorter hold threshold begins microphone preparation sooner while keeping
+// an intentional tap distinct from a hold-to-talk turn.
+const HOLD_TO_DICTATE_DELAY_MS = 120
 
 export function ChatComposer({
   input,

@@ -16,12 +16,18 @@ import {
   isNearConversationBottom,
 } from '../src/features/chat/useConversationScroll.js'
 import { getVoiceSpeedLabel, normalizeVoiceConfig, VOICE_SPEED_OPTIONS } from '../src/lib/voicePreferencesUtils.js'
-import { cleanTextForSpeech } from '../src/lib/speechTextUtils.js'
+import {
+  cleanTextForSpeech,
+  MAX_SPEECH_PLAYBACK_CHUNK_LENGTH,
+  splitSpeechForPlayback,
+} from '../src/lib/speechTextUtils.js'
 import { getExplicitSelfCorrection, isLikelyRestartExtension, normalizeFinalSpokenPhrase } from '../src/lib/conversationLanguage.js'
 import {
   createLiveCallResponsePlan,
   createVoiceResponsePlan,
+  MAX_FULL_VOICE_RESPONSE_LENGTH,
   MAX_LIVE_CALL_SPEECH_LENGTH,
+  MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH,
   normalizeLiveCallResponseText,
 } from '../src/features/chat/voiceResponseUtils.js'
 import {
@@ -192,6 +198,7 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
   assert.match(CHAT_SYSTEM_PROMPT, /another version of the same question/i)
   assert.match(CHAT_SYSTEM_PROMPT, /low-risk assumption/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /silently use it/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /dating/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /without a blanket refusal/i)
   assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
@@ -326,7 +333,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
 
-test('Voice sessions keep short answers conversational while preserving dense details and code in Chat', () => {
+test('Voice sessions read ordinary short and medium structured answers in full before using a summary', () => {
   const short = createVoiceResponsePlan('Your investor update is ready. I tightened the opening and added a clear next step.')
   assert.equal(short.mode, 'conversational')
   assert.match(short.spokenText, /investor update/i)
@@ -343,20 +350,34 @@ test('Voice sessions keep short answers conversational while preserving dense de
 
   const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(30))
   assert.equal(long.mode, 'summary')
-  assert.equal(long.spokenText.length <= 500, true)
+  assert.equal(long.spokenText.length <= MAX_FULL_VOICE_RESPONSE_LENGTH, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
 
   const structured = createVoiceResponsePlan('## Launch plan\n\n- Clarify the customer promise\n- Test the onboarding flow\n- Measure conversion before scaling\n\n[Research](https://example.com/research)')
-  assert.equal(structured.mode, 'structured-summary')
-  assert.match(structured.spokenText, /Here’s the short version/i)
-  assert.match(structured.spokenText, /First, clarify the customer promise/i)
+  assert.equal(structured.mode, 'conversational')
+  assert.match(structured.spokenText, /Clarify the customer promise/i)
+  assert.match(structured.spokenText, /Measure conversion before scaling/i)
   assert.equal(structured.spokenText.includes('https://'), false)
-  assert.match(structured.spokenText, /full breakdown in the chat/i)
+  assert.equal(structured.spokenText.includes('full breakdown in the chat'), false)
+
+  const mediumStructured = createVoiceResponsePlan(`## Working plan\n\n${Array.from({ length: 5 }, (_, index) => `- Helpful action ${index + 1} that keeps the launch moving`).join('\n')}`)
+  assert.equal(mediumStructured.spokenText.length < MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH, true)
+  assert.equal(mediumStructured.mode, 'conversational')
+})
+
+test('Speech playback chunks long narration without truncating its ending', () => {
+  const source = `${'A useful sentence for a founder. '.repeat(120)}The final recommendation must remain audible.`.trim()
+  const chunks = splitSpeechForPlayback(source, 420)
+  assert.equal(chunks.length > 1, true)
+  assert.equal(chunks.every((chunk) => chunk.length <= 420), true)
+  assert.match(chunks.at(-1), /final recommendation must remain audible/i)
+  assert.equal(splitSpeechForPlayback('Short answer.').length, 1)
+  assert.equal(MAX_SPEECH_PLAYBACK_CHUNK_LENGTH >= 1200, true)
 })
 
 test('Live Call uses one bounded turn model and accurately describes local and cloud provider support', () => {
   assert.equal(EMPTY_LIVE_CALL.phase, 'idle')
-  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 400 && LIVE_CALL_TURN_DELAY_MS <= 500, true)
+  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 350 && LIVE_CALL_TURN_DELAY_MS <= 450, true)
   assert.equal(getLiveCallTurnDelay('Help me shape the launch message.'), LIVE_CALL_TURN_DELAY_MS)
   assert.equal(getLiveCallTurnDelay('Hmm'), LIVE_CALL_SHORT_TURN_DELAY_MS)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: 'Help me plan a launch.' }), true)
@@ -417,6 +438,7 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.match(simpleAnswer.spokenText, /audience/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
   assert.match(getLiveCallSystemPrompt(), /one to four concise sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /next one or two steps/i)
 })
 
 test('Live Call bounds context for faster turns without dropping the newest spoken request', () => {
@@ -430,11 +452,11 @@ test('Live Call bounds context for faster turns without dropping the newest spok
     ...(index === 9 ? { source: 'voice' } : {}),
   }))
   const context = buildLiveCallRequestContext(history, liveTurns)
-  assert.equal(context.length <= 14, true)
+  assert.equal(context.length <= 10, true)
   assert.equal(context.some((message) => message.content === 'Saved context 0'), false)
   assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
   assert.equal(context.at(-1)?.source, 'voice')
-  assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 9000, true)
+  assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 6000, true)
   assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 128)
 })
 
@@ -596,10 +618,15 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(recognitionSource, /sessionRef\.current \+= 1/)
   assert.match(recognitionSource, /VOICE_INPUT_RESTART_DELAY_MS/)
   assert.match(recognitionSource, /lastPublishedTranscriptRef/)
+  assert.match(recognitionSource, /microphonePermissionReadyRef/)
+  assert.match(recognitionSource, /getUserMedia round-trip/)
+  assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS = 120/)
   assert.match(speechSource, /let activeAudio/)
   assert.match(speechSource, /releaseActiveAudio\(\)\?\.\(false\)/)
   assert.match(speechSource, /let playbackGeneration = 0/)
   assert.match(speechSource, /generation !== playbackGeneration/)
+  assert.match(speechSource, /splitSpeechForPlayback/)
+  assert.doesNotMatch(speechSource, /text\.slice\(0, 2500\)/)
   assert.match(css, /height: 100dvh/)
   assert.match(css, /scrollbar-gutter: stable/)
   assert.match(css, /fl-chat-voice-popover/)

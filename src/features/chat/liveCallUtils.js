@@ -1,13 +1,13 @@
 // A browser final result already represents a meaningful pause. Keep only a
 // short guard window so FounderLab feels responsive without sending a phrase
 // while the caller is still correcting a very short fragment.
-export const LIVE_CALL_TURN_DELAY_MS = 450
-export const LIVE_CALL_SHORT_TURN_DELAY_MS = 700
+export const LIVE_CALL_TURN_DELAY_MS = 400
+export const LIVE_CALL_SHORT_TURN_DELAY_MS = 640
 export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
-export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 6
-export const LIVE_CALL_TURN_CONTEXT_LIMIT = 8
-export const LIVE_CALL_CONTEXT_CHARACTER_LIMIT = 9000
+export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 4
+export const LIVE_CALL_TURN_CONTEXT_LIMIT = 6
+export const LIVE_CALL_CONTEXT_CHARACTER_LIMIT = 6000
 export const LIVE_CALL_MAX_OUTPUT_TOKENS = 160
 
 /**

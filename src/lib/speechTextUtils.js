@@ -7,6 +7,64 @@ function stripCodeBlocks(value = '') {
   return { text, containedCode }
 }
 
+// ElevenLabs and browser speech engines are more reliable with sentence-sized
+// requests. Keep every character in the audible answer while avoiding a
+// single oversized payload being silently truncated by a provider or engine.
+export const MAX_SPEECH_PLAYBACK_CHUNK_LENGTH = 1800
+
+function splitLongSpeechSegment(value, limit) {
+  const chunks = []
+  let remaining = value.trim()
+  while (remaining.length > limit) {
+    const boundary = Math.max(
+      remaining.lastIndexOf(' ', limit),
+      remaining.lastIndexOf(',', limit),
+      remaining.lastIndexOf(';', limit),
+    )
+    const end = boundary > Math.floor(limit * 0.55) ? boundary : limit
+    chunks.push(remaining.slice(0, end).trim())
+    remaining = remaining.slice(end).trim()
+  }
+  if (remaining) chunks.push(remaining)
+  return chunks
+}
+
+/**
+ * Split natural narration without dropping its tail. The returned chunks are
+ * independently safe for the server TTS request and browser synthesis.
+ */
+export function splitSpeechForPlayback(value = '', limit = MAX_SPEECH_PLAYBACK_CHUNK_LENGTH) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  const safeLimit = Number.isFinite(limit) ? Math.max(240, Math.floor(limit)) : MAX_SPEECH_PLAYBACK_CHUNK_LENGTH
+  if (!text) return []
+  if (text.length <= safeLimit) return [text]
+
+  const sentences = text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text]
+  const chunks = []
+  let current = ''
+  for (const rawSentence of sentences) {
+    const sentence = rawSentence.trim()
+    if (!sentence) continue
+    if (sentence.length > safeLimit) {
+      if (current) {
+        chunks.push(current)
+        current = ''
+      }
+      chunks.push(...splitLongSpeechSegment(sentence, safeLimit))
+      continue
+    }
+    const next = current ? `${current} ${sentence}` : sentence
+    if (next.length > safeLimit && current) {
+      chunks.push(current)
+      current = sentence
+      continue
+    }
+    current = next
+  }
+  if (current) chunks.push(current)
+  return chunks
+}
+
 /**
  * Identify content that should be presented as a compact spoken overview.
  * The saved message is never changed: this profile only guides narration.
