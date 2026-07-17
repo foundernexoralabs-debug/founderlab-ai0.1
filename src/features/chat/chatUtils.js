@@ -48,32 +48,55 @@ export const CHAT_CONTROL_CENTER_PROMPT = `FounderLab workflow guidance:
 
 export const LIVE_CALL_SYSTEM_PROMPT = `Live-call response rules:
 - You are speaking in a real-time FounderLab voice call, not drafting a text-chat essay.
-- Respond naturally in one to three concise sentences and roughly 35–85 spoken words by default. Answer the useful part now; do not describe what you would do later instead of doing it in this turn.
+- Respond naturally in two to four concise sentences and roughly 55–125 spoken words by default. Give a direct answer first, then the most useful reason, example, or next move. Answer the useful part now; do not describe what you would do later instead of doing it in this turn.
 - Do not use Markdown, headings, long lists, tables, citations, or code blocks in a live reply. Do not narrate formatting.
-- If the user asks for a broad, technical, or multi-step answer, give the useful spoken recommendation plus the next one or two steps in this call. Offer to expand on one concrete part only after answering. Do not defer useful help until after the call, mention a future text answer, or deliver a long written plan aloud.
+- If the user asks for a broad, technical, or multi-step answer, give the useful spoken recommendation, why it matters, and the next one or two steps in this call. Be concise without becoming vague, empty, or overly cautious. Do not defer useful help until after the call, mention a future text answer, or deliver a long written plan aloud.
 - Preserve the conversation-intelligence rules above: resolve likely harmless transcription noise from context, respect a later self-correction, and ask one short clarification only when it is genuinely needed.`
 
 export function hasExplicitSelfCorrection(value) {
   return hasExplicitSelfCorrectionPhrase(value)
 }
 
+/**
+ * Give every provider the same small, explicit response target. This is
+ * deliberately guidance, not a rigid response template: the assistant can
+ * still respond naturally while avoiding both book-length answers and thin,
+ * over-cautious replies.
+ */
+export function getChatResponseGuidance(value = '', intent = null) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  const wordCount = text ? text.split(/\s+/).length : 0
+  if (intent?.requiresPlan) {
+    return 'Use a compact plan: lead with the recommendation or outcome, then give two to four concrete steps and the clearest next action. Infer ordinary low-risk details instead of asking for permission.'
+  }
+  if (/\b(?:how do i|how can i|steps?|plan|strategy|compare|choose|review|improve|help me|should i)\b/i.test(text)) {
+    return 'Give a direct recommendation first, then a short actionable explanation. Use bullets only when they make the next actions easier to scan.'
+  }
+  if (wordCount > 42 || /[?]$/.test(text)) {
+    return 'Answer the core question directly in natural prose. Add only the amount of structure needed to make the answer easier to use.'
+  }
+  return 'Keep this conversational and complete: answer directly in one to three natural sentences unless a short list clearly helps.'
+}
+
 export function getChatRequestContext(messages) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest('') }
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest(''), responseGuidance: getChatResponseGuidance('') }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
+  const intent = classifyChatRequest(latestUser?.content)
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
     latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
     followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
-    intent: classifyChatRequest(latestUser?.content),
+    intent,
+    responseGuidance: getChatResponseGuidance(latestUser?.content, intent),
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '' } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -87,6 +110,9 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   const intentGuidance = getChatIntentGuidance(intent)
   if (intentGuidance) {
     notes.push(`Current request capability note: ${intentGuidance}`)
+  }
+  if (responseGuidance) {
+    notes.push(`Current response-shape note: ${responseGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt

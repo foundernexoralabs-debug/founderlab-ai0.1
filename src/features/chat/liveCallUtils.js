@@ -6,12 +6,15 @@
 // leaving a tiny fragment enough room for a correction.
 export const LIVE_CALL_TURN_DELAY_MS = 300
 export const LIVE_CALL_SHORT_TURN_DELAY_MS = 560
-export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
+// A live answer should be concise, not underpowered. This supports a useful
+// recommendation plus a reason and next move without turning a call into a
+// read-aloud session.
+export const LIVE_CALL_MAX_SPOKEN_LENGTH = 540
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
 export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 4
 export const LIVE_CALL_TURN_CONTEXT_LIMIT = 6
 export const LIVE_CALL_CONTEXT_CHARACTER_LIMIT = 6000
-export const LIVE_CALL_MAX_OUTPUT_TOKENS = 112
+export const LIVE_CALL_MAX_OUTPUT_TOKENS = 190
 
 /**
  * A Live Call is a focused state machine, separate from text-chat composing.
@@ -47,7 +50,7 @@ export const LIVE_CALL_COPY = Object.freeze({
   connecting: Object.freeze({ title: 'Connecting', detail: 'Preparing your microphone.' }),
   ready: Object.freeze({ title: 'Ready', detail: 'Your live call is ready when you are.' }),
   listening: Object.freeze({ title: 'Listening', detail: 'Speak naturally. FounderLab will take the next turn after a short pause.' }),
-  thinking: Object.freeze({ title: 'Thinking', detail: 'Preparing a concise answer.' }),
+  thinking: Object.freeze({ title: 'Thinking', detail: 'Preparing a useful answer.' }),
   speaking: Object.freeze({ title: 'Responding', detail: 'Speak to interrupt, or stop the response at any time.' }),
   interrupted: Object.freeze({ title: 'I’m listening', detail: 'FounderLab paused so you can continue.' }),
   muted: Object.freeze({ title: 'Mic muted', detail: 'Unmute when you are ready to continue.' }),

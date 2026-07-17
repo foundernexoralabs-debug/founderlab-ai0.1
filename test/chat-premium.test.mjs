@@ -79,6 +79,7 @@ import {
   getChatDestructiveActionCopy,
   getChatErrorPresentation,
   getChatRequestContext,
+  getChatResponseGuidance,
   getChatSystemPrompt,
   getLiveCallSystemPrompt,
   hasExplicitSelfCorrection,
@@ -234,7 +235,16 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'user', content: 'The investor launch.' },
   ])), /likely answer or correction/i)
   assert.deepEqual(CHAT_RESPONSE_OPTIONS, { maxTokens: 1500, temperature: 0.52 })
-  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 112, temperature: 0.4 })
+  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 190, temperature: 0.4 })
+})
+
+test('Chat gives providers adaptive response-shape guidance without forcing every request into one template', () => {
+  assert.match(getChatResponseGuidance('What is a concise positioning statement?'), /direct recommendation|core question/i)
+  assert.match(getChatResponseGuidance('Help me improve our onboarding strategy.'), /actionable explanation/i)
+  assert.match(getChatResponseGuidance('Build a landing page for our founder coaching product.', classifyChatRequest('Build a landing page for our founder coaching product.')), /compact plan/i)
+  const context = getChatRequestContext([{ role: 'user', content: 'How should I test this landing page?' }])
+  assert.match(context.responseGuidance, /direct recommendation|actionable explanation/i)
+  assert.match(getChatSystemPrompt(context), /Current response-shape note/i)
 })
 
 test('Chat request intent keeps planning guidance and explicit handoffs aligned', () => {
@@ -359,6 +369,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.equal(normalizeFinalSpokenPhrase(' um, draft the launch plan '), 'draft the launch plan')
   assert.equal(getExplicitSelfCorrection('Draft a marketing plan; actually draft a launch plan'), 'draft a launch plan')
   assert.equal(getExplicitSelfCorrection('Draft the marketing plan, sorry, draft the launch plan'), 'draft the launch plan')
+  assert.equal(getExplicitSelfCorrection('I said gym, not gim'), 'gym')
   assert.equal(isLikelyRestartExtension('Draft the gim plan', 'Draft the gym plan for investors'), true)
   assert.equal(isLikelyRestartExtension('Draft the launch plan', 'Draft the budget plan for investors'), false)
   assert.equal(isLikelySingleWordRevision('Draft the gim plan', 'Draft the gym plan'), true)
@@ -496,14 +507,18 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
   assert.equal(longPlan.mode, 'call-summary')
   assert.doesNotMatch(longPlan.spokenText, /after the call/i)
-  assert.match(longPlan.spokenText, /expand on any part/i)
+  assert.doesNotMatch(longPlan.spokenText, /expand on any part/i)
   assert.equal(normalizeLiveCallResponseText('We can expand after the call.'), 'We can expand now.')
 
   const simpleAnswer = createLiveCallResponsePlan('Start with the audience that already feels the problem most sharply.')
   assert.equal(simpleAnswer.mode, 'call-conversational')
   assert.match(simpleAnswer.spokenText, /audience/i)
+  const usefulCallAnswer = createLiveCallResponsePlan('Start with your current active users, because they already understand the pain. Ask them which moment creates the most friction, then use their exact wording in your landing-page headline. That gives you a concrete message to test this week.')
+  assert.equal(usefulCallAnswer.mode, 'call-conversational')
+  assert.match(usefulCallAnswer.spokenText, /current active users/i)
+  assert.match(usefulCallAnswer.spokenText, /test this week/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
-  assert.match(getLiveCallSystemPrompt(), /one to three concise sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /two to four concise sentences/i)
   assert.match(getLiveCallSystemPrompt(), /next one or two steps/i)
 })
 
@@ -523,7 +538,7 @@ test('Live Call bounds context for faster turns without dropping the newest spok
   assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
   assert.equal(context.at(-1)?.source, 'voice')
   assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 6000, true)
-  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 112)
+  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 190)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -534,6 +549,9 @@ test('Voice narration removes presentation artifacts, links, emojis, and code wh
   assert.equal(narration.includes('/'), false)
   assert.match(narration, /npm test or npm run build/i)
   assert.match(narration, /detailed code is available in the chat/i)
+
+  const naturalPacing = cleanTextForSpeech('Here is the approach: start with one clear promise; then test it with five customers, and keep the wording that lands.')
+  assert.match(naturalPacing, /approach: start with one clear promise\. then test it with five customers, and keep the wording that lands\./i)
 
   const structuredNarration = cleanTextForSpeech('> **Next steps**\n1. Confirm the plan\n2. Send the update\n| Owner | Status |\n| --- | --- |\n[^1]')
   assert.equal(structuredNarration.includes('Owner'), false)
@@ -620,12 +638,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(composerSource, /Shift\+Enter/)
   assert.match(composerSource, /Start a live voice session/)
   assert.match(composerSource, /ChatVoiceSession/)
-  assert.match(composerSource, /Upload an image/)
+  assert.match(composerSource, /Choose an image/)
   assert.match(composerSource, /paste an image directly/i)
   assert.match(composerSource, /voiceSessionActive && <ChatVoiceSession/)
   assert.doesNotMatch(composerSource, /Live dictation is flowing/i)
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
+  assert.match(composerSource, /voiceStartedByPointerRef/)
+  assert.match(composerSource, /void onVoiceStart\(\)/)
   assert.match(composerSource, /void onVoicePrepare\?\.\(\{ quiet: true \}\)/)
   assert.match(composerSource, /onVoicePrepare/)
   assert.match(recognitionSource, /microphonePreparationRef/)
@@ -706,6 +726,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-voice-popover/)
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
+  assert.match(css, /fl-chat-composer-shell/)
   assert.match(css, /fl-chat-voice-dock/)
   assert.match(css, /fl-chat-live-call/)
   assert.match(css, /fl-chat-live-call-stage/)
