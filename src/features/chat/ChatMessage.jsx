@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { C } from '@/app/theme'
+import { getVoiceProvider } from '@/ai/voiceProviderRegistry'
 import { renderMsg } from '@/components/content/MessageContent'
 import { getVoiceSpeedLabel, VOICE_SPEED_OPTIONS } from '@/lib/voicePreferencesUtils'
 import { getChatUserInitials, getProviderPresentation } from './chatUtils'
 import { ChatControlActions } from './ChatControlActions'
+
+const ELEVENLABS_VOICE_PROVIDER = getVoiceProvider('elevenlabs')
+const VOICE_STYLE_OPTIONS = ['female', 'male'].map((voice) => ({
+  id: voice,
+  label: ELEVENLABS_VOICE_PROVIDER?.voiceLabels[voice] || voice,
+}))
 
 function ActionButton({ label, icon, onClick, active = false, danger = false, expanded }) {
   return (
@@ -34,14 +41,14 @@ function VoiceSettings({ voiceCfg, onVoiceChange, elevenLabsAvailable, onClose, 
       <div className="fl-chat-voice-option-group">
         <span className="fl-chat-voice-option-label">Playback voice</span>
         <button type="button" className={`fl-chat-voice-choice ${browserVoiceSelected ? 'is-selected' : ''}`} aria-pressed={browserVoiceSelected} onClick={() => onVoiceChange({ provider: 'browser' })}>Best available browser voice</button>
-        {elevenLabsAvailable === true && <button type="button" className={`fl-chat-voice-choice ${voiceCfg.provider === 'elevenlabs' ? 'is-selected' : ''}`} aria-pressed={voiceCfg.provider === 'elevenlabs'} onClick={() => onVoiceChange({ provider: 'elevenlabs' })}>Enhanced voice</button>}
+        {elevenLabsAvailable === true && <button type="button" className={`fl-chat-voice-choice ${voiceCfg.provider === 'elevenlabs' ? 'is-selected' : ''}`} aria-pressed={voiceCfg.provider === 'elevenlabs'} onClick={() => onVoiceChange({ provider: 'elevenlabs' })}>Enhanced voice · {ELEVENLABS_VOICE_PROVIDER?.voiceLabels[voiceCfg.gender] || 'Premium'}</button>}
         <span className="fl-chat-voice-guidance">{elevenLabsAvailable === true ? 'Choose enhanced playback when it is configured for this workspace.' : 'FounderLab picks the best available English system voice on this browser.'}</span>
       </div>
 
       <div className="fl-chat-voice-option-group">
         <span className="fl-chat-voice-option-label">Voice style</span>
-        {['male', 'female'].map((gender) => (
-          <button key={gender} type="button" className={`fl-chat-voice-choice ${voiceCfg.gender === gender ? 'is-selected' : ''}`} aria-pressed={voiceCfg.gender === gender} onClick={() => onVoiceChange({ gender })}>{gender}</button>
+        {VOICE_STYLE_OPTIONS.map((voice) => (
+          <button key={voice.id} type="button" className={`fl-chat-voice-choice ${voiceCfg.gender === voice.id ? 'is-selected' : ''}`} aria-pressed={voiceCfg.gender === voice.id} onClick={() => onVoiceChange({ gender: voice.id })}>{voice.label}</button>
         ))}
       </div>
 

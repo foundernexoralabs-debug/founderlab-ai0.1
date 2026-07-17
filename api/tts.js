@@ -25,7 +25,7 @@ async function handler(req, res, dependencies = {}) {
   const user = await requireAuthenticatedUser(req, res, { provider: VOICE_PROVIDER, env, fetchImpl })
   if (!user) return
 
-  const { text, gender = 'male', probe = false } = req.body || {}
+  const { text, gender, probe = false } = req.body || {}
   if (probe === true) {
     try {
       const voice = await getVoiceProvider()

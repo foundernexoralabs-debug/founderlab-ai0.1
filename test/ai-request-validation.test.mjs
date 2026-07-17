@@ -11,7 +11,7 @@ import {
   isSupportedModel,
   listProviders,
 } from '../src/ai/providerRegistry.js'
-import { getVoiceProvider } from '../src/ai/voiceProviderRegistry.js'
+import { getVoiceCandidates, getVoiceProvider } from '../src/ai/voiceProviderRegistry.js'
 import { classifyAIError } from '../src/ai/errorClassifier.js'
 import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
@@ -59,6 +59,7 @@ const aiHandler = require('../api/ai.js')
 const youtubeHandler = require('../api/youtube.js')
 const ttsHandler = require('../api/tts.js')
 const groqProvider = require('../api/ai/providers/groq.js')
+const { synthesizeVoice } = require('../api/voice/elevenlabs.js')
 const {
   authenticateRequest,
   enforceRequestLimit,
@@ -165,14 +166,49 @@ test('provider availability resolves only configured providers and preserves Loc
 test('voice configuration centralizes the ElevenLabs model, voice IDs, and browser fallback capability', () => {
   const voice = getVoiceProvider('elevenlabs')
   assert.equal(voice.defaultModel, 'eleven_multilingual_v2')
-  assert.equal(voice.defaultVoice, 'male')
+  assert.equal(voice.defaultVoice, 'female')
   assert.equal(voice.capabilities.browserFallback, true)
+  assert.equal(voice.voices.female, 'OZ0L6eISlOejga3XjDFt')
+  assert.equal(voice.voiceLabels.female, 'Talia — Warm Soft Guide')
   assert.equal(voice.voices.male, 'nPczCjzI2devNBz1zQrb')
-  assert.equal(voice.voiceLabels.female, 'Custom Female')
+  assert.deepEqual(getVoiceCandidates('elevenlabs', 'female').map((candidate) => [candidate.id, candidate.label, candidate.fallback]), [
+    ['OZ0L6eISlOejga3XjDFt', 'Talia — Warm Soft Guide', false],
+    ['EXAVITQu4vr4xnSDxMaL', 'Sarah — Warm Friendly Guide', true],
+  ])
 
   const browserVoiceSource = fs.readFileSync(path.join(repositoryRoot, 'src/lib/voiceService.ts'), 'utf8')
   assert.equal(browserVoiceSource.includes('nPczCjzI2devNBz1zQrb'), false)
-  assert.equal(browserVoiceSource.includes('EST9Ui6982FZPSi7gCHi'), false)
+  assert.equal(browserVoiceSource.includes('OZ0L6eISlOejga3XjDFt'), false)
+})
+
+test('ElevenLabs uses Talia by default and only falls back to Sarah when Talia is unavailable', async () => {
+  const requestedVoiceIds = []
+  const audio = await synthesizeVoice({
+    text: 'FounderLab is ready to help.',
+    env: { ELEVENLABS_API_KEY: 'test-key' },
+    fetchImpl: async (url) => {
+      requestedVoiceIds.push(url.split('/').at(-1))
+      if (requestedVoiceIds.length === 1) return { ok: false, status: 404 }
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }
+    },
+  })
+  assert.deepEqual(requestedVoiceIds, ['OZ0L6eISlOejga3XjDFt', 'EXAVITQu4vr4xnSDxMaL'])
+  assert.equal(Buffer.isBuffer(audio), true)
+  assert.deepEqual([...audio], [1, 2, 3])
+
+  const quotaRequests = []
+  await assert.rejects(
+    () => synthesizeVoice({
+      text: 'Do not retry a quota failure.',
+      env: { ELEVENLABS_API_KEY: 'test-key' },
+      fetchImpl: async (url) => {
+        quotaRequests.push(url)
+        return { ok: false, status: 429 }
+      },
+    }),
+    (error) => error?.code === 'RATE_LIMITED',
+  )
+  assert.equal(quotaRequests.length, 1)
 })
 
 test('server request normalization accepts a large Builder prompt within the bounded text limit', () => {

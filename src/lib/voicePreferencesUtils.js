@@ -3,7 +3,7 @@ export const DEFAULT_VOICE_PREFERENCE = {
   // ElevenLabs is unavailable, useTextToSpeech deliberately selects the
   // browser path without pretending an enhanced voice is active.
   provider: 'elevenlabs',
-  gender: 'male',
+  gender: 'female',
   speed: 0,
 }
 
@@ -32,7 +32,7 @@ export function normalizeVoiceConfig(config) {
   const candidate = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
   return {
     provider: ['browser', 'elevenlabs'].includes(candidate.provider) ? candidate.provider : DEFAULT_VOICE_PREFERENCE.provider,
-    gender: candidate.gender === 'female' ? 'female' : DEFAULT_VOICE_PREFERENCE.gender,
+    gender: ['female', 'male'].includes(candidate.gender) ? candidate.gender : DEFAULT_VOICE_PREFERENCE.gender,
     speed: Number.isFinite(Number(candidate.speed))
       ? nearestVoiceSpeed(Number(candidate.speed))
       : DEFAULT_VOICE_PREFERENCE.speed,

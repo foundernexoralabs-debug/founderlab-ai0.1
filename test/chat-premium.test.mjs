@@ -55,6 +55,7 @@ import {
 } from '../src/hooks/speechRecognitionUtils.js'
 import {
   CHAT_SYSTEM_PROMPT,
+  CHAT_HARMLESS_SOCIAL_GUIDANCE,
   CHAT_CONTROL_CENTER_PROMPT,
   CHAT_STARTER_PROMPTS,
   createConversation,
@@ -186,6 +187,9 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /homophone/i)
   assert.match(CHAT_SYSTEM_PROMPT, /Choose the response shape/i)
   assert.match(CHAT_SYSTEM_PROMPT, /clearly unsafe/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /another version of the same question/i)
+  assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /dating/i)
+  assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /without a blanket refusal/i)
   assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
   assert.match(getChatSystemPrompt(), /FounderLab workflow guidance/i)
   assert.deepEqual(getChatRequestContext([
@@ -444,9 +448,9 @@ test('Voice preferences persist only safe, predictable playback choices', () => 
     provider: 'browser', gender: 'male', speed: 0,
   })
   assert.deepEqual(normalizeVoiceConfig({ provider: 'unknown', gender: 'other', speed: 999 }), {
-    provider: 'elevenlabs', gender: 'male', speed: 150,
+    provider: 'elevenlabs', gender: 'female', speed: 150,
   })
-  assert.deepEqual(normalizeVoiceConfig(null), { provider: 'elevenlabs', gender: 'male', speed: 0 })
+  assert.deepEqual(normalizeVoiceConfig(null), { provider: 'elevenlabs', gender: 'female', speed: 0 })
   assert.deepEqual(VOICE_SPEED_OPTIONS.map((option) => option.label), ['0.5×', '1×', '1.5×', '2×', '2.5×'])
   assert.equal(getVoiceSpeedLabel(100), '2×')
 })

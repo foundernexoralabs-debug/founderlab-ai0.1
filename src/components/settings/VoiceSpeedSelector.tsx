@@ -14,8 +14,8 @@ const PROVIDERS: { id: VoiceProvider; label: string; badge?: string }[] = [
   { id: 'elevenlabs', label: '⚡ ElevenLabs',     badge: 'Premium' },
 ]
 const GENDERS: { id: Gender; label: string; voices: { browser: string; elevenlabs: string } }[] = [
-  { id: 'male',   label: '♂ Male',   voices: { browser: 'Ryan Neural',  elevenlabs: ELEVENLABS_VOICES.male.name } },
-  { id: 'female', label: '♀ Female', voices: { browser: 'Sonia Neural', elevenlabs: ELEVENLABS_VOICES.female.name } },
+  { id: 'female', label: 'Talia', voices: { browser: 'Sonia Neural', elevenlabs: ELEVENLABS_VOICES.female.name } },
+  { id: 'male',   label: 'Brian', voices: { browser: 'Ryan Neural', elevenlabs: ELEVENLABS_VOICES.male.name } },
 ]
 
 export default function VoiceSpeedSelector({
