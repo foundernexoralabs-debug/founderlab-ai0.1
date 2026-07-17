@@ -83,6 +83,11 @@ export function useSpeechRecognition() {
 
     const session = ++sessionRef.current
     if (!microphonePermissionReadyRef.current) {
+      // Surface an immediate state change while the browser performs its
+      // unavoidable permission/device handshake. This removes the dead-feel
+      // between a tap and the first listening callback without pretending the
+      // microphone is active before the browser confirms it.
+      setVoiceInputState('starting')
       const prepared = await prepare()
       if (!prepared) return false
       // The first preflight captures the browser permission. Later turns can

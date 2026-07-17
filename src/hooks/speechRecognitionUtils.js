@@ -1,6 +1,7 @@
 import {
   getExplicitSelfCorrection,
   isLikelyRestartExtension,
+  isLikelySingleWordRevision,
   normalizeFinalSpokenPhrase,
 } from '../lib/conversationLanguage.js'
 
@@ -55,7 +56,7 @@ export function applyFinalSpeechPhrase(segments = [], phrase = '', protectedSegm
   const next = comparableSpeech(cleanPhrase)
   if (canReplaceLastSpokenSegment && previous && previous === next) return safeSegments
   const previousWordCount = previous ? previous.split(' ').length : 0
-  if (canReplaceLastSpokenSegment && previousWordCount >= 2 && isLikelyRestartExtension(lastSegment, cleanPhrase)) {
+  if (canReplaceLastSpokenSegment && previousWordCount >= 2 && (isLikelyRestartExtension(lastSegment, cleanPhrase) || isLikelySingleWordRevision(lastSegment, cleanPhrase))) {
     return [...safeSegments.slice(0, -1), cleanPhrase]
   }
   return [...safeSegments, cleanPhrase]
@@ -96,6 +97,7 @@ export function shouldResumeVoiceInput({ desired = false, error = '' } = {}) {
 
 export function voiceInputStatusCopy(state) {
   const copy = {
+    starting: 'Starting voice input — you can begin speaking as soon as the mic is ready.',
     listening: 'Listening — pause naturally; I’ll keep your place.',
     resuming: 'Keeping your place — continue when you are ready.',
     error: 'Voice input needs attention. Your typed draft is still here.',

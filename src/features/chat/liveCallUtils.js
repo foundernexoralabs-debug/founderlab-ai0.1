@@ -1,14 +1,17 @@
 // A browser final result already represents a meaningful pause. Keep only a
 // short guard window so FounderLab feels responsive without sending a phrase
 // while the caller is still correcting a very short fragment.
-export const LIVE_CALL_TURN_DELAY_MS = 400
-export const LIVE_CALL_SHORT_TURN_DELAY_MS = 640
+// SpeechRecognition has already declared a final phrase before this timer
+// begins. Keep the remaining guard brief so Live Call feels responsive while
+// leaving a tiny fragment enough room for a correction.
+export const LIVE_CALL_TURN_DELAY_MS = 300
+export const LIVE_CALL_SHORT_TURN_DELAY_MS = 560
 export const LIVE_CALL_MAX_SPOKEN_LENGTH = 280
 export const LIVE_CALL_RECAP_TURN_LIMIT = 4
 export const LIVE_CALL_HISTORY_MESSAGE_LIMIT = 4
 export const LIVE_CALL_TURN_CONTEXT_LIMIT = 6
 export const LIVE_CALL_CONTEXT_CHARACTER_LIMIT = 6000
-export const LIVE_CALL_MAX_OUTPUT_TOKENS = 160
+export const LIVE_CALL_MAX_OUTPUT_TOKENS = 112
 
 /**
  * A Live Call is a focused state machine, separate from text-chat composing.

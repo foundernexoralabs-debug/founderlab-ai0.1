@@ -21,7 +21,12 @@ import {
   MAX_SPEECH_PLAYBACK_CHUNK_LENGTH,
   splitSpeechForPlayback,
 } from '../src/lib/speechTextUtils.js'
-import { getExplicitSelfCorrection, isLikelyRestartExtension, normalizeFinalSpokenPhrase } from '../src/lib/conversationLanguage.js'
+import {
+  getExplicitSelfCorrection,
+  isLikelyRestartExtension,
+  isLikelySingleWordRevision,
+  normalizeFinalSpokenPhrase,
+} from '../src/lib/conversationLanguage.js'
 import {
   createLiveCallResponsePlan,
   createReadAloudPlan,
@@ -53,6 +58,7 @@ import {
   getAssistantControlActions,
   getChatControlActions,
 } from '../src/features/chat/chatControlCenterUtils.js'
+import { classifyChatRequest, getChatIntentGuidance } from '../src/features/chat/chatRequestIntent.js'
 import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
@@ -206,10 +212,14 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /without a blanket refusal/i)
   assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
   assert.match(getChatSystemPrompt(), /FounderLab workflow guidance/i)
-  assert.deepEqual(getChatRequestContext([
+  const followUpContext = getChatRequestContext([
     { role: 'assistant', content: 'Which launch are you referring to?' },
     { role: 'user', source: 'voice', content: 'The investor launch.' },
-  ]), { latestMessageIsVoice: true, latestMessageHasCorrection: false, followsAssistantQuestion: true })
+  ])
+  assert.equal(followUpContext.latestMessageIsVoice, true)
+  assert.equal(followUpContext.latestMessageHasCorrection, false)
+  assert.equal(followUpContext.followsAssistantQuestion, true)
+  assert.equal(followUpContext.intent.primaryTool, '')
   assert.equal(hasExplicitSelfCorrection('Actually, I meant the investor launch.'), true)
   assert.equal(hasExplicitSelfCorrection('Draft a marketing page, actually a launch page.'), true)
   assert.equal(hasExplicitSelfCorrection('Please draft the investor launch.'), false)
@@ -225,6 +235,28 @@ test('Voice requests use one contextual interpretation policy without polluting 
   ])), /likely answer or correction/i)
   assert.deepEqual(CHAT_RESPONSE_OPTIONS, { maxTokens: 1500, temperature: 0.52 })
   assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 112, temperature: 0.4 })
+})
+
+test('Chat request intent keeps planning guidance and explicit handoffs aligned', () => {
+  const builder = classifyChatRequest('Build me a website for founder onboarding.')
+  assert.deepEqual(builder.intents, ['builder'])
+  assert.equal(builder.primaryTool, 'builder')
+  assert.equal(builder.requiresPlan, true)
+  assert.match(getChatIntentGuidance(builder), /compact product brief/i)
+
+  const captureAndGitHub = classifyChatRequest('Turn this into a task and prepare it for GitHub.')
+  assert.equal(captureAndGitHub.wantsTask, true)
+  assert.equal(captureAndGitHub.primaryTool, 'github')
+  assert.match(getChatIntentGuidance(captureAndGitHub), /never claim the capture already happened/i)
+
+  const genericPlan = classifyChatRequest('Make a project plan for this founder idea.')
+  assert.equal(genericPlan.requiresPlan, true)
+  assert.equal(genericPlan.primaryTool, 'builder')
+  assert.deepEqual(classifyChatRequest('What is GitHub and how does an API work?').intents, [])
+
+  const plannedPrompt = getChatSystemPrompt({ intent: builder })
+  assert.match(plannedPrompt, /Current request capability note/i)
+  assert.match(plannedPrompt, /Builder handoff/i)
 })
 
 test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
@@ -313,6 +345,10 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
     ['Draft the gym plan for investors'],
   )
   assert.deepEqual(
+    applyFinalSpeechPhrase(['Draft the gim plan'], 'Draft the gym plan'),
+    ['Draft the gym plan'],
+  )
+  assert.deepEqual(
     applyFinalSpeechPhrase(['Draft the launch plan'], 'Draft the launch plan'),
     ['Draft the launch plan'],
   )
@@ -322,8 +358,11 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   )
   assert.equal(normalizeFinalSpokenPhrase(' um, draft the launch plan '), 'draft the launch plan')
   assert.equal(getExplicitSelfCorrection('Draft a marketing plan; actually draft a launch plan'), 'draft a launch plan')
+  assert.equal(getExplicitSelfCorrection('Draft the marketing plan, sorry, draft the launch plan'), 'draft the launch plan')
   assert.equal(isLikelyRestartExtension('Draft the gim plan', 'Draft the gym plan for investors'), true)
   assert.equal(isLikelyRestartExtension('Draft the launch plan', 'Draft the budget plan for investors'), false)
+  assert.equal(isLikelySingleWordRevision('Draft the gim plan', 'Draft the gym plan'), true)
+  assert.equal(isLikelySingleWordRevision('Draft the launch plan', 'Draft the budget plan'), false)
   assert.equal(mergeLiveTranscript('Launch plan', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA')
   assert.equal(mergeLiveTranscript('Launch plan please', 'Launch plan', 'Launch plan with a stronger CTA'), 'Launch plan with a stronger CTA please')
   assert.equal(mergeLiveTranscript('Manual revision', 'Launch plan', 'Launch plan with a stronger CTA'), 'Manual revision with a stronger CTA')
@@ -332,6 +371,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.equal(shouldResumeVoiceInput({ desired: false, error: 'no-speech' }), false)
   assert.equal(shouldResumeVoiceInput({ desired: true, error: 'not-allowed' }), false)
   assert.equal(VOICE_INPUT_RESTART_DELAY_MS >= 150 && VOICE_INPUT_RESTART_DELAY_MS <= 250, true)
+  assert.match(voiceInputStatusCopy('starting'), /begin speaking/i)
   assert.match(voiceInputStatusCopy('listening'), /pause naturally/i)
   assert.match(voiceInputStatusCopy('resuming'), /keeping your place/i)
 })
@@ -351,7 +391,7 @@ test('Normal read-aloud and voice sessions preserve full ordinary answers before
   assert.match(code.spokenText, /full code and details in the chat/i)
   assert.match(code.note, /full code remains/i)
 
-  const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(100))
+  const long = createVoiceResponsePlan('A practical plan starts with a clear customer promise. '.repeat(150))
   assert.equal(long.mode, 'summary')
   assert.equal(long.spokenText.length <= MAX_FULL_VOICE_RESPONSE_LENGTH, true)
   assert.match(long.spokenText, /full breakdown in the chat/i)
@@ -371,6 +411,15 @@ test('Normal read-aloud and voice sessions preserve full ordinary answers before
   assert.equal(normalReadAloud.mode, 'full-read-aloud')
   assert.equal(normalReadAloud.spokenText.includes('full breakdown in the chat'), false)
   assert.equal(normalReadAloud.spokenText.length < MAX_FULL_READ_ALOUD_LENGTH, true)
+
+  const mediumReadAloud = createReadAloudPlan('A founder-ready answer should stay complete when it is still comfortable to hear. '.repeat(86))
+  assert.equal(mediumReadAloud.mode, 'full-read-aloud')
+  assert.equal(mediumReadAloud.spokenText.includes('full breakdown in the chat'), false)
+  assert.match(mediumReadAloud.spokenText, /comfortable to hear/i)
+
+  const mediumStructuredReadAloud = createReadAloudPlan(Array.from({ length: 25 }, (_, index) => `- Practical step ${index + 1} for the launch`).join('\n'))
+  assert.equal(mediumStructuredReadAloud.mode, 'full-read-aloud')
+  assert.equal(mediumStructuredReadAloud.spokenText.includes('full breakdown in the chat'), false)
 
   const technicalReadAloud = createReadAloudPlan('Here is the implementation:\n```js\nconst answer = buildLaunchPlan()\n```')
   assert.equal(technicalReadAloud.mode, 'code-summary')
@@ -393,7 +442,8 @@ test('Speech playback chunks long narration without truncating its ending', () =
 
 test('Live Call uses one bounded turn model and accurately describes local and cloud provider support', () => {
   assert.equal(EMPTY_LIVE_CALL.phase, 'idle')
-  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 350 && LIVE_CALL_TURN_DELAY_MS <= 450, true)
+  assert.equal(LIVE_CALL_TURN_DELAY_MS >= 250 && LIVE_CALL_TURN_DELAY_MS <= 350, true)
+  assert.equal(LIVE_CALL_SHORT_TURN_DELAY_MS >= 500 && LIVE_CALL_SHORT_TURN_DELAY_MS <= 650, true)
   assert.equal(getLiveCallTurnDelay('Help me shape the launch message.'), LIVE_CALL_TURN_DELAY_MS)
   assert.equal(getLiveCallTurnDelay('Hmm'), LIVE_CALL_SHORT_TURN_DELAY_MS)
   assert.equal(shouldQueueLiveCallTurn({ active: true, muted: false, isFinal: true, transcript: 'Help me plan a launch.' }), true)

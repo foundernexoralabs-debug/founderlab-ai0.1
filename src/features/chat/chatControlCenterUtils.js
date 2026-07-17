@@ -1,3 +1,5 @@
+import { classifyChatRequest } from './chatRequestIntent.js'
+
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
 const CONTROL_ACTIONS = Object.freeze({
@@ -53,32 +55,6 @@ function requestText(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function hasTaskIntent(text) {
-  return /\b(?:turn|make|create|add|convert|break|put)\b[^.?!]{0,64}\b(?:into|as)?\s*(?:a\s+)?task\b/i.test(text)
-}
-
-function hasNoteIntent(text) {
-  return /\b(?:save|turn|make|put|convert|keep)\b[^.?!]{0,64}\b(?:as|in|into)?\s*(?:a\s+)?note(?:s)?\b/i.test(text)
-}
-
-function hasBuilderIntent(text) {
-  return /\b(?:use|open|send|take|continue)\b[^.?!]{0,64}\b(?:builder|website|landing page|web app|app)\b/i.test(text)
-    || /\b(?:help me|build|create|make)\b[^.?!]{0,64}\b(?:website|landing page|web app|app|application|saas|product site)\b/i.test(text)
-    || /\b(?:project plan|plan (?:this|the|my) (?:project|app|website)|make this into a project)\b/i.test(text)
-}
-
-function hasGitHubIntent(text) {
-  return /\b(?:prepare|push|publish|send|open|use|connect|commit|create|make)\b[^.?!]{0,80}\b(?:github|repository|repo|pull request)\b/i.test(text)
-}
-
-function hasCodeIntent(text) {
-  return /\b(?:build|create|make|write|implement|debug|refactor|test|review|fix|continue)\b[^.?!]{0,80}\b(?:code|coding|component|feature|implementation|test suite|api)\b/i.test(text)
-}
-
-function hasYouTubeIntent(text) {
-  return /\b(?:use|turn|make|create|plan|develop|repurpose|prepare)\b[^.?!]{0,80}\b(?:youtube|video content|content idea|content strategy|shorts?|reels?)\b/i.test(text)
-}
-
 /**
  * Maps a natural-language request to only actions FounderLab can genuinely
  * perform today. The user still explicitly chooses every persistence or
@@ -87,20 +63,13 @@ function hasYouTubeIntent(text) {
 export function getChatControlActions(request) {
   const text = requestText(request)
   if (!text) return []
+  const intent = classifyChatRequest(text)
 
   const actions = []
-  if (hasTaskIntent(text)) actions.push(CONTROL_ACTIONS['create-task'])
-  if (hasNoteIntent(text)) actions.push(CONTROL_ACTIONS['save-note'])
+  if (intent.wantsTask) actions.push(CONTROL_ACTIONS['create-task'])
+  if (intent.wantsNote) actions.push(CONTROL_ACTIONS['save-note'])
 
-  if (hasYouTubeIntent(text)) {
-    actions.push(CONTROL_ACTIONS.youtube)
-  } else if (hasGitHubIntent(text)) {
-    actions.push(CONTROL_ACTIONS.github)
-  } else if (hasBuilderIntent(text)) {
-    actions.push(CONTROL_ACTIONS.builder)
-  } else if (hasCodeIntent(text)) {
-    actions.push(CONTROL_ACTIONS.code)
-  }
+  if (intent.primaryTool) actions.push(CONTROL_ACTIONS[intent.primaryTool])
 
   return actions.slice(0, 2)
 }

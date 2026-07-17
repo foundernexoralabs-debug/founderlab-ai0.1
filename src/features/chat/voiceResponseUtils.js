@@ -3,9 +3,9 @@ import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTex
 // Normal read-aloud should be complete by default. These high limits are a
 // deliberate product boundary: only genuinely long, code-heavy, or tabular
 // content is summarized; ordinary prose, lists, and references are narrated.
-export const MAX_FULL_READ_ALOUD_LENGTH = 6000
-export const MAX_FULL_VOICE_RESPONSE_LENGTH = 4000
-export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 3000
+export const MAX_FULL_READ_ALOUD_LENGTH = 8000
+export const MAX_FULL_VOICE_RESPONSE_LENGTH = 6000
+export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 5000
 export const MAX_LIVE_CALL_SPEECH_LENGTH = 360
 
 /** Keep the active call in the present instead of deferring useful help. */
@@ -55,7 +55,10 @@ function createNormalNarrationPlan(content = '', {
   const profile = getSpeechContentProfile(source)
   const { hasCode, hasStructuredContent, tableLineCount, listItemCount } = profile
   const hasRawTable = tableLineCount >= 2
-  const hasLargeStructuredData = listItemCount > 20
+  // A normal response with a couple of dozen short steps is still useful to
+  // hear. Reserve summary mode for genuinely large data rather than treating
+  // ordinary medium-length planning output as something to cut short.
+  const hasLargeStructuredData = listItemCount > 30
   const withoutCode = source.replace(/```[\s\S]*?```/g, ' ').trim()
   const spokenBase = cleanTextForSpeech(withoutCode)
   if (!spokenBase) {

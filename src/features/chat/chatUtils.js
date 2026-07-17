@@ -1,10 +1,12 @@
 import { getProvider, getProviderModel } from '../../ai/providerRegistry.js'
 import { hasExplicitSelfCorrection as hasExplicitSelfCorrectionPhrase } from '../../lib/conversationLanguage.js'
+import { classifyChatRequest, getChatIntentGuidance } from './chatRequestIntent.js'
+import { LIVE_CALL_MAX_OUTPUT_TOKENS } from './liveCallUtils.js'
 
 // Keep model behavior consistent across cloud and local routes without
 // pretending every provider has identical generation controls.
 export const CHAT_RESPONSE_OPTIONS = Object.freeze({ maxTokens: 1500, temperature: 0.52 })
-export const LIVE_CALL_RESPONSE_OPTIONS = Object.freeze({ maxTokens: 112, temperature: 0.4 })
+export const LIVE_CALL_RESPONSE_OPTIONS = Object.freeze({ maxTokens: LIVE_CALL_MAX_OUTPUT_TOKENS, temperature: 0.4 })
 
 export const CHAT_SYSTEM_PROMPT = `You are FounderLab AI — a sharp, practical assistant built for founders, developers, and creators.
 
@@ -59,7 +61,7 @@ export function getChatRequestContext(messages) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false }
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest('') }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
@@ -67,10 +69,11 @@ export function getChatRequestContext(messages) {
     latestMessageIsVoice: latestUser?.source === 'voice',
     latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
     followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
+    intent: classifyChatRequest(latestUser?.content),
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -80,6 +83,10 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   }
   if (followsAssistantQuestion) {
     notes.push('The latest user turn follows an assistant question. Treat it as the likely answer or correction and continue unless a material ambiguity remains.')
+  }
+  const intentGuidance = getChatIntentGuidance(intent)
+  if (intentGuidance) {
+    notes.push(`Current request capability note: ${intentGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt

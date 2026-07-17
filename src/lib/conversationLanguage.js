@@ -1,5 +1,6 @@
 const LEADING_HESITATION = /^\s*(?:um+|uh+|erm+)\s*[,;:-]?\s*/i
 const SELF_CORRECTION = /(?:^|[,;.!?]\s*)(?:(?:no|sorry)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction|actually|to be clear)\s*[:,;]?\s+(.+)$/i
+const SHORT_VERBAL_RESTART = /(?:^|[,;.!?]\s*)(?:no|sorry)[,;]\s+(.+)$/i
 
 /** Keep harmless verbal fillers out of the final composed request, not out of live interim feedback. */
 export function normalizeFinalSpokenPhrase(value = '') {
@@ -13,7 +14,9 @@ export function normalizeFinalSpokenPhrase(value = '') {
  */
 export function getExplicitSelfCorrection(value = '') {
   const phrase = normalizeFinalSpokenPhrase(value)
-  return phrase.match(SELF_CORRECTION)?.[1]?.trim() || ''
+  return phrase.match(SELF_CORRECTION)?.[1]?.trim()
+    || phrase.match(SHORT_VERBAL_RESTART)?.[1]?.trim()
+    || ''
 }
 
 export function hasExplicitSelfCorrection(value = '') {
@@ -49,6 +52,24 @@ function isSmallWordCorrection(left = '', right = '') {
     }
   }
   return edits + (left.length - leftIndex) + (right.length - rightIndex) <= 1
+}
+
+/**
+ * A recogniser can finalise “gim” and then “gym” as separate equal-length
+ * results. Replace only a one-word near-match; different requests remain
+ * separate turns and are never silently rewritten.
+ */
+export function isLikelySingleWordRevision(previous = '', next = '') {
+  const previousWords = speechWords(previous)
+  const nextWords = speechWords(next)
+  if (previousWords.length < 2 || previousWords.length !== nextWords.length) return false
+  let changed = 0
+  for (let index = 0; index < previousWords.length; index += 1) {
+    if (previousWords[index] === nextWords[index]) continue
+    changed += 1
+    if (changed > 1 || !isSmallWordCorrection(previousWords[index], nextWords[index])) return false
+  }
+  return changed === 1
 }
 
 /**
