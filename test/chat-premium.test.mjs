@@ -201,6 +201,7 @@ test('Voice requests use one contextual interpretation policy without polluting 
   assert.match(CHAT_SYSTEM_PROMPT, /another version of the same question/i)
   assert.match(CHAT_SYSTEM_PROMPT, /low-risk assumption/i)
   assert.match(CHAT_SYSTEM_PROMPT, /silently use it/i)
+  assert.match(CHAT_SYSTEM_PROMPT, /treat it as settled/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /dating/i)
   assert.match(CHAT_HARMLESS_SOCIAL_GUIDANCE, /without a blanket refusal/i)
   assert.match(CHAT_CONTROL_CENTER_PROMPT, /never claim a task, note, GitHub repository/i)
