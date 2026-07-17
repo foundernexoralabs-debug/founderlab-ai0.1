@@ -158,6 +158,7 @@ export async function requestAIResult({
   electronBridge,
   permissionQuery,
   accessToken,
+  signal,
 } = {}) {
   if (!provider) {
     return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
@@ -198,6 +199,7 @@ export async function requestAIResult({
     permissionQuery,
     diagnosticFlow: provider === 'ollama' ? (connectionTest ? 'connection-test' : 'chat') : undefined,
     accessToken: token,
+    signal,
   })
   let result = await request(activeAccessToken)
   if (provider !== 'ollama' && result.error?.code === 'AUTHENTICATION_INVALID' && accessToken === undefined) {
