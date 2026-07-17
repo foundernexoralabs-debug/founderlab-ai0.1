@@ -20,6 +20,8 @@ const FORBIDDEN_CONTENT = [
   { code: 'REMOTE_RESOURCE', expression: /(?:<\s*(?:script|link|img)[^>]+(?:src|href)\s*=|url\s*\()\s*['"]?\s*data:text\/html/i, message: 'Only local project resources are supported.' },
 ]
 const HTML_REFERENCE = /\b(?:href|src)\s*=\s*(['"])([^'"]+)\1/gi
+const HTML_HREF = /\bhref\s*=\s*(['"])([^'"]+)\1/gi
+const HTML_ID = /\bid\s*=\s*(['"])([A-Za-z][A-Za-z0-9_:.\-]*)\1/gi
 const CSS_LOCAL_REFERENCE = /\burl\(\s*(['"]?)((?:assets)\/[a-z0-9][a-z0-9._/-]*)\1\s*\)/gi
 
 function issue(code, message, path = null, severity = 'error') {
@@ -49,6 +51,59 @@ function localReferences(content) {
     match = CSS_LOCAL_REFERENCE.exec(content)
   }
   return references
+}
+
+function isUnsupportedLocalNavigation(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw || raw.startsWith('#') || raw.startsWith('//') || /^(?:[a-z][a-z0-9+.-]*:|data:)/i.test(raw)) return false
+  const path = raw.split(/[?#]/, 1)[0].replace(/^\.\//, '').replace(/^\/+/, '')
+  return Boolean(path) && path !== BUILDER_ENTRY_FILE && !path.startsWith('pages/')
+}
+
+function unsupportedNavigationReferences(content) {
+  const invalid = []
+  HTML_HREF.lastIndex = 0
+  let match = HTML_HREF.exec(content)
+  while (match) {
+    if (isUnsupportedLocalNavigation(match[2])) invalid.push(match[2])
+    match = HTML_HREF.exec(content)
+  }
+  return invalid
+}
+
+function fragmentNavigationReferences(content, currentPath) {
+  const references = []
+  HTML_HREF.lastIndex = 0
+  let match = HTML_HREF.exec(content)
+  while (match) {
+    const raw = match[2].trim()
+    const hash = raw.indexOf('#')
+    if (hash < 0 || hash === raw.length - 1) {
+      match = HTML_HREF.exec(content)
+      continue
+    }
+    const fragment = raw.slice(hash + 1).trim()
+    if (!/^[A-Za-z][A-Za-z0-9_:.\-]*$/.test(fragment)) {
+      match = HTML_HREF.exec(content)
+      continue
+    }
+    const rawPath = raw.slice(0, hash).trim()
+    const target = rawPath ? localHtmlReference(rawPath) : currentPath
+    if (target?.endsWith('.html')) references.push({ target, fragment })
+    match = HTML_HREF.exec(content)
+  }
+  return references
+}
+
+function htmlIdSet(content) {
+  const ids = new Set()
+  HTML_ID.lastIndex = 0
+  let match = HTML_ID.exec(content)
+  while (match) {
+    ids.add(match[2])
+    match = HTML_ID.exec(content)
+  }
+  return ids
 }
 
 export function normalizeBuilderPath(value) {
@@ -99,6 +154,9 @@ export function validateBuilderFiles(inputFiles, { entryFile = BUILDER_ENTRY_FIL
     if (path.endsWith('.html') && path !== BUILDER_ENTRY_FILE && !/<\s*(?:main|body|section|article)\b/i.test(file.content)) {
       issues.push(issue('MALFORMED_PAGE', 'A generated page needs meaningful HTML content.', path, 'warning'))
     }
+    for (const reference of unsupportedNavigationReferences(file.content)) {
+      issues.push(issue('UNSUPPORTED_LOCAL_NAVIGATION', `Use an existing page path or an in-page fragment instead of ${reference}.`, path))
+    }
     files.push({ ...file, path, language: file.language || inferFileLanguage(path) })
   }
   if (totalBytes > BUILDER_MAX_TOTAL_BYTES) issues.push(issue('PROJECT_TOO_LARGE', 'The generated project exceeds the supported total size limit.'))
@@ -110,6 +168,12 @@ export function validateBuilderFiles(inputFiles, { entryFile = BUILDER_ENTRY_FIL
     for (const reference of localReferences(file.content)) {
       if (!paths.has(reference)) {
         issues.push(issue('MISSING_LOCAL_REFERENCE', `This file references ${reference}, which is not part of the project.`, file.path))
+      }
+    }
+    for (const reference of fragmentNavigationReferences(file.content, file.path)) {
+      const target = files.find((candidate) => candidate.path === reference.target)
+      if (target && !htmlIdSet(target.content).has(reference.fragment)) {
+        issues.push(issue('MISSING_FRAGMENT_TARGET', `This file links to #${reference.fragment}, but that section does not exist in ${reference.target}.`, file.path))
       }
     }
   }

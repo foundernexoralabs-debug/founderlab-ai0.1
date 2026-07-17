@@ -125,6 +125,27 @@ Visual execution standard:
 - For a single-page website, navigation and CTA links must use fragment targets that exist in the page (for example #features, #workflow, or #start). Never invent a route, page, or external link that is not part of the generated project.
 - One restrained tonal treatment or soft gradient is enough; do not use decoration to hide weak hierarchy. Keep all content readable, accessible, and useful on a narrow screen.`
 
+const PREMIUM_PAGE_BLUEPRINT = `
+Premium landing-page blueprint:
+- Give every section a distinct job and a clear visual role. A good default flow is: navigation, hero and product proof, benefits, a believable workflow or use case, trust/reassurance, a conversion CTA, and a compact footer.
+- Use a real content hierarchy. The hero needs an outcome-led headline, a useful supporting sentence, one primary action, and a specific product moment. Do not replace this with generic slogans or decorative empty panels.
+- HTML should include meaningful landmark elements and valid ids for every fragment target. CSS should carry the visual quality through tokens, layout, type scale, responsive breakpoints, focus states, and deliberate whitespace.
+- Keep implementation concise enough to finish completely. Prefer a few well-composed sections and component patterns over shallow repetition or unfinished detail.`
+
+function fileQualityBar(file) {
+  const path = String(file?.path || '')
+  if (path.endsWith('.html')) {
+    return `HTML quality bar: produce the complete semantic page, including all planned sections and real fragment ids. Use purposeful copy, a product-proof composition, one clear primary CTA, and navigation that only targets existing #sections or manifest pages.`
+  }
+  if (path.endsWith('.css')) {
+    return `CSS quality bar: define a coherent visual system with custom properties, responsive max-width containers, a clear type scale, layered surfaces, accessible focus/hover states, and mobile rules. Do not leave the page on browser defaults.`
+  }
+  if (path.endsWith('.js')) {
+    return `JavaScript quality bar: keep this short and optional. Add only a progressive enhancement such as an accessible mobile navigation toggle; core content and navigation must work without it.`
+  }
+  return 'Keep this file complete, compact, and consistent with the approved design system.'
+}
+
 export function buildBuilderPlanPrompt(brief) {
   return `${JSON_RULES}
 
@@ -162,6 +183,8 @@ export function buildBuilderFilePrompt({ brief, plan, file, manifest, repairInst
 You are generating one file for a FounderLab Builder project. Produce complete content only for the requested path. The supported project has no dependencies, no imports, no external URLs, no network access, no iframe, no eval, and no Function constructor. Use semantic accessible responsive HTML, polished CSS, and small progressive-enhancement JavaScript where needed. Do not include script or link tags in HTML; styles.css and app.js are injected by the isolated runtime.
 ${PREMIUM_WEBSITE_STANDARD}
 ${PREMIUM_VISUAL_EXECUTION}
+${PREMIUM_PAGE_BLUEPRINT}
+${fileQualityBar(file)}
 
 Brief: ${compactBuilderBrief(brief)}
 Plan: ${JSON.stringify(normalizeBuilderPlan(plan))}
@@ -178,6 +201,7 @@ export function buildBuilderFilesPrompt({ brief, plan, manifest, repairInstructi
 You are generating every file in a small FounderLab Builder project in one cohesive response. Produce complete contents for each manifest file. The supported project has no dependencies, no imports, no external URLs, no network access, no iframe, no eval, and no Function constructor. Use semantic accessible responsive HTML, polished CSS, and small progressive-enhancement JavaScript where needed. Do not include script or link tags in HTML; styles.css and app.js are injected by the isolated runtime.
 ${PREMIUM_WEBSITE_STANDARD}
 ${PREMIUM_VISUAL_EXECUTION}
+${PREMIUM_PAGE_BLUEPRINT}
 
 Generation quality bar:
 - index.html must contain a complete, visually ordered page—not a single hero or a text dump.
@@ -214,18 +238,64 @@ Selected file contents: ${JSON.stringify({ path: selectedFile?.path || null, con
 Return exactly: {"summary":"short change summary","changes":[{"path":"existing file path","content":"complete replacement content"}]}`
 }
 
+function parseJsonObject(value) {
+  const parsed = JSON.parse(value)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).length === 0) throw new Error('Expected non-empty object')
+  return parsed
+}
+
+function extractJsonObject(source) {
+  let start = -1
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') {
+      quoted = true
+      continue
+    }
+    if (character === '{') {
+      if (start < 0) start = index
+      depth += 1
+      continue
+    }
+    if (character === '}' && start >= 0) {
+      depth -= 1
+      if (depth === 0) {
+        try {
+          return parseJsonObject(source.slice(start, index + 1))
+        } catch {
+          // Continue scanning so a harmless model preamble cannot hide a
+          // later complete JSON object.
+          start = -1
+        }
+      }
+    }
+  }
+  return null
+}
+
 export function parseStrictBuilderJson(text, label = 'generation response') {
   if (typeof text !== 'string' || !text.trim()) throw new BuilderFormatError(`The ${label} was empty.`)
   const source = text.trim()
-  const fenced = source.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
-  const jsonSource = fenced ? fenced[1].trim() : source
-  try {
-    const parsed = JSON.parse(jsonSource)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected object')
-    return parsed
-  } catch {
-    throw new BuilderFormatError(`The ${label} was not valid JSON. Please retry generation.`)
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  const candidates = [source, fenced?.[1]?.trim()].filter(Boolean)
+  for (const candidate of candidates) {
+    try {
+      return parseJsonObject(candidate)
+    } catch {
+      const extracted = extractJsonObject(candidate)
+      if (extracted) return extracted
+    }
   }
+  throw new BuilderFormatError(`The ${label} was not valid JSON. Please retry generation.`)
 }
 
 export class BuilderFormatError extends Error {

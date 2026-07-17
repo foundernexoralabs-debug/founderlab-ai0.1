@@ -737,6 +737,28 @@ test('Ollama test and Chat route directly to localhost without cloud authenticat
   }
 })
 
+test('Local Ollama forwards Builder structured-output mode as its native JSON format', async () => {
+  let body
+  const result = await routeAIRequest({
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+    ollamaUrl: 'http://localhost:11434',
+    messages: [message('Return one Builder file.')],
+    responseFormat: { type: 'json_object' },
+    maxTokens: 512,
+  }, {
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'http://localhost:11434/api/chat')
+      body = JSON.parse(options.body)
+      return jsonResponse({ body: { message: { content: '{"path":"index.html","content":"<main>Ready</main>"}' }, done: true } })
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(body.format, 'json')
+  assert.equal(body.stream, false)
+  assert.equal(body.options.num_predict, 512)
+})
+
 test('Ollama failures remain isolated and an accidental server route is rejected', async () => {
   resetProviderConnectionStatuses()
   try {

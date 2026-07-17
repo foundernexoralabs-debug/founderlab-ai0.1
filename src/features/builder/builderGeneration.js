@@ -1,4 +1,4 @@
-import { requestAIResult } from '../../services/aiProviderService.js'
+import { requestCodeGenerationAI } from '../../services/aiProviderService.js'
 import { createBuilderProject, normalizeBuilderFile } from './builderProjectSchema.js'
 import { buildBuilderFilePrompt, buildBuilderFilesPrompt, buildBuilderManifestPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, BuilderFormatError, canUseLandingPageManifest, createLandingPageManifest, normalizeBuilderPlan, parseStrictBuilderJson } from './builderPrompts.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest, validateBuilderPatch } from './builderValidation.js'
@@ -34,6 +34,12 @@ const GENERATION_MANIFEST_OPTIONS = Object.freeze({ maxFiles: BUILDER_MAX_GENERA
 export const BUILDER_FILE_GENERATION_MAX_TOKENS = 5200
 export const BUILDER_GEMINI_FILE_MAX_TOKENS = 3400
 export const BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS = 4800
+// Local coding models have considerably less reliable structured-output
+// headroom than the cloud providers. Generate each small project file in its
+// own bounded turn rather than asking one local response to contain the
+// entire website.
+export const BUILDER_LOCAL_FILE_MAX_TOKENS = 2400
+export const BUILDER_LOCAL_FILE_RETRY_MAX_TOKENS = 3000
 const NON_RETRYABLE_REMOTE_CODES = new Set([
   'AUTHENTICATION_REQUIRED',
   'AUTHENTICATION_INVALID',
@@ -48,6 +54,14 @@ const NON_RETRYABLE_REMOTE_CODES = new Set([
   'PROVIDER_RATE_LIMITED',
   'RATE_LIMITED',
   'RATE_LIMIT_BACKEND_UNAVAILABLE',
+  'OLLAMA_CODE_MODEL_REQUIRED',
+  'OLLAMA_MODEL_REQUIRED',
+  'OLLAMA_MODEL_UNAVAILABLE',
+  'OLLAMA_UNAVAILABLE',
+  'OLLAMA_BROWSER_UNSUPPORTED',
+  'OLLAMA_BROWSER_ACCESS_DENIED',
+  'OLLAMA_BROWSER_ACCESS_BLOCKED',
+  'OLLAMA_TIMEOUT',
 ])
 
 function shouldRetryGeneration(error) {
@@ -67,12 +81,19 @@ function structuredFailure(error, { provider, label } = {}) {
       { retryable: false, cause: error }
     )
   }
+  if (error instanceof BuilderFormatError && provider === 'ollama') {
+    return new BuilderGenerationError(
+      'OLLAMA_STRUCTURED_OUTPUT_INVALID',
+      `The selected local coding model did not return a complete structured ${label}.`,
+      { retryable: true, cause: error }
+    )
+  }
   return error instanceof BuilderFormatError
     ? new BuilderGenerationError(error.code, error.message, { retryable: true, cause: error })
     : toGenerationError(error)
 }
 
-export function createBuilderGenerationService({ request = requestAIResult } = {}) {
+export function createBuilderGenerationService({ request = requestCodeGenerationAI } = {}) {
   async function requestJson({ prompt, maxTokens, signal, label, provider, model, retries = 1, onRetry }) {
     let lastFailure = null
     for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -118,8 +139,11 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
     if (!missing.length) return { files, addedPaths: [], provider: null, model: null }
 
     const generationManifest = { ...manifest, files: missing }
-    if (provider === 'gemini') {
+    if (provider === 'gemini' || provider === 'ollama') {
       for (const file of missing) {
+        const isLocalCodeGeneration = provider === 'ollama'
+        const initialMaxTokens = isLocalCodeGeneration ? BUILDER_LOCAL_FILE_MAX_TOKENS : BUILDER_GEMINI_FILE_MAX_TOKENS
+        const retryMaxTokens = isLocalCodeGeneration ? BUILDER_LOCAL_FILE_RETRY_MAX_TOKENS : BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS
         const requestFile = async (maxTokens) => requestJson({
           prompt: buildBuilderFilePrompt({ brief, plan, file, manifest: generationManifest, repairInstructions }),
           maxTokens,
@@ -127,20 +151,28 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
           label: `project file ${file.path}`,
           provider,
           model,
-          retries: 0,
+          // One small format retry is useful for local coding models without
+          // ever creating a hidden generation loop. Gemini retains its
+          // provider-specific truncation retry below.
+          retries: isLocalCodeGeneration ? 1 : 0,
         })
         let response
         try {
           onActivity?.(event('generating', `Generating ${file.path}`, { path: file.path }))
-          response = await requestFile(BUILDER_GEMINI_FILE_MAX_TOKENS)
+          response = await requestFile(initialMaxTokens)
         } catch (error) {
-          if (error?.code !== 'GEMINI_OUTPUT_TRUNCATED') throw error
-          onActivity?.(event('retrying', `Giving Gemini more room for ${file.path}`, { path: file.path }))
-          response = await requestFile(BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS)
+          const truncated = error?.code === 'GEMINI_OUTPUT_TRUNCATED' || error?.code === 'GENERATION_OUTPUT_TRUNCATED'
+          if (!truncated) throw error
+          onActivity?.(event('retrying', `Giving ${isLocalCodeGeneration ? 'your local coding model' : 'Gemini'} more room for ${file.path}`, { path: file.path }))
+          response = await requestFile(retryMaxTokens)
         }
         const record = response.value
         if (record?.path !== file.path || typeof record.content !== 'string' || !record.content.trim()) {
-          throw new BuilderGenerationError('GEMINI_STRUCTURED_OUTPUT_INVALID', `Gemini returned an invalid structured file for ${file.path}.`, { retryable: false })
+          throw new BuilderGenerationError(
+            isLocalCodeGeneration ? 'OLLAMA_STRUCTURED_OUTPUT_INVALID' : 'GEMINI_STRUCTURED_OUTPUT_INVALID',
+            `${isLocalCodeGeneration ? 'The selected local coding model' : 'Gemini'} returned an invalid structured file for ${file.path}.`,
+            { retryable: !isLocalCodeGeneration }
+          )
         }
         existing.set(file.path, normalizeBuilderFile({
           path: file.path,
@@ -328,11 +360,14 @@ export function createBuilderGenerationService({ request = requestAIResult } = {
     async applyEdit({ project, request: changeRequest, selectedPath, signal, onActivity }) {
       try {
         onActivity?.(event('editing', 'Preparing a scoped change'))
+        const currentVersion = (project.versions || []).find((version) => version.id === project.currentVersionId)
         const response = await requestJson({
           prompt: buildBuilderPatchPrompt({ request: changeRequest, project, selectedPath }),
           maxTokens: 6000,
           signal,
           label: 'project edit',
+          provider: currentVersion?.provider || undefined,
+          model: currentVersion?.model || undefined,
         })
         const patchCheck = validateBuilderPatch(response.value, project.files)
         if (!patchCheck.valid) throw new BuilderGenerationError('INVALID_PATCH', patchCheck.issues[0].message)

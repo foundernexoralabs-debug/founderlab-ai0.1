@@ -5,6 +5,7 @@ export const BUILDER_PREVIEW_SANDBOX = 'allow-scripts'
 export const BUILDER_PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 
 const PREVIEW_PAGE_PATH = /^(?:index\.html|pages\/[a-z0-9][a-z0-9._-]*\.html)$/i
+const PREVIEW_FRAGMENT = /^[A-Za-z][A-Za-z0-9_:.\-]*$/
 
 function escapeForScript(value) {
   return String(value || '').replace(/<\/script/gi, '<\\/script')
@@ -36,10 +37,24 @@ export function normalizePreviewPagePath(value) {
   return PREVIEW_PAGE_PATH.test(path) ? path : null
 }
 
+export function normalizePreviewFragment(value) {
+  const fragment = typeof value === 'string' ? value.trim() : ''
+  return PREVIEW_FRAGMENT.test(fragment) ? fragment : ''
+}
+
+export function normalizePreviewNavigation(value) {
+  if (typeof value !== 'string') return null
+  const [rawPath, rawFragment = ''] = value.split('#', 2)
+  const path = normalizePreviewPagePath(rawPath)
+  return path ? { path, fragment: normalizePreviewFragment(rawFragment) } : null
+}
+
 export function routeLocalLinks(html) {
   return String(html || '').replace(/\bhref=(['"])([^'"]+)\1/gi, (match, quote, href) => {
-    const path = normalizePreviewPagePath(href)
-    return path ? `href="#" data-builder-path="${path}"` : match
+    const navigation = normalizePreviewNavigation(href)
+    if (!navigation) return match
+    const fragment = navigation.fragment ? ` data-builder-fragment="${navigation.fragment}"` : ''
+    return `href="#" data-builder-path="${navigation.path}"${fragment}`
   })
 }
 
@@ -69,10 +84,12 @@ export function getLastWorkingPreviewFiles(project) {
   return Array.isArray(version?.files) && version.files.length ? version.files : null
 }
 
-function safePreviewBridge() {
+function safePreviewBridge(initialFragment = '') {
+  const fragment = escapeForScript(JSON.stringify(normalizePreviewFragment(initialFragment)))
   return `
     (function () {
       var runtimeFailed = false;
+      var initialFragment = ${fragment};
       var notify = function (type, detail) {
         window.parent.postMessage({ source: 'founderlab-builder-preview', type: type, detail: detail || null }, '*');
       };
@@ -89,7 +106,7 @@ function safePreviewBridge() {
         var path = link.getAttribute('data-builder-path');
         if (path) {
           event.preventDefault();
-          notify('navigate', { path: path });
+          notify('navigate', { path: path, fragment: link.getAttribute('data-builder-fragment') || '' });
           return;
         }
         var href = link.getAttribute('href') || '';
@@ -113,13 +130,18 @@ function safePreviewBridge() {
       });
       window.addEventListener('load', function () {
         window.setTimeout(function () {
+          if (initialFragment) {
+            var initialTarget = document.getElementById(initialFragment);
+            if (initialTarget) initialTarget.scrollIntoView({ block: 'start' });
+            else notify('navigation-error', { code: 'PREVIEW_FRAGMENT_MISSING' });
+          }
           if (!runtimeFailed) notify('ready', null);
         }, 0);
       });
     }());`
 }
 
-export function buildBuilderPreviewDocument(files, { entryFile = BUILDER_ENTRY_FILE } = {}) {
+export function buildBuilderPreviewDocument(files, { entryFile = BUILDER_ENTRY_FILE, fragment = '' } = {}) {
   const validation = validateBuilderFiles(files)
   if (!validation.valid) return { ok: false, validation, srcDoc: '' }
   const index = validation.files.find((file) => file.path === entryFile) || validation.files.find((file) => file.path === BUILDER_ENTRY_FILE)
@@ -134,7 +156,7 @@ export function buildBuilderPreviewDocument(files, { entryFile = BUILDER_ENTRY_F
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${BUILDER_PREVIEW_CSP}"><title>${escapeHtml(titleOf(index.content))}</title>
 <style>${escapeForScript(previewCss)}</style></head><body>${body}
-<script>${safePreviewBridge()}<\/script><script>${escapeForScript(script)}<\/script></body></html>`
+<script>${safePreviewBridge(fragment)}<\/script><script>${escapeForScript(script)}<\/script></body></html>`
   return { ok: true, validation, srcDoc }
 }
 

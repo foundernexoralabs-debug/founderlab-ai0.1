@@ -3,12 +3,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { BUILDER_FILE_GENERATION_MAX_TOKENS, BUILDER_GEMINI_FILE_MAX_TOKENS, BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS, createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
+import { BUILDER_FILE_GENERATION_MAX_TOKENS, BUILDER_GEMINI_FILE_MAX_TOKENS, BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS, BUILDER_LOCAL_FILE_MAX_TOKENS, BUILDER_LOCAL_FILE_RETRY_MAX_TOKENS, createBuilderGenerationService, BuilderGenerationError } from '../src/features/builder/builderGeneration.js'
 import { buildBuilderFileTree, createBuilderFile, renameBuilderFile } from '../src/features/builder/builderFileOperations.js'
 import { createBuilderProject, normalizeBuilderProject } from '../src/features/builder/builderProjectSchema.js'
 import { createBuilderProjectRepository } from '../src/features/builder/builderProjectRepository.js'
 import { BUILDER_PROMPT_LIMITS, buildBuilderFilesPrompt, buildBuilderPatchPrompt, buildBuilderPlanPrompt, canUseLandingPageManifest, createLandingPageManifest, normalizeBuilderPlan, parseStrictBuilderJson } from '../src/features/builder/builderPrompts.js'
-import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, getLastWorkingPreviewFiles, inlineLocalSvgReferences, normalizePreviewPagePath, routeLocalLinks } from '../src/features/builder/builderPreview.js'
+import { buildBuilderPreviewDocument, BUILDER_PREVIEW_CSP, BUILDER_PREVIEW_SANDBOX, getLastWorkingPreviewFiles, inlineLocalSvgReferences, normalizePreviewNavigation, normalizePreviewPagePath, routeLocalLinks } from '../src/features/builder/builderPreview.js'
 import { BUILDER_MAX_GENERATION_FILE_COUNT, validateBuilderFiles, validateBuilderManifest } from '../src/features/builder/builderValidation.js'
 import { appendBuilderVersion, getPreviousBuilderVersion, restoreBuilderVersion } from '../src/features/builder/builderVersions.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
@@ -59,6 +59,8 @@ test('Builder validation rejects path traversal, duplicate paths, oversized unsa
   assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<script>document.body.dataset.x = "1"</script>' }]).issues.some((item) => item.code === 'INLINE_RUNTIME_TAG'), true)
   assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main><a href="pages/missing.html">Missing</a></main>' }]).issues.some((item) => item.code === 'MISSING_LOCAL_REFERENCE'), true)
   assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main><a href="./pages/missing.html">Missing</a></main>' }]).issues.some((item) => item.code === 'MISSING_LOCAL_REFERENCE'), true)
+  assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main><a href="#features">Features</a></main>' }]).issues.some((item) => item.code === 'MISSING_FRAGMENT_TARGET'), true)
+  assert.equal(validateBuilderFiles([{ path: 'index.html', content: '<main id="features"><a href="#features">Features</a></main>' }]).valid, true)
 
   const manifest = validateBuilderManifest({ files: [{ path: 'styles.css' }] })
   assert.equal(manifest.valid, false)
@@ -104,6 +106,8 @@ test('Builder prompts set a concrete premium landing-page quality bar without ex
   assert.match(filesPrompt, /Build a composition, not a vertical stack/i)
   assert.match(filesPrompt, /note summary, decisions, and action items/i)
   assert.match(filesPrompt, /fragment targets that exist/i)
+  assert.match(filesPrompt, /Premium landing-page blueprint/i)
+  assert.match(filesPrompt, /CSS should carry the visual quality/i)
 })
 
 test('Builder uses a deterministic three-file manifest for a normal single-page landing page', () => {
@@ -172,9 +176,15 @@ test('Builder preview uses an opaque minimal sandbox and CSP without external ne
   assert.equal(normalizePreviewPagePath('./pages/about.html'), 'pages/about.html')
   assert.equal(normalizePreviewPagePath('/pages/about.html'), 'pages/about.html')
   assert.equal(normalizePreviewPagePath('/pricing'), null)
+  assert.deepEqual(normalizePreviewNavigation('./pages/about.html#team'), { path: 'pages/about.html', fragment: 'team' })
   const routed = routeLocalLinks('<a href="./pages/about.html">About</a><a href="#features">Features</a>')
   assert.match(routed, /data-builder-path="pages\/about.html"/)
   assert.match(routed, /href="#features"/)
+  const routedFragment = routeLocalLinks('<a href="pages/about.html#team">Team</a>')
+  assert.match(routedFragment, /data-builder-path="pages\/about.html"/)
+  assert.match(routedFragment, /data-builder-fragment="team"/)
+  const invalidRoute = validateBuilderFiles([{ path: 'index.html', content: '<main><a href="pricing">Pricing</a></main>' }])
+  assert.equal(invalidRoute.issues.some((item) => item.code === 'UNSUPPORTED_LOCAL_NAVIGATION'), true)
 })
 
 test('Builder retains a last known good preview without treating a failed current version as ready', () => {
@@ -308,6 +318,7 @@ test('Builder generation skips an unnecessary manifest request for a single-page
   assert.equal(requests.at(-1).model, 'model')
 
   assert.deepEqual(parseStrictBuilderJson('```json\n{"safe":true}\n```'), { safe: true })
+  assert.deepEqual(parseStrictBuilderJson('A local model added a preface.\n{"safe":true}\nDone.'), { safe: true })
   const bad = createBuilderGenerationService({ request: async () => ({ ok: true, text: 'Here is the response: {}' }) })
   await assert.rejects(() => bad.plan({ brief: 'Bad format' }), (error) => error instanceof BuilderGenerationError && error.code === 'GENERATION_FORMAT_ERROR')
 })
@@ -334,6 +345,68 @@ test('Gemini generates bounded individual Builder files, accepts safe fenced JSO
   assert.equal(calls[0].maxTokens, BUILDER_GEMINI_FILE_MAX_TOKENS)
   assert.equal(calls[3].maxTokens, BUILDER_GEMINI_FILE_RETRY_MAX_TOKENS)
   assert.equal(calls.every((input) => input.provider === 'gemini' && input.model === 'gemini-3.5-flash'), true)
+})
+
+test('Local Qwen Coder receives bounded per-file generation turns and one structured-output recovery', async () => {
+  const manifest = createLandingPageManifest()
+  const calls = []
+  const responses = [
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: 'Preface\n{"path":"index.html","content":"<main id=\\"start\\">Notes</main>"}' },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"styles.css"', meta: { finishReason: 'LENGTH' } },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"styles.css","content":"body { margin: 0; }"}' },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"app.js","content":"document.body.dataset.ready = \\"true\\""}' },
+  ]
+  const service = createBuilderGenerationService({ request: async (input) => { calls.push(input); return responses.shift() } })
+  const generated = await service.continueMissingFiles({
+    brief: 'Build a meeting-notes website',
+    plan: { name: 'Minutes', summary: 'Notes', pages: [{ path: 'index.html' }] },
+    manifest,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+  })
+  assert.equal(generated.files.length, 3)
+  assert.equal(calls.length, 4)
+  assert.equal(calls[0].maxTokens, BUILDER_LOCAL_FILE_MAX_TOKENS)
+  assert.equal(calls[2].maxTokens, BUILDER_LOCAL_FILE_RETRY_MAX_TOKENS)
+  assert.equal(calls.every((input) => input.provider === 'ollama' && input.model === 'qwen2.5-coder:3b'), true)
+  assert.equal(calls.every((input) => input.responseFormat?.type === 'json_object'), true)
+})
+
+test('Local coding-model format failures remain bounded and explain the local structured-output issue', async () => {
+  let calls = 0
+  const service = createBuilderGenerationService({ request: async () => {
+    calls += 1
+    return { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: 'not JSON' }
+  } })
+  await assert.rejects(
+    () => service.plan({ brief: 'Build a website', provider: 'ollama', model: 'qwen2.5-coder:3b' }),
+    (error) => error instanceof BuilderGenerationError && error.code === 'OLLAMA_STRUCTURED_OUTPUT_INVALID'
+  )
+  assert.equal(calls, 2)
+})
+
+test('Builder edits retain the project generation provider and model instead of drifting to a later Settings choice', async () => {
+  const requests = []
+  const project = appendBuilderVersion({
+    ...createBuilderProject({ ownerId: 'user-1', now: NOW }),
+    files: validFiles.slice(0, 3),
+    validation: { valid: true, issues: [], checkedAt: NOW },
+  }, {
+    files: validFiles.slice(0, 3),
+    origin: 'generation',
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+    validation: { valid: true, issues: [], checkedAt: NOW },
+    now: NOW,
+  })
+  const service = createBuilderGenerationService({ request: async (input) => {
+    requests.push(input)
+    return { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ summary: 'Updated title', changes: [{ path: 'index.html', content: '<main>Updated</main>' }] }) }
+  } })
+  const updated = await service.applyEdit({ project, request: 'Improve the title', selectedPath: 'index.html' })
+  assert.equal(updated.files.find((file) => file.path === 'index.html').content, '<main>Updated</main>')
+  assert.equal(requests[0].provider, 'ollama')
+  assert.equal(requests[0].model, 'qwen2.5-coder:3b')
 })
 
 test('Gemini reports incomplete structured output with a provider-specific safe Builder code', async () => {

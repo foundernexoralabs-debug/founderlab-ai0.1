@@ -340,6 +340,7 @@ export async function requestOllama({
   system,
   maxTokens,
   temperature,
+  responseFormat,
   ollamaUrl,
 }, {
   fetchImpl = globalThis.fetch,
@@ -429,6 +430,10 @@ export async function requestOllama({
         model: selectedModel,
         messages: fullMessages,
         stream: false,
+        // Ollama's native JSON mode prevents a local coding model from
+        // wrapping Builder's structured contract in explanatory prose. The
+        // response is still parsed and validated by the Builder pipeline.
+        ...(responseFormat?.type === 'json_object' ? { format: 'json' } : {}),
         options: { num_predict: maxTokens, ...(temperature !== undefined && { temperature }) },
       }),
       signal: combinedSignal(OLLAMA_CHAT_TIMEOUT_MS, signal),

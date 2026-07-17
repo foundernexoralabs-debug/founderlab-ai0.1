@@ -32,6 +32,15 @@ const SAFE_BUILDER_ERROR_MESSAGES = Object.freeze({
   GENERATION_OUTPUT_TRUNCATED: 'The selected provider stopped before completing the Builder project. FounderLab kept the project unsaved.',
   GEMINI_OUTPUT_TRUNCATED: 'Gemini stopped before completing this Builder file. No project was saved.',
   GEMINI_STRUCTURED_OUTPUT_INVALID: 'Gemini did not return a complete structured Builder file. No project was saved.',
+  OLLAMA_CODE_MODEL_REQUIRED: 'Builder needs a code-capable local Ollama model. Select a Qwen Coder model in Settings, then retry.',
+  OLLAMA_MODEL_REQUIRED: 'Choose a local Ollama model before starting Builder generation.',
+  OLLAMA_MODEL_UNAVAILABLE: 'The selected local coding model is no longer available. Refresh local models and choose it again.',
+  OLLAMA_UNAVAILABLE: 'Local Ollama is not available. Start Ollama and confirm the local coding model is loaded, then retry.',
+  OLLAMA_TIMEOUT: 'The selected local coding model took too long to respond. Wait for it to finish loading, then retry.',
+  OLLAMA_BROWSER_UNSUPPORTED: 'Local Builder generation requires a Chromium-based desktop browser for the local Ollama connection.',
+  OLLAMA_BROWSER_ACCESS_DENIED: 'Your browser denied local-network access to Ollama. Allow access, reload FounderLab, then retry.',
+  OLLAMA_BROWSER_ACCESS_BLOCKED: 'Your browser blocked the local Ollama request. Open FounderLab in a normal Chromium browser tab, allow local access, reload, then retry.',
+  OLLAMA_STRUCTURED_OUTPUT_INVALID: 'The selected local coding model returned an incomplete Builder response. Try a smaller brief or retry after the model has fully loaded.',
   PROVIDER_RATE_LIMITED: 'The selected provider has reached its request limit. Wait briefly, then retry.',
   PROVIDER_REQUEST_TOO_LARGE: 'This Builder request was larger than the selected provider can accept. Simplify the brief and retry.',
   RATE_LIMITED: 'FounderLab request protection is temporarily limiting generation. Wait briefly, then retry.',
@@ -131,6 +140,7 @@ function BuilderPlan({ plan, onChange, onBuild, onBack, onCancel, busy, activity
     <Badge>Project plan</Badge>
     <h1 style={{ fontSize: 34, letterSpacing: '-.035em', margin: '16px 0 8px' }}>{plan.name || 'Your project'}</h1>
     <p style={{ color: C.t2, margin: 0 }}>Review the direction before FounderLab generates the files. You can edit the key decisions without completing a long form.</p>
+    {plan.provider && <p style={{ color: C.t3, fontSize: 12, margin: '10px 0 0' }}>Generation path: <strong style={{ color: C.t2 }}>{plan.provider === 'ollama' ? 'Local Ollama' : plan.provider}</strong>{plan.model ? ` · ${plan.model}` : ''}{plan.provider === 'ollama' ? ' · code-capable local model required' : ''}</p>}
     <div style={{ display: 'grid', gap: 14, marginTop: 28 }}>
       <section aria-label="Design direction" style={{ background: `linear-gradient(135deg, ${C.accentM}, ${C.surf})`, border: `1px solid ${C.border}`, padding: 18, borderRadius: 12 }}>
         <strong style={{ fontSize: 13 }}>Design direction</strong>
@@ -187,13 +197,13 @@ function FileExplorer({ project, activePath, dirtyPath, onSelect, onAdd, onDelet
   </div>
 }
 
-function PreviewPanel({ project, previewPath, onNavigate, onNavigationError, onReady, onRuntimeError, renderKey }) {
+function PreviewPanel({ project, previewPath, previewFragment, onNavigate, onNavigationError, onReady, onRuntimeError, renderKey }) {
   const frame = useRef(null)
-  const preview = useMemo(() => buildBuilderPreviewDocument(project.files, { entryFile: previewPath }), [project.files, previewPath])
+  const preview = useMemo(() => buildBuilderPreviewDocument(project.files, { entryFile: previewPath, fragment: previewFragment }), [project.files, previewFragment, previewPath])
   useEffect(() => {
     const listen = (event) => {
       if (!isSafeBuilderPreviewMessage(event, frame.current?.contentWindow)) return
-      if (event.data.type === 'navigate') onNavigate(event.data.detail?.path)
+      if (event.data.type === 'navigate') onNavigate(event.data.detail?.path, event.data.detail?.fragment)
       if (event.data.type === 'navigation-error') onNavigationError(event.data.detail?.code)
       if (event.data.type === 'ready') onReady()
       if (event.data.type === 'runtime-error') onRuntimeError()
@@ -223,6 +233,7 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
   const [mobileTab, setMobileTab] = useState('preview')
   const [previewKey, setPreviewKey] = useState(0)
   const [previewNotice, setPreviewNotice] = useState(null)
+  const [previewFragment, setPreviewFragment] = useState('')
   const previewHost = useRef(null)
 
   useEffect(() => {
@@ -334,10 +345,11 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
   }
   const validate = validateBuilderFiles(project.files)
   const status = projectStatus(project)
-  const onNavigate = useCallback((path) => {
+  const onNavigate = useCallback((path, fragment = '') => {
     if (project.files.some((file) => file.path === path && file.path.endsWith('.html'))) {
       setPreviewNotice(null)
       setPreviewPath(path)
+      setPreviewFragment(fragment || '')
       return
     }
     setPreviewNotice('This generated link does not point to a page in this project. Your current preview is unchanged.')
@@ -409,6 +421,7 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
   }
   const resetPreview = () => {
     setPreviewPath(previewProject.entryFile || BUILDER_ENTRY_FILE)
+    setPreviewFragment('')
     retryPreview()
   }
   const returnToLastWorkingPreview = () => {
@@ -416,6 +429,7 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
     if (!versionId || versionId === project.currentVersionId) return resetPreview()
     restore(versionId)
     setPreviewPath(BUILDER_ENTRY_FILE)
+    setPreviewFragment('')
     setPreviewNotice('Returned to your last working Builder version.')
     toast('Returned to your last working Builder version.', 'success')
   }
@@ -462,11 +476,11 @@ function BuilderWorkspaceView({ project, projects, onSelectProject, onCreateProj
           <textarea aria-label={`Edit ${activeFile?.path || 'project file'}`} value={draft} onChange={(event) => setDraft(event.target.value)} readOnly={isLargeFile} spellCheck={false} style={{ flex: 1, width: '100%', minHeight: 180, border: 'none', outline: 'none', resize: 'none', padding: 14, background: '#06060b', color: '#e8e8f8', font: '12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace' }} />
         </section>
         <section ref={previewHost} className="builder-preview-panel" style={{ '--builder-preview-display': mobileTab === 'preview' ? 'flex' : 'none', minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', background: C.bg, order: 1 }}>
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 13 }}>Website preview</strong><span style={{ color: C.t3, fontSize: 12 }}> · {displayedPreviewPath}</span></div><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}><span style={{ color: C.t3, fontSize: 11 }}>Scroll inside preview</span><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={displayedPreviewPath} onChange={(event) => setPreviewPath(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{previewPages.map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={resetPreview} aria-label="Reset preview to home">Home</Button><Button size="sm" variant="ghost" onClick={retryPreview} aria-label="Refresh preview">Refresh</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 13 }}>Website preview</strong><span style={{ color: C.t3, fontSize: 12 }}> · {displayedPreviewPath}</span></div><span role="status" style={{ color: project.preview?.status === 'error' ? C.red : project.preview?.status === 'building' ? C.accent : C.green, fontSize: 11 }}>{previewLabel}</span><div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}><span style={{ color: C.t3, fontSize: 11 }}>Scroll inside preview</span><select aria-label="Preview viewport" value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value)} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}><option value="desktop">Desktop</option><option value="tablet">Tablet</option><option value="mobile">Mobile</option></select><select aria-label="Preview page" value={displayedPreviewPath} onChange={(event) => { setPreviewPath(event.target.value); setPreviewFragment('') }} style={{ color: C.t2, background: C.surf, border: `1px solid ${C.border}`, borderRadius: 6, font: '12px inherit', padding: 4 }}>{previewPages.map((file) => <option key={file.path} value={file.path}>{file.path}</option>)}</select><Button size="sm" variant="ghost" onClick={resetPreview} aria-label="Reset preview to home">Home</Button><Button size="sm" variant="ghost" onClick={retryPreview} aria-label="Refresh preview">Refresh</Button><Button size="sm" variant="ghost" onClick={expandPreview} aria-label="Expand preview">⛶</Button></div></div>
           {previewNotice && <div role="alert" style={{ margin: '10px 12px 0', padding: '9px 11px', border: `1px solid ${C.yellow}55`, borderRadius: 9, background: '#241d0d', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><span style={{ fontSize: 12 }}>{previewNotice}</span><Button size="sm" variant="ghost" onClick={() => setPreviewNotice(null)}>Dismiss</Button></div>}
           {project.preview?.status === 'error' && <div role="alert" style={{ margin: '10px 12px 0', padding: 11, border: `1px solid ${C.red}55`, borderRadius: 9, background: '#261116', color: C.t2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}><div><strong style={{ color: C.t1, fontSize: 12 }}>{showingFallback ? 'Showing your last working preview' : 'This version needs attention'}</strong><span style={{ display: 'block', fontSize: 12, marginTop: 3 }}>{project.preview?.lastError || 'The current version could not render safely.'}</span></div><span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}><Button size="sm" variant="secondary" onClick={retryPreview}>Refresh preview</Button>{showingFallback && <Button size="sm" variant="secondary" onClick={returnToLastWorkingPreview}>Return to saved version</Button>}<Button size="sm" onClick={repairPreview} disabled={busy || editing}>{editing ? <Spinner size={13} color="#fff" /> : 'Repair with AI'}</Button></span></div>}
           <div style={{ padding: '10px 12px', borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 8, alignItems: 'center', background: C.surf }}><Input aria-label="Refine the website" value={changeRequest} onChange={(event) => setChangeRequest(event.target.value)} placeholder="Refine the website: make the hero more confident, add a product workflow…" onKeyDown={(event) => event.key === 'Enter' && applyChange()} /><Button size="sm" onClick={() => applyChange()} disabled={busy || editing || !changeRequest.trim()}>{editing ? <Spinner size={13} color="#fff" /> : 'Refine'}</Button></div>
-          <div aria-label="Website preview canvas" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: previewDevice === 'desktop' ? 10 : 16, display: 'flex', justifyContent: 'center', alignItems: 'stretch', background: '#06060b', boxSizing: 'border-box' }}><div style={{ width: previewWidth, maxWidth: '100%', height: '100%', minHeight: 0, flex: previewDevice === 'desktop' ? '1 1 auto' : '0 1 auto', overflow: 'hidden', background: '#fff', borderRadius: previewDevice === 'desktop' ? 10 : 14, boxShadow: '0 12px 32px rgba(0,0,0,.28)' }}><PreviewPanel project={previewProject} previewPath={displayedPreviewPath} onNavigate={onNavigate} onNavigationError={onNavigationError} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${showingFallback ? project.preview?.lastSuccessfulVersionId : project.currentVersionId || 'draft'}-${displayedPreviewPath}-${previewKey}`} /></div></div>
+          <div aria-label="Website preview canvas" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: previewDevice === 'desktop' ? 10 : 16, display: 'flex', justifyContent: 'center', alignItems: 'stretch', background: '#06060b', boxSizing: 'border-box' }}><div style={{ width: previewWidth, maxWidth: '100%', height: '100%', minHeight: 0, flex: previewDevice === 'desktop' ? '1 1 auto' : '0 1 auto', overflow: 'hidden', background: '#fff', borderRadius: previewDevice === 'desktop' ? 10 : 14, boxShadow: '0 12px 32px rgba(0,0,0,.28)' }}><PreviewPanel project={previewProject} previewPath={displayedPreviewPath} previewFragment={previewFragment} onNavigate={onNavigate} onNavigationError={onNavigationError} onReady={onPreviewReady} onRuntimeError={onRuntimeError} renderKey={`${showingFallback ? project.preview?.lastSuccessfulVersionId : project.currentVersionId || 'draft'}-${displayedPreviewPath}-${previewFragment}-${previewKey}`} /></div></div>
         </section>
       </div>
       <aside className={`builder-history-panel${mobileTab === 'history' ? ' builder-history-active' : ''}`} style={{ width: 184, borderLeft: `1px solid ${C.border}`, overflow: 'auto', flexShrink: 0 }}>
