@@ -8,7 +8,7 @@ import {
 // A browser recognition session can end after a quiet beat even when
 // `continuous` is enabled. This short handoff keeps dictation live without
 // forcing the user to restart after every natural pause.
-export const VOICE_INPUT_RESTART_DELAY_MS = 180
+export const VOICE_INPUT_RESTART_DELAY_MS = 150
 
 export function appendVoiceTranscript(existing = '', addition = '') {
   const prefix = typeof existing === 'string' ? existing.trim() : ''

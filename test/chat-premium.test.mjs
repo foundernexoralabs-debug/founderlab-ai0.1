@@ -4,6 +4,9 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
+import { getCodeGenerationReadiness, getLocalModelCapabilities } from '../src/ai/localModelCapabilities.js'
+import { normalizeOllamaModels } from '../src/ai/providers/ollama.js'
+import { requestCodeGenerationAI } from '../src/services/aiProviderService.js'
 import { getChatUIPreferences, persistChatUIPreferences } from '../src/features/chat/chatPreferences.js'
 import {
   getChatModelOptions,
@@ -21,6 +24,7 @@ import {
   MAX_SPEECH_PLAYBACK_CHUNK_LENGTH,
   splitSpeechForPlayback,
 } from '../src/lib/speechTextUtils.js'
+import { copyTextToClipboard } from '../src/components/content/messageContentUtils.js'
 import {
   getExplicitSelfCorrection,
   isLikelyRestartExtension,
@@ -79,6 +83,8 @@ import {
   getChatDestructiveActionCopy,
   getChatErrorPresentation,
   getChatRequestContext,
+  getConversationMemoryGuidance,
+  getChatResponseGuidance,
   getChatSystemPrompt,
   getLiveCallSystemPrompt,
   hasExplicitSelfCorrection,
@@ -175,6 +181,73 @@ test('Chat provider picker exposes configured cloud providers, Local Ollama, and
   })
 })
 
+test('Local Qwen Coder models are detected as code-ready without misclassifying general local chat models', () => {
+  assert.deepEqual(getLocalModelCapabilities('qwen2.5-coder:7b-instruct-q4_K_M'), {
+    codeGeneration: true,
+    label: 'Code-ready',
+    detail: 'Local coding model · Builder and Code AI ready',
+  })
+  assert.equal(getLocalModelCapabilities('qwen3:8b').codeGeneration, false)
+  assert.deepEqual(getCodeGenerationReadiness({ provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M' }), {
+    ready: true,
+    local: true,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:7b-instruct-q4_K_M',
+    reason: '',
+  })
+  assert.equal(getCodeGenerationReadiness({ provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }).reason, 'coding-model-required')
+
+  const models = normalizeOllamaModels([{ name: 'qwen2.5-coder:7b-instruct-q4_K_M', details: { family: 'qwen2' } }])
+  assert.equal(models[0].capabilities.codeGeneration, true)
+  const options = getChatModelOptions('ollama', { localModels: models })
+  assert.equal(options[0].codeReady, true)
+  assert.match(options[0].detail, /Builder and Code AI ready/)
+})
+
+test('Code-generation routing uses a selected local Qwen Coder directly and rejects a general local chat model honestly', async () => {
+  const requests = []
+  const result = await requestCodeGenerationAI({
+    provider: 'ollama',
+    model: 'qwen2.5-coder:7b-instruct-q4_K_M',
+    ollamaUrl: 'http://localhost:11434',
+    messages: [{ role: 'user', content: 'Write a small component.' }],
+    system: 'Return code only.',
+    maxTokens: 128,
+  }, {
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ message: { content: 'export default function Ready() { return null }' }, done: true }) }
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].url, 'http://localhost:11434/api/chat')
+  assert.equal(requests[0].body.model, 'qwen2.5-coder:7b-instruct-q4_K_M')
+
+  const blocked = await requestCodeGenerationAI({
+    provider: 'ollama',
+    model: 'llama3.2:3b-instruct-q4_K_M',
+    messages: [{ role: 'user', content: 'Write a component.' }],
+  })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.error.code, 'OLLAMA_CODE_MODEL_REQUIRED')
+
+  const cloud = await requestCodeGenerationAI({
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    messages: [{ role: 'user', content: 'Review this component.' }],
+  }, {
+    accessToken: 'verified-access-token',
+    fetchImpl: async (url, options) => {
+      assert.equal(url, '/api/ai')
+      assert.equal(options.headers.Authorization, 'Bearer verified-access-token')
+      return { ok: true, status: 200, json: async () => ({ ok: true, provider: 'groq', model: 'openai/gpt-oss-120b', text: 'Cloud route remains available.' }) }
+    },
+  })
+  assert.equal(cloud.ok, true)
+  assert.equal(cloud.text, 'Cloud route remains available.')
+})
+
 test('Chat reading flow only follows new content near the bottom and calculates a stable return-to-latest threshold', () => {
   assert.equal(distanceToConversationBottom({ scrollTop: 200, clientHeight: 500, scrollHeight: 1000 }), 300)
   assert.equal(distanceToConversationBottom({ scrollTop: 700, clientHeight: 500, scrollHeight: 1000 }), 0)
@@ -234,7 +307,46 @@ test('Voice requests use one contextual interpretation policy without polluting 
     { role: 'user', content: 'The investor launch.' },
   ])), /likely answer or correction/i)
   assert.deepEqual(CHAT_RESPONSE_OPTIONS, { maxTokens: 1500, temperature: 0.52 })
-  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 112, temperature: 0.4 })
+  assert.deepEqual(LIVE_CALL_RESPONSE_OPTIONS, { maxTokens: 190, temperature: 0.4 })
+})
+
+test('Chat gives providers adaptive response-shape guidance without forcing every request into one template', () => {
+  assert.match(getChatResponseGuidance('What is a concise positioning statement?'), /direct recommendation|core question/i)
+  assert.match(getChatResponseGuidance('Help me improve our onboarding strategy.'), /actionable explanation/i)
+  assert.match(getChatResponseGuidance('Build a landing page for our founder coaching product.', classifyChatRequest('Build a landing page for our founder coaching product.')), /compact plan/i)
+  const context = getChatRequestContext([{ role: 'user', content: 'How should I test this landing page?' }])
+  assert.match(context.responseGuidance, /direct recommendation|actionable explanation/i)
+  assert.match(getChatSystemPrompt(context), /Current response-shape note/i)
+})
+
+test('Chat uses immediate conversation context instead of rewriting a recent answer by default', () => {
+  const referenced = [
+    { role: 'user', content: 'Can you write the onboarding component?' },
+    { role: 'assistant', content: 'Here is the component and how to mount it.' },
+    { role: 'user', content: 'How do I use that code in my app?' },
+  ]
+  const guidance = getConversationMemoryGuidance(referenced)
+  assert.match(guidance, /immediately preceding assistant answer/i)
+  assert.match(guidance, /avoid rewriting the whole answer/i)
+  const context = getChatRequestContext(referenced)
+  assert.match(context.memoryGuidance, /immediately preceding/i)
+  assert.match(getChatSystemPrompt(context), /Current conversation-memory note/i)
+
+  const repeat = getConversationMemoryGuidance([
+    ...referenced.slice(0, 2),
+    { role: 'user', content: 'Please show the full code again.' },
+  ])
+  assert.match(repeat, /explicitly asked to see recent content again/i)
+  assert.equal(getConversationMemoryGuidance([{ role: 'user', content: 'What should I do next?' }]), '')
+})
+
+test('Code copy uses the Clipboard API first and leaves empty code untouched', async () => {
+  const copied = []
+  assert.equal(await copyTextToClipboard('const launch = true', {
+    clipboard: { writeText: async (value) => copied.push(value) },
+  }), true)
+  assert.deepEqual(copied, ['const launch = true'])
+  assert.equal(await copyTextToClipboard('', { clipboard: { writeText: async () => {} } }), false)
 })
 
 test('Chat request intent keeps planning guidance and explicit handoffs aligned', () => {
@@ -359,6 +471,7 @@ test('Voice input preserves a draft across brief pauses and only stops for expli
   assert.equal(normalizeFinalSpokenPhrase(' um, draft the launch plan '), 'draft the launch plan')
   assert.equal(getExplicitSelfCorrection('Draft a marketing plan; actually draft a launch plan'), 'draft a launch plan')
   assert.equal(getExplicitSelfCorrection('Draft the marketing plan, sorry, draft the launch plan'), 'draft the launch plan')
+  assert.equal(getExplicitSelfCorrection('I said gym, not gim'), 'gym')
   assert.equal(isLikelyRestartExtension('Draft the gim plan', 'Draft the gym plan for investors'), true)
   assert.equal(isLikelyRestartExtension('Draft the launch plan', 'Draft the budget plan for investors'), false)
   assert.equal(isLikelySingleWordRevision('Draft the gim plan', 'Draft the gym plan'), true)
@@ -496,14 +609,21 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
   assert.equal(longPlan.mode, 'call-summary')
   assert.doesNotMatch(longPlan.spokenText, /after the call/i)
-  assert.match(longPlan.spokenText, /expand on any part/i)
+  assert.doesNotMatch(longPlan.spokenText, /expand on any part/i)
   assert.equal(normalizeLiveCallResponseText('We can expand after the call.'), 'We can expand now.')
 
   const simpleAnswer = createLiveCallResponsePlan('Start with the audience that already feels the problem most sharply.')
   assert.equal(simpleAnswer.mode, 'call-conversational')
   assert.match(simpleAnswer.spokenText, /audience/i)
+  const usefulCallAnswer = createLiveCallResponsePlan('Start with your current active users, because they already understand the pain. Ask them which moment creates the most friction, then use their exact wording in your landing-page headline. That gives you a concrete message to test this week.')
+  assert.equal(usefulCallAnswer.mode, 'call-conversational')
+  assert.match(usefulCallAnswer.spokenText, /current active users/i)
+  assert.match(usefulCallAnswer.spokenText, /test this week/i)
+  const completeCallAnswer = createLiveCallResponsePlan('Start with your active users, then ask where the workflow feels slowest. Use the same language in your landing-page headline, keep the promise specific, and test it against your current version with a small audience. If the result improves sign-ups, keep that message and carry it through the first onboarding screen. This gives you a useful signal before you invest in a broader redesign.')
+  assert.equal(completeCallAnswer.mode, 'call-conversational')
+  assert.match(completeCallAnswer.spokenText, /broader redesign/i)
   assert.match(getLiveCallSystemPrompt({ latestMessageIsVoice: true }), /real-time FounderLab voice call/i)
-  assert.match(getLiveCallSystemPrompt(), /one to three concise sentences/i)
+  assert.match(getLiveCallSystemPrompt(), /two to four concise sentences/i)
   assert.match(getLiveCallSystemPrompt(), /next one or two steps/i)
 })
 
@@ -523,7 +643,7 @@ test('Live Call bounds context for faster turns without dropping the newest spok
   assert.equal(context.at(-1)?.content, 'The newest live request must remain available.')
   assert.equal(context.at(-1)?.source, 'voice')
   assert.equal(context.reduce((sum, message) => sum + message.content.length, 0) <= 6000, true)
-  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 112)
+  assert.equal(LIVE_CALL_RESPONSE_OPTIONS.maxTokens, 190)
 })
 
 test('Voice narration removes presentation artifacts, links, emojis, and code while retaining natural meaning', () => {
@@ -535,10 +655,13 @@ test('Voice narration removes presentation artifacts, links, emojis, and code wh
   assert.match(narration, /npm test or npm run build/i)
   assert.match(narration, /detailed code is available in the chat/i)
 
+  const naturalPacing = cleanTextForSpeech('Here is the approach: start with one clear promise; then test it with five customers, and keep the wording that lands.')
+  assert.match(naturalPacing, /approach: start with one clear promise\. then test it with five customers, and keep the wording that lands\./i)
+
   const structuredNarration = cleanTextForSpeech('> **Next steps**\n1. Confirm the plan\n2. Send the update\n| Owner | Status |\n| --- | --- |\n[^1]')
   assert.equal(structuredNarration.includes('Owner'), false)
   assert.equal(structuredNarration.includes('[^1]'), false)
-  assert.match(structuredNarration, /Confirm the plan\. Send the update/i)
+  assert.match(structuredNarration, /First, Confirm the plan\. Next, Send the update/i)
 })
 
 test('Chat UI preferences preserve the desktop history choice without accepting malformed saved values', () => {
@@ -620,12 +743,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(composerSource, /Shift\+Enter/)
   assert.match(composerSource, /Start a live voice session/)
   assert.match(composerSource, /ChatVoiceSession/)
-  assert.match(composerSource, /Upload an image/)
+  assert.match(composerSource, /Choose an image/)
   assert.match(composerSource, /paste an image directly/i)
   assert.match(composerSource, /voiceSessionActive && <ChatVoiceSession/)
   assert.doesNotMatch(composerSource, /Live dictation is flowing/i)
   assert.match(composerSource, /HOLD_TO_DICTATE_DELAY_MS/)
   assert.match(composerSource, /onPointerDown/)
+  assert.match(composerSource, /voiceStartedByPointerRef/)
+  assert.match(composerSource, /void onVoiceStart\(\)/)
   assert.match(composerSource, /void onVoicePrepare\?\.\(\{ quiet: true \}\)/)
   assert.match(composerSource, /onVoicePrepare/)
   assert.match(recognitionSource, /microphonePreparationRef/)
@@ -681,6 +806,15 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(liveCallUtilsSource, /Live call recap/)
   assert.match(voiceResponseSource, /cleanTextForSpeech/)
   assert.match(speechTextSource, /detailed code is available in the chat/i)
+  const messageContentSource = fs.readFileSync(path.join(repositoryRoot, 'src/components/content/MessageContent.jsx'), 'utf8')
+  const clipboardSource = fs.readFileSync(path.join(repositoryRoot, 'src/components/content/messageContentUtils.js'), 'utf8')
+  assert.match(messageContentSource, /CodeBlock/)
+  assert.match(messageContentSource, /Copy code/)
+  assert.match(clipboardSource, /clipboard\.writeText/)
+  assert.match(workspaceSource, /function resetVoiceSession/)
+  assert.match(workspaceSource, /voiceSessionRequestRef/)
+  assert.match(workspaceSource, /voiceRequest !== voiceSessionRequestRef\.current/)
+  assert.match(workspaceSource, /if \(voiceRequest === voiceSessionRequestRef\.current\) resetVoiceSession\(\)/)
   assert.match(confirmationSource, /role="alertdialog"/)
   assert.match(confirmationSource, /aria-modal="true"/)
   assert.match(workspaceSource, /fl-chat-playback-dock/)
@@ -706,6 +840,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(css, /fl-chat-voice-popover/)
   assert.match(css, /fl-chat-confirm-dialog/)
   assert.match(css, /fl-chat-composer-image-action/)
+  assert.match(css, /fl-chat-composer-shell/)
+  assert.match(css, /fl-message-code-copy/)
   assert.match(css, /fl-chat-voice-dock/)
   assert.match(css, /fl-chat-live-call/)
   assert.match(css, /fl-chat-live-call-stage/)

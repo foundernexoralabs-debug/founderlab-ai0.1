@@ -6,7 +6,10 @@ import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTex
 export const MAX_FULL_READ_ALOUD_LENGTH = 8000
 export const MAX_FULL_VOICE_RESPONSE_LENGTH = 6000
 export const MAX_STRUCTURED_FULL_VOICE_RESPONSE_LENGTH = 5000
-export const MAX_LIVE_CALL_SPEECH_LENGTH = 360
+// This aligns with the live prompt's 55–125-word target. It is enough room
+// for a direct answer, a concrete reason, and a next move without turning the
+// call into normal read-aloud.
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 680
 
 /** Keep the active call in the present instead of deferring useful help. */
 export function normalizeLiveCallResponseText(value = '') {
@@ -23,18 +26,18 @@ function shortenAtSentence(text, limit = MAX_FULL_VOICE_RESPONSE_LENGTH) {
   return `${(boundary > Math.floor(limit * .48) ? clipped.slice(0, boundary + 1) : clipped.slice(0, limit)).trim()}…`
 }
 
-function getListHighlights(source) {
+function getListHighlights(source, maximum = 3) {
   const withoutCode = source.replace(/```[\s\S]*?```/g, ' ')
   return withoutCode
     .split('\n')
     .map((line) => line.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.+)$/)?.[1] || '')
     .map((item) => cleanTextForSpeech(item))
     .filter(Boolean)
-    .slice(0, 3)
+    .slice(0, maximum)
 }
 
-function createStructuredOverview(source, spokenBase, limit) {
-  const highlights = getListHighlights(source)
+function createStructuredOverview(source, spokenBase, limit, maximumHighlights = 3) {
+  const highlights = getListHighlights(source, maximumHighlights)
   if (!highlights.length) return shortenAtSentence(spokenBase, limit)
   const naturalHighlights = highlights.map((item, index) => {
     const lead = index === 0 ? 'First' : index === highlights.length - 1 ? 'Finally' : 'Next'
@@ -151,13 +154,16 @@ export function createLiveCallResponsePlan(content = '') {
   }
 
   const needsSummary = profile.hasCode || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
-  const suffix = needsSummary ? ' I can expand on any part of that.' : ''
-  const limit = Math.max(150, MAX_LIVE_CALL_SPEECH_LENGTH - suffix.length)
-  const overview = profile.hasStructuredContent
-    ? createStructuredOverview(source, spokenBase, limit)
-    : shortenAtSentence(spokenBase, limit)
+  // A short, structured reply is still a real answer. Reading it directly is
+  // more useful than collapsing it into three generic highlights. Reserve an
+  // overview for material that is genuinely unsuitable for a spoken turn.
+  const overview = !needsSummary
+    ? spokenBase
+    : profile.hasStructuredContent
+      ? createStructuredOverview(source, spokenBase, MAX_LIVE_CALL_SPEECH_LENGTH, 4)
+      : shortenAtSentence(spokenBase, MAX_LIVE_CALL_SPEECH_LENGTH)
   return {
-    spokenText: `${overview}${suffix}`.trim(),
+    spokenText: overview.trim(),
     mode: needsSummary ? 'call-summary' : 'call-conversational',
     note: needsSummary ? 'A concise live-call answer is playing.' : '',
   }

@@ -7,10 +7,27 @@ function stripCodeBlocks(value = '') {
   return { text, containedCode }
 }
 
+function addNaturalListTransitions(value = '') {
+  let itemIndex = 0
+  return String(value).split('\n').map((line) => {
+    const match = line.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.+)$/)
+    if (!match) {
+      if (line.trim()) itemIndex = 0
+      return line
+    }
+    const lead = itemIndex === 0 ? 'First, ' : itemIndex === 1 ? 'Next, ' : itemIndex === 2 ? 'Then, ' : 'Also, '
+    itemIndex += 1
+    return `${lead}${match[1]}`
+  }).join('\n')
+}
+
 // ElevenLabs and browser speech engines are more reliable with sentence-sized
 // requests. Keep every character in the audible answer while avoiding a
 // single oversized payload being silently truncated by a provider or engine.
-export const MAX_SPEECH_PLAYBACK_CHUNK_LENGTH = 1800
+// Keep normal prose in fewer provider requests. This remains below the
+// server-side ElevenLabs limit (2,500 characters) while reducing hand-offs
+// that can make a medium-length read feel chopped into separate clips.
+export const MAX_SPEECH_PLAYBACK_CHUNK_LENGTH = 2200
 
 function splitLongSpeechSegment(value, limit) {
   const chunks = []
@@ -99,7 +116,7 @@ export function cleanTextForSpeech(value = '') {
   const source = typeof value === 'string' ? value : ''
   if (!source.trim()) return ''
 
-  const { text: withoutCode, containedCode } = stripCodeBlocks(source)
+  const { text: withoutCode, containedCode } = stripCodeBlocks(addNaturalListTransitions(source))
   const cleaned = withoutCode
     .replace(/^\s*(?:---+|___+|\*\*\*+)\s*$/gm, ' ')
     .replace(/^\s*\|.+\|\s*$/gm, ' ')
@@ -116,8 +133,13 @@ export function cleanTextForSpeech(value = '') {
     .replace(/&/g, ' and ')
     .replace(/\s*\/\s*/g, ' or ')
     .replace(/[()[\]{}]/g, '')
+    // Keep meaningful punctuation for natural pacing. Collapsing every
+    // comma, colon, and semicolon into the same pause made otherwise fluent
+    // prose sound flat even though the narration content was correct.
     .replace(/[—–]+/g, ', ')
-    .replace(/[,:;]+/g, ',')
+    .replace(/;+/g, '. ')
+    .replace(/,{2,}/g, ',')
+    .replace(/:{2,}/g, ': ')
     .replace(/[!?]{2,}|\.{2,}|…+/g, '.')
     .replace(/\n+/g, '. ')
     .replace(/(?:\.\s*){2,}/g, '. ')

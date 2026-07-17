@@ -1,4 +1,30 @@
+import { useEffect, useRef, useState } from 'react'
 import { C } from '@/app/theme'
+import { copyTextToClipboard } from './messageContentUtils'
+
+function CodeBlock({ language = '', code = '' }) {
+  const [copied, setCopied] = useState(false)
+  const resetTimerRef = useRef(null)
+
+  useEffect(() => () => clearTimeout(resetTimerRef.current), [])
+
+  async function copyCode() {
+    if (!await copyTextToClipboard(code)) return
+    setCopied(true)
+    clearTimeout(resetTimerRef.current)
+    resetTimerRef.current = setTimeout(() => setCopied(false), 1600)
+  }
+
+  return (
+    <div className="fl-message-code-block" style={{ background:'#050508', border:`1px solid ${C.border}`, borderRadius:10, margin:'10px 0', overflow:'hidden' }}>
+      <div className="fl-message-code-toolbar" style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, minHeight:34, padding:'5px 8px 5px 12px', background:C.surfHigh, borderBottom:`1px solid ${C.border}` }}>
+        <span style={{ color:C.accent, fontSize:10, fontWeight:700, letterSpacing:'.065em', textTransform:'uppercase' }}>{language || 'Code'}</span>
+        <button type="button" className={`fl-message-code-copy${copied ? ' is-copied' : ''}`} onClick={copyCode} aria-label={copied ? 'Code copied' : 'Copy code'} title={copied ? 'Code copied' : 'Copy code'} style={{ border:`1px solid ${copied ? C.borderFocus : C.border}`, borderRadius:7, background:copied ? C.accentM : 'rgba(255,255,255,.025)', color:copied ? C.accent : C.t2, cursor:'pointer', padding:'4px 8px', font:'650 10.5px inherit' }}>{copied ? 'Copied' : 'Copy'}</button>
+      </div>
+      <div style={{ padding:'11px 14px', fontFamily:'monospace', fontSize:12.5, whiteSpace:'pre-wrap', overflowX:'auto', lineHeight:1.6, color:'#e2e8f0' }}>{code}</div>
+    </div>
+  )
+}
 
 export function renderMsg(content) {
   if (!content) return null
@@ -8,10 +34,7 @@ export function renderMsg(content) {
     if (part.startsWith('```')) {
       const m = part.match(/```(\w*)\n?([\s\S]*?)```/)
       if (m) return (
-        <div key={i} style={{ background:'#050508', border:`1px solid ${C.border}`, borderRadius:8, margin:'8px 0', overflow:'hidden' }}>
-          {m[1] && <div style={{ background:C.surfHigh, padding:'4px 12px', fontSize:10, color:C.accent, fontWeight:600, letterSpacing:'.06em', textTransform:'uppercase', borderBottom:`1px solid ${C.border}` }}>{m[1]}</div>}
-          <div style={{ padding:'10px 14px', fontFamily:'monospace', fontSize:12.5, whiteSpace:'pre-wrap', overflowX:'auto', lineHeight:1.6, color:'#e2e8f0' }}>{m[2].replace(/^\n/,'')}</div>
-        </div>
+        <CodeBlock key={i} language={m[1]} code={m[2].replace(/^\n/,'')} />
       )
     }
     // Inline rendering: process line by line

@@ -30,6 +30,7 @@ export function ChatComposer({
   const actionMenuRef = useRef(null)
   const holdTimerRef = useRef(null)
   const heldToDictateRef = useRef(false)
+  const voiceStartedByPointerRef = useRef(false)
   const pointerIdRef = useRef(null)
   const suppressVoiceClickRef = useRef(false)
   const [actionMenuOpen, setActionMenuOpen] = useState(false)
@@ -97,15 +98,22 @@ export function ChatComposer({
     holdTimerRef.current = null
     try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {}
     const heldToDictate = heldToDictateRef.current
+    const voiceStartedByPointer = voiceStartedByPointerRef.current
     pointerIdRef.current = null
     heldToDictateRef.current = false
-    if (cancelled) return
+    voiceStartedByPointerRef.current = false
+    if (cancelled) {
+      if (voiceStartedByPointer) voiceSessionActions.onCancel?.({ quiet: true })
+      return
+    }
     if (heldToDictate) {
       onVoiceFinish()
       suppressVoiceClickRef.current = true
       return
     }
-    onVoiceStart()
+    // A tap starts a session on press, so release keeps it listening. This
+    // removes an avoidable tap-to-listen delay while preserving hold/release
+    // as the intentional short-dictation flow.
     suppressVoiceClickRef.current = true
   }
 
@@ -113,11 +121,13 @@ export function ChatComposer({
     if (event.button !== 0) return
     pointerIdRef.current = event.pointerId
     heldToDictateRef.current = false
+    voiceStartedByPointerRef.current = true
     try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch {}
-    // Start the permission/device preflight immediately, but keep the tap and
-    // hold interaction model stable. A quick release can begin recognition as
-    // soon as this preparation resolves instead of paying the full setup time.
+    // Start immediately on press. The visual state changes at once while the
+    // browser completes its permission handshake; a hold simply finishes the
+    // capture on release instead of waiting to begin it there.
     void onVoicePrepare?.({ quiet: true })
+    void onVoiceStart()
     clearTimeout(holdTimerRef.current)
     holdTimerRef.current = setTimeout(() => {
       if (pointerIdRef.current !== event.pointerId) return
@@ -144,6 +154,7 @@ export function ChatComposer({
           </div>
         )}
         {!voiceSessionActive && <div
+          className="fl-chat-composer-shell"
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => { event.preventDefault(); attachFile(event.dataTransfer.files?.[0]) }}
           style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 11px', background: `${C.surf}e8`, border: `1px solid ${C.border}`, borderRadius: 17, boxShadow: '0 12px 34px rgba(0,0,0,.26)', transition: 'border-color .15s' }}>
@@ -153,12 +164,12 @@ export function ChatComposer({
             {actionMenuOpen && (
               <div className="fl-chat-composer-action-menu" role="menu" aria-label="Add to message">
                 <div className="fl-chat-composer-action-menu-heading">
-                  <span>Bring in context</span>
-                  <small>Use a visual when it helps FounderLab understand your message.</small>
+                  <span>Add visual context</span>
+                  <small>Attach one image when it will make your question clearer.</small>
                 </div>
                 <button type="button" role="menuitem" className="fl-chat-composer-image-action" onClick={openImagePicker}>
                   <span aria-hidden="true">◫</span>
-                  <span><strong>Upload an image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
+                  <span><strong>Choose an image</strong><small>PNG, JPG, WebP, or GIF · up to 5 MB</small></span>
                   <i aria-hidden="true">→</i>
                 </button>
                 <p className="fl-chat-composer-action-menu-hint">You can also paste an image directly into the message box.</p>
@@ -167,6 +178,7 @@ export function ChatComposer({
           </div>
           <textarea
             ref={textRef}
+            className="fl-chat-composer-input"
             value={input}
             onChange={(event) => onInput(event.target.value)}
             onPaste={(event) => {
@@ -192,7 +204,7 @@ export function ChatComposer({
         </div>}
         {!voiceSessionActive && <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 8, minHeight: 18, flexWrap: 'wrap' }}>
           {providerSwitcher}
-          <span style={{ color: C.t3, fontSize: 10.5 }}>Tap mic for a live voice session · hold to talk · Enter to send · Shift+Enter for a new line</span>
+          <span className="fl-chat-composer-help" style={{ color: C.t3, fontSize: 10.5 }}>Tap mic for a live voice session · hold to talk · Enter to send · Shift+Enter for a new line</span>
         </div>}
       </div>
     </div>

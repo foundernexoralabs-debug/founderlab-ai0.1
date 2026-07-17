@@ -1,6 +1,7 @@
 const LEADING_HESITATION = /^\s*(?:um+|uh+|erm+)\s*[,;:-]?\s*/i
 const SELF_CORRECTION = /(?:^|[,;.!?]\s*)(?:(?:no|sorry)[,;]?\s*)?(?:i\s+(?:mean|meant)|let me rephrase|correction|actually|to be clear)\s*[:,;]?\s+(.+)$/i
 const SHORT_VERBAL_RESTART = /(?:^|[,;.!?]\s*)(?:no|sorry)[,;]\s+(.+)$/i
+const SPOKEN_QUOTED_CORRECTION = /(?:^|[,;.!?]\s*)i\s+(?:said|meant)\s+(.+?)[,;]\s*(?:not|no)\s+.+$/i
 
 /** Keep harmless verbal fillers out of the final composed request, not out of live interim feedback. */
 export function normalizeFinalSpokenPhrase(value = '') {
@@ -15,6 +16,7 @@ export function normalizeFinalSpokenPhrase(value = '') {
 export function getExplicitSelfCorrection(value = '') {
   const phrase = normalizeFinalSpokenPhrase(value)
   return phrase.match(SELF_CORRECTION)?.[1]?.trim()
+    || phrase.match(SPOKEN_QUOTED_CORRECTION)?.[1]?.trim()
     || phrase.match(SHORT_VERBAL_RESTART)?.[1]?.trim()
     || ''
 }

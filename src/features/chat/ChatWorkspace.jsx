@@ -82,6 +82,7 @@ export function ChatWorkspace({ user }) {
   const saveTimerRef = useRef(null)
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
+  const voiceSessionRequestRef = useRef(0)
   const voiceSessionRef = useRef({ active: false, transcript: '' })
   const liveCallRef = useRef({ active: false, muted: false, phase: 'idle', transcript: '', turns: [], providerId: '', modelId: '', turnTimer: null, turn: 0, inFlight: false, monitoringInterrupt: false })
 
@@ -322,11 +323,21 @@ export function ChatWorkspace({ user }) {
     if (!quiet) toast('Voice capture discarded', 'success')
   }
 
+  /** A completed or stopped voice turn should hand control back to Chat. */
+  function resetVoiceSession() {
+    voiceSessionRef.current = { active: false, transcript: '', cancelled: false }
+    clearVoiceDraft()
+    setActiveTTS(null)
+    setPlaybackNote('')
+    setVoiceSession(EMPTY_VOICE_SESSION)
+  }
+
   function endVoiceSession() {
     const current = voiceSession
     const cancellingRequest = current.phase === 'thinking'
     if (cancellingRequest) {
       voiceSessionRef.current.cancelled = true
+      voiceSessionRequestRef.current += 1
       stopGenerating()
     }
     if (current.phase === 'speaking') stopTTS()
@@ -905,11 +916,12 @@ export function ChatWorkspace({ user }) {
       setVoiceSession({ phase: 'error', transcript: '', note: '', error: 'There is no captured voice message to send yet.' })
       return
     }
+    const voiceRequest = ++voiceSessionRequestRef.current
     voiceSessionRef.current = { active: false, transcript, cancelled: false }
     stopRecognition()
     setVoiceSession({ phase: 'thinking', transcript, note: '', error: '' })
     const response = await send(transcript, { source: 'voice' })
-    if (voiceSessionRef.current.cancelled) return
+    if (voiceRequest !== voiceSessionRequestRef.current) return
     if (!response?.ok || !response.message) {
       setVoiceSession({
         phase: 'error',
@@ -924,7 +936,7 @@ export function ChatWorkspace({ user }) {
 
     const plan = createVoiceResponsePlan(response.message.content)
     if (!plan.spokenText) {
-      setVoiceSession({ phase: 'complete', transcript: '', note: 'The response is ready in the conversation.', error: '' })
+      resetVoiceSession()
       return
     }
 
@@ -932,9 +944,7 @@ export function ChatWorkspace({ user }) {
     setActiveTTS(response.message.id)
     try {
       await speak(plan.spokenText)
-      setVoiceSession((current) => current.phase === 'speaking'
-        ? { phase: 'complete', transcript: '', note: 'The complete response is ready in the conversation.', error: '' }
-        : current)
+      if (voiceRequest === voiceSessionRequestRef.current) resetVoiceSession()
     } finally {
       setActiveTTS((current) => current === response.message.id ? null : current)
     }
@@ -943,14 +953,14 @@ export function ChatWorkspace({ user }) {
   function stopVoiceSessionActivity() {
     if (voiceSession.phase === 'thinking') {
       voiceSessionRef.current.cancelled = true
+      voiceSessionRequestRef.current += 1
       stopGenerating()
-      setVoiceSession({ phase: 'complete', transcript: '', note: 'Request stopped. Your message remains in the conversation and can be retried there.', error: '' })
+      resetVoiceSession()
       return
     }
     if (voiceSession.phase === 'speaking') {
       stopTTS()
-      setActiveTTS(null)
-      setVoiceSession((current) => ({ ...current, phase: 'complete', note: 'Playback stopped. The complete response remains in the conversation.', error: '' }))
+      resetVoiceSession()
     }
   }
 

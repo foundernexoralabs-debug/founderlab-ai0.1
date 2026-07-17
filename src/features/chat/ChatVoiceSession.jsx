@@ -1,7 +1,7 @@
 const VOICE_SESSION_COPY = {
   starting: {
     title: 'Connecting microphone',
-    detail: 'Preparing voice input.',
+    detail: 'Voice is starting now. Begin speaking as soon as listening appears.',
   },
   listening: {
     title: 'Listening',
