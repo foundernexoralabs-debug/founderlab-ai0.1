@@ -1,7 +1,9 @@
 import { cleanTextForSpeech, getSpeechContentProfile } from '../../lib/speechTextUtils.js'
 
-const MAX_CONVERSATIONAL_SPEECH_LENGTH = 620
-export const MAX_LIVE_CALL_SPEECH_LENGTH = 280
+// Long uninterrupted narration gets tiring. Preserve full detail visually,
+// but keep spoken responses at a natural conversational turn length.
+const MAX_CONVERSATIONAL_SPEECH_LENGTH = 460
+export const MAX_LIVE_CALL_SPEECH_LENGTH = 220
 
 /** Keep the active call in the present instead of deferring useful help. */
 export function normalizeLiveCallResponseText(value = '') {
@@ -101,7 +103,7 @@ export function createLiveCallResponsePlan(content = '') {
   }
 
   const needsSummary = profile.hasCode || profile.hasStructuredContent || profile.hasReferences || spokenBase.length > MAX_LIVE_CALL_SPEECH_LENGTH
-  const suffix = needsSummary ? ' I can walk through the next useful step now.' : ''
+  const suffix = needsSummary ? ' I can expand on any part of that.' : ''
   const limit = Math.max(150, MAX_LIVE_CALL_SPEECH_LENGTH - suffix.length)
   const overview = profile.hasStructuredContent
     ? createStructuredOverview(source, spokenBase, limit)

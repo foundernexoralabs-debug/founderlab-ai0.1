@@ -863,11 +863,11 @@ function YouTubeAIPage({ user }) {
             <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
               <button onClick={()=>handleDub('male')} disabled={dubStatus==='loading'}
                 style={{ padding:'8px 16px', borderRadius:10, border:`1px solid ${C.borderFocus}`, background:C.accentM, color:C.accent, cursor:dubStatus==='loading'?'not-allowed':'pointer', fontSize:13, fontFamily:'inherit', opacity:dubStatus==='loading'?0.6:1, transition:'all .15s' }}>
-                {dubStatus==='loading'?'⏳ Generating…':'♂ Male Voice (Brian)'}
+                {dubStatus==='loading'?'⏳ Generating…':'♂ Male Voice (Eddie)'}
               </button>
               <button onClick={()=>handleDub('female')} disabled={dubStatus==='loading'}
                 style={{ padding:'8px 16px', borderRadius:10, border:`1px solid ${C.borderFocus}`, background:C.accentM, color:C.accent, cursor:dubStatus==='loading'?'not-allowed':'pointer', fontSize:13, fontFamily:'inherit', opacity:dubStatus==='loading'?0.6:1, transition:'all .15s' }}>
-                ♀ Female Voice
+                ♀ Female Voice (Talia)
               </button>
               {dubStatus==='done' && <span style={{ fontSize:12, color:C.green, alignSelf:'center' }}>✅ Downloaded</span>}
             </div>

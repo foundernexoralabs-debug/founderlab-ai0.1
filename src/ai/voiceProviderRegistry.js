@@ -9,20 +9,35 @@ const voiceProviderEntries = [
     // choices stay intact in voicePreferences rather than being overwritten.
     defaultVoice: 'female',
     capabilities: { cloud: true, audioOutput: true, browserFallback: true },
+    // Tuned for calm, direct assistant conversation. Keep style at zero so
+    // either voice stays conversational rather than drifting toward a
+    // storyteller performance; the slightly measured default is easier to
+    // follow over a longer chat or live-call session.
+    conversationSettings: {
+      stability: 0.48,
+      similarity_boost: 0.78,
+      style: 0,
+      use_speaker_boost: true,
+      speed: 0.98,
+    },
     voices: {
-      male: 'nPczCjzI2devNBz1zQrb',
+      male: 'l7kNoIfnJKPg7779LI2t',
       female: 'OZ0L6eISlOejga3XjDFt',
     },
     voiceLabels: {
-      male: 'Brian',
+      male: 'Eddie — Helpful and Comforting',
       female: 'Talia — Warm Soft Guide',
     },
-    // Sarah is Talia's legacy predecessor and remains the closest safe
-    // fallback while ElevenLabs continues the default-voice transition.
+    // Fallbacks are intentionally assistant-oriented. Sarah and Caleb keep
+    // the selected tone warm and helpful if a newer default voice is missing.
     voiceFallbacks: {
       female: {
         id: 'EXAVITQu4vr4xnSDxMaL',
         label: 'Sarah — Warm Friendly Guide',
+      },
+      male: {
+        id: 'AaOhDHYJ1XLZk74lXhdE',
+        label: 'Caleb — Trusted Guide',
       },
     },
   },
@@ -32,6 +47,7 @@ function freezeVoiceProvider(provider) {
   return Object.freeze({
     ...provider,
     capabilities: Object.freeze({ ...provider.capabilities }),
+    conversationSettings: Object.freeze({ ...provider.conversationSettings }),
     voices: Object.freeze({ ...provider.voices }),
     voiceLabels: Object.freeze({ ...provider.voiceLabels }),
     voiceFallbacks: Object.freeze(Object.fromEntries(Object.entries(provider.voiceFallbacks || {}).map(([voice, fallback]) => [voice, Object.freeze({ ...fallback })]))),

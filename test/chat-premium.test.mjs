@@ -386,7 +386,7 @@ test('Live Call keeps turns ephemeral, saves one compact recap, and asks provide
   assert.equal(longPlan.spokenText.length <= MAX_LIVE_CALL_SPEECH_LENGTH, true)
   assert.equal(longPlan.mode, 'call-summary')
   assert.doesNotMatch(longPlan.spokenText, /after the call/i)
-  assert.match(longPlan.spokenText, /next useful step now/i)
+  assert.match(longPlan.spokenText, /expand on any part/i)
   assert.equal(normalizeLiveCallResponseText('We can expand after the call.'), 'We can expand now.')
 
   const simpleAnswer = createLiveCallResponsePlan('Start with the audience that already feels the problem most sharply.')

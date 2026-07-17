@@ -42,7 +42,7 @@ async function synthesizeVoice({ text, gender, env = process.env, fetchImpl = gl
       body: JSON.stringify({
         text: String(text || '').slice(0, 2500),
         model_id: provider.defaultModel,
-        voice_settings: { stability: 0.5, similarity_boost: 0.82, style: 0.3, use_speaker_boost: true },
+        voice_settings: provider.conversationSettings,
       }),
     })
     if (response.ok) return Buffer.from(await response.arrayBuffer())

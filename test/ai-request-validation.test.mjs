@@ -170,15 +170,52 @@ test('voice configuration centralizes the ElevenLabs model, voice IDs, and brows
   assert.equal(voice.capabilities.browserFallback, true)
   assert.equal(voice.voices.female, 'OZ0L6eISlOejga3XjDFt')
   assert.equal(voice.voiceLabels.female, 'Talia — Warm Soft Guide')
-  assert.equal(voice.voices.male, 'nPczCjzI2devNBz1zQrb')
+  assert.equal(voice.voices.male, 'l7kNoIfnJKPg7779LI2t')
+  assert.equal(voice.voiceLabels.male, 'Eddie — Helpful and Comforting')
+  assert.deepEqual(voice.conversationSettings, {
+    stability: 0.48,
+    similarity_boost: 0.78,
+    style: 0,
+    use_speaker_boost: true,
+    speed: 0.98,
+  })
   assert.deepEqual(getVoiceCandidates('elevenlabs', 'female').map((candidate) => [candidate.id, candidate.label, candidate.fallback]), [
     ['OZ0L6eISlOejga3XjDFt', 'Talia — Warm Soft Guide', false],
     ['EXAVITQu4vr4xnSDxMaL', 'Sarah — Warm Friendly Guide', true],
   ])
+  assert.deepEqual(getVoiceCandidates('elevenlabs', 'male').map((candidate) => [candidate.id, candidate.label, candidate.fallback]), [
+    ['l7kNoIfnJKPg7779LI2t', 'Eddie — Helpful and Comforting', false],
+    ['AaOhDHYJ1XLZk74lXhdE', 'Caleb — Trusted Guide', true],
+  ])
 
   const browserVoiceSource = fs.readFileSync(path.join(repositoryRoot, 'src/lib/voiceService.ts'), 'utf8')
-  assert.equal(browserVoiceSource.includes('nPczCjzI2devNBz1zQrb'), false)
+  assert.equal(browserVoiceSource.includes('l7kNoIfnJKPg7779LI2t'), false)
   assert.equal(browserVoiceSource.includes('OZ0L6eISlOejga3XjDFt'), false)
+})
+
+test('ElevenLabs uses Eddie and falls back to Caleb only when Eddie is unavailable', async () => {
+  const requestedVoiceIds = []
+  let requestBody
+  const audio = await synthesizeVoice({
+    text: 'Keep the answer calm and useful.',
+    gender: 'male',
+    env: { ELEVENLABS_API_KEY: 'test-key' },
+    fetchImpl: async (url, request) => {
+      requestedVoiceIds.push(url.split('/').at(-1))
+      requestBody = JSON.parse(request.body)
+      if (requestedVoiceIds.length === 1) return { ok: false, status: 404 }
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([4, 5, 6]).buffer }
+    },
+  })
+  assert.deepEqual(requestedVoiceIds, ['l7kNoIfnJKPg7779LI2t', 'AaOhDHYJ1XLZk74lXhdE'])
+  assert.deepEqual(requestBody.voice_settings, {
+    stability: 0.48,
+    similarity_boost: 0.78,
+    style: 0,
+    use_speaker_boost: true,
+    speed: 0.98,
+  })
+  assert.deepEqual([...audio], [4, 5, 6])
 })
 
 test('ElevenLabs uses Talia by default and only falls back to Sarah when Talia is unavailable', async () => {
