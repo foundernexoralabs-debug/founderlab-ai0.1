@@ -19,6 +19,31 @@ function toGenerationError(error) {
   return new BuilderGenerationError('GENERATION_FAILED', error?.message || 'FounderLab could not generate this project.', { cause: error })
 }
 
+// The generation prompt explicitly tells the model: "Do not include script
+// or link tags in HTML; styles.css and app.js are injected by the isolated
+// runtime." Small local coding models frequently ignore this — pairing a
+// page with a <link rel="stylesheet" href="styles.css"> and a
+// <script src="app.js"></script> is such a deeply ingrained HTML authoring
+// pattern that a single prompt line often isn't enough to override it,
+// where a larger cloud model follows the instruction reliably. These exact
+// self-references are completely safe: they only ever point at the
+// project's own styles.css/app.js, which the isolated preview harness
+// already injects itself regardless — they are never the arbitrary inline
+// or externally-sourced runtime tag validateBuilderFiles' INLINE_RUNTIME_TAG
+// rule exists to catch. Normalizing them away here, at generation time,
+// fixes real local-model output without touching that safety rule at all:
+// an actually-unsafe inline <script>…</script> or a <link> to any other
+// path/URL is left completely alone and still correctly fails validation.
+const SELF_REFERENCING_STYLESHEET_LINK = /<link\b[^>]*\bhref\s*=\s*(['"])\.?\/?styles\.css\1[^>]*>/gi
+const SELF_REFERENCING_SCRIPT_TAG = /<script\b[^>]*\bsrc\s*=\s*(['"])\.?\/?app\.js\1[^>]*>\s*<\/script>/gi
+
+function stripHarnessInjectedReferences(path, content) {
+  if (typeof content !== 'string' || !path?.endsWith('.html')) return content
+  return content
+    .replace(SELF_REFERENCING_STYLESHEET_LINK, '')
+    .replace(SELF_REFERENCING_SCRIPT_TAG, '')
+}
+
 function requireResult(result, label) {
   if (!result?.ok) {
     throw new BuilderGenerationError(result?.error?.code || 'PROVIDER_FAILURE', result?.error?.message || `${label} failed.`, { retryable: result?.error?.retryable !== false })
@@ -194,7 +219,7 @@ export function createBuilderGenerationService({ request = requestCodeGeneration
         }
         existing.set(file.path, normalizeBuilderFile({
           path: file.path,
-          content: record.content,
+          content: stripHarnessInjectedReferences(file.path, record.content),
           role: file.role,
           state: 'generated',
         }))
@@ -239,7 +264,7 @@ export function createBuilderGenerationService({ request = requestCodeGeneration
           generatedPaths.add(record.path)
           generatedFiles.push(normalizeBuilderFile({
             path: manifestFile.path,
-            content: record.content,
+            content: stripHarnessInjectedReferences(manifestFile.path, record.content),
             role: manifestFile.role,
             state: 'generated',
           }))

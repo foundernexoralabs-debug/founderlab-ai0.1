@@ -478,6 +478,58 @@ test('Local Qwen Coder generation recovers a file when the model abandons the JS
   }
 })
 
+test('Local Qwen Coder generation strips the harness-injected <link href="styles.css"> and <script src="app.js"> tags a small local model commonly (and harmlessly) adds despite being told not to, so the generated project passes validateBuilderFiles instead of failing VALIDATION_FAILED — while a genuinely unsafe tag (external stylesheet, arbitrary inline script, or a reference to any other file) is left untouched and still correctly fails validation', async () => {
+  const manifest = createLandingPageManifest()
+  // Realistic, entirely benign small-model output: it correctly builds the
+  // page, but — despite the prompt explicitly saying "Do not include script
+  // or link tags in HTML; styles.css and app.js are injected by the
+  // isolated runtime" — pairs it with the standard <link>/<script> tags to
+  // load its own CSS/JS, exactly as virtually all HTML training data does.
+  const indexHtml = '<!DOCTYPE html><html><head><title>Acme</title><link rel="stylesheet" href="styles.css"></head><body><main id="start"><h1>Welcome</h1></main><script src="app.js"></script></body></html>'
+  const responses = [
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'index.html', content: indexHtml }) },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'styles.css', content: 'body { margin: 0; }' }) },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'app.js', content: 'console.log("ready")' }) },
+  ]
+  const service = createBuilderGenerationService({ request: async () => responses.shift() })
+  const generated = await service.continueMissingFiles({
+    brief: 'A landing page for a coffee shop',
+    plan: { name: 'Acme', summary: 'Coffee shop', pages: [{ path: 'index.html' }] },
+    manifest,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+  })
+  const validation = validateBuilderFiles(generated.files, { entryFile: 'index.html' })
+  assert.equal(validation.valid, true, `expected valid project, got: ${JSON.stringify(validation.issues)}`)
+  const html = generated.files.find((file) => file.path === 'index.html').content
+  assert.ok(!html.includes('<link'))
+  assert.ok(!html.includes('<script'))
+  assert.ok(html.includes('<h1>Welcome</h1>'))
+
+  // The safety boundary itself must remain fully intact: an actually unsafe
+  // tag must still fail, unaffected by this narrow normalization.
+  const unsafeCases = [
+    '<main>x</main><link href="https://fonts.googleapis.com/css">',
+    '<main>x</main><script>fetch("https://evil.example/steal")</script>',
+    '<main>x</main><link href="other.css">',
+    '<main>x</main><iframe src="https://youtube.com/embed/x"></iframe>',
+  ]
+  for (const unsafeHtml of unsafeCases) {
+    const unsafeResponses = [
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'index.html', content: unsafeHtml }) },
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'styles.css', content: 'body{margin:0}' }) },
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: JSON.stringify({ path: 'app.js', content: 'console.log(1)' }) },
+    ]
+    const unsafeService = createBuilderGenerationService({ request: async () => unsafeResponses.shift() })
+    const unsafeGenerated = await unsafeService.continueMissingFiles({
+      brief: 'test', plan: { name: 'Test', summary: 'test', pages: [{ path: 'index.html' }] },
+      manifest, provider: 'ollama', model: 'qwen2.5-coder:3b',
+    })
+    const unsafeValidation = validateBuilderFiles(unsafeGenerated.files, { entryFile: 'index.html' })
+    assert.equal(unsafeValidation.valid, false, `expected this to still fail validation: ${unsafeHtml}`)
+  }
+})
+
 test('Builder edits retain the project generation provider and model instead of drifting to a later Settings choice', async () => {
   const requests = []
   const project = appendBuilderVersion({
