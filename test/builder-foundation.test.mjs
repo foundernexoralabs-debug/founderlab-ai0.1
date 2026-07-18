@@ -417,6 +417,41 @@ test('Local Qwen Coder generation recovers the first file when the model writes 
   assert.ok(indexFile.content.includes('\n'))
 })
 
+test('Local Qwen Coder generation recovers styles.css and app.js when their content itself contains internal quote+brace patterns (font-family lists, content:"" pseudo-elements, object literals) that a naive forward scan would mistake for the end of the JSON string', async () => {
+  const manifest = createLandingPageManifest()
+  // These reproduce the follow-up failure: index.html now recovers fine,
+  // but CSS/JS content routinely contains its own "..." followed by
+  // whitespace then "}" patterns (a quoted pseudo-element value on its own
+  // line before a closing brace, a quoted font-family list before a rule
+  // ends, a quoted object property before a block closes) well before the
+  // JSON envelope's real closing quote. A forward scan for the *first*
+  // such pattern truncates the recovered content right there, silently
+  // dropping everything after it.
+  const malformedCss = '{"path":"styles.css","content":"body { margin: 0; }\n.icon::before {\n  content: "\u2192"\n}\n.hero {\n  color: #111;\n  font-family: "Inter", sans-serif;\n}"}'
+  const malformedJs = '{"path":"app.js","content":"const config = {\n  label: "Ready"\n}\nconsole.log(config)"}'
+  const responses = [
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"index.html","content":"<!DOCTYPE html><html><body>Hi</body></html>"}' },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: malformedCss },
+    { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: malformedJs },
+  ]
+  const service = createBuilderGenerationService({ request: async () => responses.shift() })
+  const generated = await service.continueMissingFiles({
+    brief: 'Build a meeting-notes website',
+    plan: { name: 'Minutes', summary: 'Notes', pages: [{ path: 'index.html' }] },
+    manifest,
+    provider: 'ollama',
+    model: 'qwen2.5-coder:3b',
+  })
+  assert.equal(generated.files.length, 3)
+  const css = generated.files.find((file) => file.path === 'styles.css')
+  const js = generated.files.find((file) => file.path === 'app.js')
+  // The bug truncated content at the *first* internal quote+brace match —
+  // assert the rule/statement that comes *after* that trap is still present.
+  assert.ok(css.content.includes('.hero'))
+  assert.ok(css.content.includes('font-family: "Inter"'))
+  assert.ok(js.content.includes('console.log(config)'))
+})
+
 test('Builder edits retain the project generation provider and model instead of drifting to a later Settings choice', async () => {
   const requests = []
   const project = appendBuilderVersion({

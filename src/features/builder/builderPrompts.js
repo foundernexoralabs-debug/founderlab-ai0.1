@@ -331,11 +331,11 @@ function unescapeJsonStringBody(body) {
 }
 
 /**
- * Recovers a single-file {"path":"...","content":"..."} response even when
+ * Recovers a single-file {"path":"...","content":"...") response even when
  * a local coding model produced imperfect JSON: raw unescaped newlines or
  * quotes inside the content string (very common when a small model writes
- * long HTML/CSS as an escaped JSON string), or an unterminated final string
- * when it ran out of output budget mid-content. Only ever used as a
+ * long HTML/CSS/JS as an escaped JSON string), or an unterminated final
+ * string when it ran out of output budget mid-content. Only ever used as a
  * fallback after strict JSON parsing already failed for the known
  * single-file shape, so it cannot change behavior for any response that
  * already parses correctly.
@@ -345,18 +345,34 @@ export function recoverBuilderFileJson(text, expectedPath) {
   const contentKeyMatch = text.match(/"content"\s*:\s*"/)
   if (!contentKeyMatch) return null
   const bodyStart = contentKeyMatch.index + contentKeyMatch[0].length
-  // Scan forward for the closing quote of the content string: an unescaped
-  // `"` followed (allowing whitespace) by `}` is the normal well-formed
-  // end. If none exists — the model ran out of tokens mid-string — fall
-  // back to treating the remainder of the response as the content.
+
+  // The real end of the content string must be the LAST unescaped `"`
+  // immediately preceding the LAST `}` in the response — never the first
+  // plausible-looking match. CSS and JS are full of their own internal
+  // quote+brace patterns (font-family lists, content:"" pseudo-elements,
+  // attribute selectors like [type="text"], object/template literals) that
+  // sit on their own line right before a `}` — a forward scan for the
+  // first "quote-then-brace" pattern gets fooled by these and silently
+  // truncates real content. Anchoring on the last `}` in the whole
+  // response and walking backward past it is robust to any amount of
+  // this inside the content, because the JSON envelope itself only closes
+  // once, at the very end.
+  const lastBrace = text.lastIndexOf('}')
   let end = -1
-  for (let i = bodyStart; i < text.length; i += 1) {
-    if (text[i] === '\\') { i += 1; continue }
+  if (lastBrace > bodyStart) {
+    let i = lastBrace - 1
+    while (i > bodyStart && /\s/.test(text[i])) i -= 1
     if (text[i] === '"') {
-      const rest = text.slice(i + 1).trimStart()
-      if (rest.startsWith('}') || rest.length === 0) { end = i; break }
+      // Confirm this quote isn't itself an escaped `\"` inside the content
+      // (an odd number of consecutive backslashes immediately before it
+      // means it's literal, not the real terminator).
+      let backslashes = 0
+      let j = i - 1
+      while (j >= bodyStart && text[j] === '\\') { backslashes += 1; j -= 1 }
+      if (backslashes % 2 === 0) end = i
     }
   }
+
   const raw = end >= 0 ? text.slice(bodyStart, end) : text.slice(bodyStart).replace(/\\+$/, '')
   const content = unescapeJsonStringBody(raw).trim()
   if (!content) return null
