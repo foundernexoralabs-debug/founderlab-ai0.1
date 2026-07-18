@@ -452,6 +452,32 @@ test('Local Qwen Coder generation recovers styles.css and app.js when their cont
   assert.ok(js.content.includes('console.log(config)'))
 })
 
+test('Local Qwen Coder generation recovers a file when the model abandons the JSON envelope entirely and returns plain code instead — a context-drift pattern where a small local model wraps the first file or two correctly but reverts to its natural "just write the code" behavior for a later one, exactly the output shape that already succeeds in Chat/terminal', async () => {
+  const manifest = createLandingPageManifest()
+  const plainJs = 'function initApp() {\n  console.log("App ready")\n}\ninitApp()'
+  const fencedJsWithProse = 'Here is the script:\n```javascript\nfunction initApp() {\n  console.log("App ready")\n}\ninitApp()\n```\nLet me know if you would like changes!'
+  for (const appJsResponse of [plainJs, fencedJsWithProse]) {
+    const responses = [
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"index.html","content":"<!DOCTYPE html><html><body>Hi</body></html>"}' },
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: '{"path":"styles.css","content":"body { margin: 0; }"}' },
+      { ok: true, provider: 'ollama', model: 'qwen2.5-coder:3b', text: appJsResponse },
+    ]
+    const service = createBuilderGenerationService({ request: async () => responses.shift() })
+    const generated = await service.continueMissingFiles({
+      brief: 'Build a meeting-notes website',
+      plan: { name: 'Minutes', summary: 'Notes', pages: [{ path: 'index.html' }] },
+      manifest,
+      provider: 'ollama',
+      model: 'qwen2.5-coder:3b',
+    })
+    assert.equal(generated.files.length, 3)
+    const js = generated.files.find((file) => file.path === 'app.js')
+    assert.ok(js.content.includes('initApp()'))
+    assert.ok(!js.content.includes('```'))
+    assert.ok(!js.content.includes('Let me know'))
+  }
+})
+
 test('Builder edits retain the project generation provider and model instead of drifting to a later Settings choice', async () => {
   const requests = []
   const project = appendBuilderVersion({

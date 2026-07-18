@@ -331,50 +331,80 @@ function unescapeJsonStringBody(body) {
 }
 
 /**
- * Recovers a single-file {"path":"...","content":"...") response even when
- * a local coding model produced imperfect JSON: raw unescaped newlines or
- * quotes inside the content string (very common when a small model writes
- * long HTML/CSS/JS as an escaped JSON string), or an unterminated final
- * string when it ran out of output budget mid-content. Only ever used as a
- * fallback after strict JSON parsing already failed for the known
- * single-file shape, so it cannot change behavior for any response that
- * already parses correctly.
+ * Recovers a single-file {"path":"...","content":"..."} response even when
+ * a local coding model produced imperfect or entirely absent JSON. Two
+ * distinct failure classes, both real and both observed across a
+ * multi-file Builder session, are handled:
+ *
+ * 1. Malformed JSON: the model attempted the {"path":...,"content":"..."}
+ *    envelope but wrote raw unescaped newlines/quotes inside the content
+ *    string (very common for long HTML/CSS/JS), or ran out of output
+ *    budget mid-content leaving the string unterminated.
+ * 2. Abandoned JSON: the model doesn't attempt the envelope at all for
+ *    this file and just returns plain code — a well-documented
+ *    context-drift pattern in small local models over a multi-file
+ *    session (it may wrap the first file or two correctly, then revert to
+ *    its natural "just write the code" behavior for a later one). This is
+ *    exactly the output shape that already succeeds in Chat/terminal, so
+ *    rather than hard-failing a perfectly good file purely because it
+ *    wasn't JSON-wrapped, it's used directly.
+ *
+ * Only ever used as a fallback after strict JSON parsing already failed,
+ * so it cannot change behavior for any response that already parses
+ * correctly.
  */
 export function recoverBuilderFileJson(text, expectedPath) {
   if (typeof text !== 'string' || !text.trim()) return null
-  const contentKeyMatch = text.match(/"content"\s*:\s*"/)
-  if (!contentKeyMatch) return null
-  const bodyStart = contentKeyMatch.index + contentKeyMatch[0].length
 
-  // The real end of the content string must be the LAST unescaped `"`
-  // immediately preceding the LAST `}` in the response — never the first
-  // plausible-looking match. CSS and JS are full of their own internal
-  // quote+brace patterns (font-family lists, content:"" pseudo-elements,
-  // attribute selectors like [type="text"], object/template literals) that
-  // sit on their own line right before a `}` — a forward scan for the
-  // first "quote-then-brace" pattern gets fooled by these and silently
-  // truncates real content. Anchoring on the last `}` in the whole
-  // response and walking backward past it is robust to any amount of
-  // this inside the content, because the JSON envelope itself only closes
-  // once, at the very end.
-  const lastBrace = text.lastIndexOf('}')
-  let end = -1
-  if (lastBrace > bodyStart) {
-    let i = lastBrace - 1
-    while (i > bodyStart && /\s/.test(text[i])) i -= 1
-    if (text[i] === '"') {
-      // Confirm this quote isn't itself an escaped `\"` inside the content
-      // (an odd number of consecutive backslashes immediately before it
-      // means it's literal, not the real terminator).
-      let backslashes = 0
-      let j = i - 1
-      while (j >= bodyStart && text[j] === '\\') { backslashes += 1; j -= 1 }
-      if (backslashes % 2 === 0) end = i
+  const contentKeyMatch = text.match(/"content"\s*:\s*"/)
+  if (contentKeyMatch) {
+    const bodyStart = contentKeyMatch.index + contentKeyMatch[0].length
+
+    // The real end of the content string must be the LAST unescaped `"`
+    // immediately preceding the LAST `}` in the response — never the first
+    // plausible-looking match. CSS and JS are full of their own internal
+    // quote+brace patterns (font-family lists, content:"" pseudo-elements,
+    // attribute selectors like [type="text"], object/template literals) that
+    // sit on their own line right before a `}` — a forward scan for the
+    // first "quote-then-brace" pattern gets fooled by these and silently
+    // truncates real content. Anchoring on the last `}` in the whole
+    // response and walking backward past it is robust to any amount of
+    // this inside the content, because the JSON envelope itself only closes
+    // once, at the very end.
+    const lastBrace = text.lastIndexOf('}')
+    let end = -1
+    if (lastBrace > bodyStart) {
+      let i = lastBrace - 1
+      while (i > bodyStart && /\s/.test(text[i])) i -= 1
+      if (text[i] === '"') {
+        // Confirm this quote isn't itself an escaped `\"` inside the content
+        // (an odd number of consecutive backslashes immediately before it
+        // means it's literal, not the real terminator).
+        let backslashes = 0
+        let j = i - 1
+        while (j >= bodyStart && text[j] === '\\') { backslashes += 1; j -= 1 }
+        if (backslashes % 2 === 0) end = i
+      }
     }
+
+    const raw = end >= 0 ? text.slice(bodyStart, end) : text.slice(bodyStart).replace(/\\+$/, '')
+    const content = unescapeJsonStringBody(raw).trim()
+    // A "content" key was found, so the model was attempting the JSON
+    // envelope — trust that signal either way. If nothing usable came out
+    // (e.g. a genuinely empty string), that's a real empty-file response,
+    // not a cue to fall back to treating the whole JSON blob as raw code.
+    return content ? { path: expectedPath, content } : null
   }
 
-  const raw = end >= 0 ? text.slice(bodyStart, end) : text.slice(bodyStart).replace(/\\+$/, '')
-  const content = unescapeJsonStringBody(raw).trim()
-  if (!content) return null
-  return { path: expectedPath, content }
+  // No "content" key anywhere: the model didn't attempt the JSON envelope
+  // at all for this file. Take the raw response as the file content
+  // directly, unwrapping a markdown code fence if the model added one out
+  // of habit. A short length guard avoids treating a stray one-line
+  // non-answer as a whole file, without meaningfully limiting real file
+  // content (genuine HTML/CSS/JS for any page is always well over this
+  // length).
+  const fenced = text.match(/```[\w+-]*\n?([\s\S]*?)```/)
+  const raw = (fenced ? fenced[1] : text).trim()
+  if (raw.length < 10) return null
+  return { path: expectedPath, content: raw }
 }
