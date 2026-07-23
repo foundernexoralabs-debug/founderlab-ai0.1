@@ -342,6 +342,15 @@ export function createAssistantOrchestration(context) {
 
 const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
 const ACTION_STATUSES = new Set(['completed', 'handoff-opened'])
+const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project'])
+
+function normalizeActionResource(value) {
+  if (!value || typeof value !== 'object' || !ACTION_RESOURCE_TYPES.has(value.type)) return null
+  const id = requestText(value.id).slice(0, 160)
+  const title = requestText(value.title).replace(/\s+/g, ' ').slice(0, 120)
+  if (!id || !title) return null
+  return Object.freeze({ type: value.type, id, title })
+}
 
 /** Keep action evidence compact, serializable, and impossible to confuse with an external artifact. */
 export function normalizeMessageOrchestration(value) {
@@ -352,7 +361,10 @@ export function normalizeMessageOrchestration(value) {
     ? value.actions
       .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
       .slice(-MAX_ACTION_EVIDENCE)
-      .map((action) => Object.freeze({ id: action.id, status: action.status }))
+      .map((action) => {
+        const resource = normalizeActionResource(action.resource)
+        return Object.freeze({ id: action.id, status: action.status, ...(resource ? { resource } : {}) })
+      })
     : []
   return Object.freeze({
     version: 1,
@@ -364,10 +376,11 @@ export function normalizeMessageOrchestration(value) {
   })
 }
 
-export function recordOrchestrationAction(orchestration, { id, status }) {
+export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource } = {}) {
   const current = normalizeMessageOrchestration(orchestration) || createAssistantOrchestration()
   if (!ACTION_IDS.has(id) || !ACTION_STATUSES.has(status)) return current
-  const actions = [...current.actions.filter((action) => action.id !== id), Object.freeze({ id, status })].slice(-MAX_ACTION_EVIDENCE)
+  const resource = normalizeActionResource(actionResource)
+  const actions = [...current.actions.filter((action) => action.id !== id), Object.freeze({ id, status, ...(resource ? { resource } : {}) })].slice(-MAX_ACTION_EVIDENCE)
   return Object.freeze({ ...current, actions: Object.freeze(actions) })
 }
 

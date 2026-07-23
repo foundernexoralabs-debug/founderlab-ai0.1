@@ -26,6 +26,7 @@ import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
 import { getChatProviderPresentation } from './chatProviderUtils'
+import { CHAT_MEMORY_KEY, buildWorkspaceAwareness, normalizeChatMemory, reconcileChatMemory } from './chatMemory'
 import { useConversationScroll } from './useConversationScroll'
 import {
   CHAT_RESPONSE_OPTIONS,
@@ -81,6 +82,10 @@ export function ChatWorkspace({ user }) {
 
   const conversationsRef = useRef([])
   const saveTimerRef = useRef(null)
+  const memorySaveTimerRef = useRef(null)
+  const chatMemoryRef = useRef(normalizeChatMemory(null).value)
+  const workspaceRecordsRef = useRef({ projects: [], tasks: [], notes: [] })
+  const workspaceAwarenessRef = useRef(buildWorkspaceAwareness())
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const voiceSessionRequestRef = useRef(0)
@@ -119,14 +124,30 @@ export function ChatWorkspace({ user }) {
     async function initialise() {
       setLoading(true)
       workspaceStore.logEvent('chat', 'chat')
-      const stored = normalizeConversations(await load('fl_convos', []))
+      const safeLoad = (key, fallback) => load(key, fallback).catch(() => fallback)
+      const [storedConversations, storedMemory, projects, tasks, notes] = await Promise.all([
+        safeLoad('fl_convos', []),
+        safeLoad(CHAT_MEMORY_KEY, null),
+        safeLoad('fl_projects', []),
+        safeLoad('fl_tasks', []),
+        safeLoad('fl_notes', []),
+      ])
       if (!alive) return
+      const stored = normalizeConversations(storedConversations)
+      workspaceRecordsRef.current = {
+        projects: Array.isArray(projects) ? projects : [],
+        tasks: Array.isArray(tasks) ? tasks : [],
+        notes: Array.isArray(notes) ? notes : [],
+      }
+      workspaceAwarenessRef.current = buildWorkspaceAwareness(workspaceRecordsRef.current)
       let next = stored
+      let nextActiveId = ''
       const handoff = flConsumeHandoff('chat')
       if (handoff?.message && typeof handoff.message === 'string') {
         const conversation = createConversation({ id: uid(), title: handoff.message.slice(0, 64), now: ts() })
         next = [conversation, ...stored]
-        setActiveId(conversation.id)
+        nextActiveId = conversation.id
+        setActiveId(nextActiveId)
         setInput(handoff.message)
         save('fl_convos', next)
         toast('Message ready from Code AI — review it and press Enter to send.', 'success')
@@ -134,9 +155,15 @@ export function ChatWorkspace({ user }) {
         // Returning to the most recently persisted chat should feel like
         // continuity, not a blank reset. New users still receive the calm
         // welcome state because they have no saved conversation yet.
-        setActiveId(next[0].id)
+        nextActiveId = next[0].id
+        setActiveId(nextActiveId)
       }
       conversationsRef.current = next
+      const memory = reconcileChatMemory(normalizeChatMemory(storedMemory).value, next, workspaceAwarenessRef.current, nextActiveId)
+      chatMemoryRef.current = memory
+      // A repaired or newly derived memory index only contains bounded titles,
+      // objectives, and action evidence—not raw conversation content.
+      save(CHAT_MEMORY_KEY, memory)
       setConversations(next)
       setLoading(false)
     }
@@ -203,14 +230,42 @@ export function ChatWorkspace({ user }) {
 
   useEffect(() => () => {
     clearTimeout(saveTimerRef.current)
+    clearTimeout(memorySaveTimerRef.current)
     clearLiveCallTurnTimer()
     liveCallRef.current.active = false
     requestAbortRef.current?.abort()
   }, [])
 
-  function persist(next) {
+  function synchronizePersistentMemory(next, activeConversationId = activeId) {
+    const memory = reconcileChatMemory(chatMemoryRef.current, next, workspaceAwarenessRef.current, activeConversationId)
+    chatMemoryRef.current = memory
+    clearTimeout(memorySaveTimerRef.current)
+    memorySaveTimerRef.current = setTimeout(() => {
+      save(CHAT_MEMORY_KEY, memory).catch(() => {
+        // Chat conversations remain the source of truth; a failed index write
+        // must never interrupt sending or make the assistant invent memory.
+      })
+    }, 550)
+  }
+
+  function updateWorkspaceAwareness(collection, records) {
+    workspaceRecordsRef.current = { ...workspaceRecordsRef.current, [collection]: Array.isArray(records) ? records : [] }
+    workspaceAwarenessRef.current = buildWorkspaceAwareness(workspaceRecordsRef.current)
+    synchronizePersistentMemory(conversationsRef.current)
+  }
+
+  function getPersistentChatContext(conversationId) {
+    return {
+      memory: chatMemoryRef.current,
+      workspace: workspaceAwarenessRef.current,
+      conversationId,
+    }
+  }
+
+  function persist(next, activeConversationId = activeId) {
     conversationsRef.current = next
     setConversations(next)
+    synchronizePersistentMemory(next, activeConversationId)
     clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       save('fl_convos', next).catch(() => {
@@ -233,7 +288,7 @@ export function ChatWorkspace({ user }) {
       return
     }
     const conversation = createConversation({ id: uid(), now: ts() })
-    persist([conversation, ...conversationsRef.current])
+    persist([conversation, ...conversationsRef.current], conversation.id)
     setActiveId(conversation.id)
     setInput('')
     setPendingImage(null)
@@ -248,6 +303,7 @@ export function ChatWorkspace({ user }) {
       return
     }
     setActiveId(conversationId)
+    synchronizePersistentMemory(conversationsRef.current, conversationId)
     setEditingMessageId(null)
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches) changeHistoryOpen(false)
   }
@@ -647,7 +703,7 @@ export function ChatWorkspace({ user }) {
       ? { ...conversation, messages: [...conversation.messages, recapMessage], updated_at: ts() }
       : conversation)
     const active = next.find((conversation) => conversation.id === conversationId)
-    persist([active, ...next.filter((conversation) => conversation.id !== conversationId)])
+    persist([active, ...next.filter((conversation) => conversation.id !== conversationId)], conversationId)
   }
 
   function endLiveCall({ quiet = false, persistCall = true } = {}) {
@@ -728,7 +784,7 @@ export function ChatWorkspace({ user }) {
     setSending(true)
     setErrorState(null)
 
-    const requestContext = getChatRequestContext(conversationMessages)
+    const requestContext = getChatRequestContext(conversationMessages, getPersistentChatContext(conversationId))
     const result = await requestAIResult({
       provider: providerId,
       model: modelId,
@@ -765,7 +821,7 @@ export function ChatWorkspace({ user }) {
     const next = latest.map((conversation) => conversation.id === conversationId
       ? { ...conversation, messages: [...conversation.messages, assistantMessage], updated_at: ts() }
       : conversation)
-    persist(next)
+    persist(next, conversationId)
     return { ok: true, message: assistantMessage }
   }
 
@@ -786,7 +842,7 @@ export function ChatWorkspace({ user }) {
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(callMessages, providerId),
-      system: getLiveCallSystemPrompt(getChatRequestContext(callMessages)),
+      system: getLiveCallSystemPrompt(getChatRequestContext(callMessages, getPersistentChatContext(activeId))),
       maxTokens: LIVE_CALL_RESPONSE_OPTIONS.maxTokens,
       temperature: LIVE_CALL_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
@@ -880,7 +936,7 @@ export function ChatWorkspace({ user }) {
     }
     const active = next.find((conversation) => conversation.id === conversationId)
     next = [active, ...next.filter((conversation) => conversation.id !== conversationId)]
-    persist(next)
+    persist(next, conversationId)
     return requestAssistantReply({ conversationId, conversationMessages: outgoingMessages, providerId, modelId })
   }
 
@@ -996,8 +1052,9 @@ export function ChatWorkspace({ user }) {
 
   function deleteConversation(conversationId) {
     const next = conversationsRef.current.filter((conversation) => conversation.id !== conversationId)
-    persist(next)
-    if (activeId === conversationId) setActiveId(next[0]?.id || null)
+    const nextActiveId = activeId === conversationId ? next[0]?.id || '' : activeId
+    persist(next, nextActiveId)
+    if (activeId === conversationId) setActiveId(nextActiveId || null)
     toast('Conversation deleted', 'success')
   }
 
@@ -1047,8 +1104,10 @@ export function ChatWorkspace({ user }) {
     try {
       const notes = await load('fl_notes', [])
       const note = { id: uid(), title: message.content.slice(0, 50) || 'Chat note', content: message.content, tags: ['from-chat'], created_at: ts(), updated_at: ts() }
-      await save('fl_notes', [note, ...(Array.isArray(notes) ? notes : [])])
-      recordActionEvidence(message.id, { id: 'save-note', status: 'completed' })
+      const nextNotes = [note, ...(Array.isArray(notes) ? notes : [])]
+      await save('fl_notes', nextNotes)
+      updateWorkspaceAwareness('notes', nextNotes)
+      recordActionEvidence(message.id, { id: 'save-note', status: 'completed', resource: { type: 'note', id: note.id, title: note.title } })
       toast('Saved to Notes', 'success')
       return true
     } catch {
@@ -1061,8 +1120,10 @@ export function ChatWorkspace({ user }) {
     try {
       const tasks = await load('fl_tasks', [])
       const task = { id: uid(), title: message.content.slice(0, 80), status: 'todo', priority: 'medium', description: message.content, due_date: '', created_at: ts(), updated_at: ts() }
-      await save('fl_tasks', [task, ...(Array.isArray(tasks) ? tasks : [])])
-      recordActionEvidence(message.id, { id: 'create-task', status: 'completed' })
+      const nextTasks = [task, ...(Array.isArray(tasks) ? tasks : [])]
+      await save('fl_tasks', nextTasks)
+      updateWorkspaceAwareness('tasks', nextTasks)
+      recordActionEvidence(message.id, { id: 'create-task', status: 'completed', resource: { type: 'task', id: task.id, title: task.title } })
       toast('Task created', 'success')
       return true
     } catch {

@@ -72,6 +72,13 @@ import {
   recordOrchestrationAction,
 } from '../src/features/chat/chatOrchestrator.js'
 import {
+  buildWorkspaceAwareness,
+  getProjectAwareness,
+  getProjectAwarenessGuidance,
+  normalizeChatMemory,
+  reconcileChatMemory,
+} from '../src/features/chat/chatMemory.js'
+import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
   commitInterimTranscript,
@@ -458,6 +465,91 @@ test('Chat orchestration metadata persists only safe evidence and keeps complete
     { id: 'github', status: 'handoff-opened' },
     { id: 'create-task', status: 'completed' },
   ])
+})
+
+test('Project-aware Chat memory persists bounded working context without copying note bodies, project files, or raw answers', () => {
+  const workspace = buildWorkspaceAwareness({
+    projects: [{ id: 'builder-project', name: 'Coachly Landing', type: 'builder', files: [{ path: 'secret.tsx', content: 'never include' }], updated_at: '2026-07-23T10:00:00.000Z' }],
+    tasks: [{ id: 'task-1', title: 'Review onboarding flow', status: 'todo', description: 'never include', updated_at: '2026-07-23T09:00:00.000Z' }],
+    notes: [{ id: 'note-1', title: 'Launch decisions', content: 'private note content', updated_at: '2026-07-23T08:00:00.000Z' }],
+  })
+  assert.deepEqual(workspace.projects, [{ id: 'builder-project', name: 'Coachly Landing', type: 'builder', updated_at: '2026-07-23T10:00:00.000Z' }])
+  assert.deepEqual(workspace.tasks, [{ id: 'task-1', title: 'Review onboarding flow', status: 'todo', updated_at: '2026-07-23T09:00:00.000Z' }])
+  assert.deepEqual(workspace.notes, [{ id: 'note-1', title: 'Launch decisions', updated_at: '2026-07-23T08:00:00.000Z' }])
+
+  const conversations = [{
+    id: 'coachly-chat', title: 'Coachly build', updated_at: '2026-07-23T10:05:00.000Z', messages: [
+      { role: 'user', content: 'Build a landing page for Coachly.' },
+      { role: 'assistant', content: 'Here is the plan.', orchestration: {
+        mode: 'operator', operation: 'create', primaryTool: 'builder', actions: [{ id: 'builder', status: 'handoff-opened' }],
+      } },
+    ],
+  }]
+  const memory = reconcileChatMemory(null, conversations, workspace, 'coachly-chat')
+  assert.equal(memory.activeConversationId, 'coachly-chat')
+  assert.equal(memory.threads.length, 1)
+  assert.equal(memory.threads[0].objective, 'Build a landing page for Coachly.')
+  assert.equal(memory.threads[0].project.name, 'Coachly Landing')
+  assert.equal(memory.threads[0].artifact, 'plan')
+  assert.doesNotMatch(JSON.stringify(memory), /private note content|never include|Here is the plan/i)
+  assert.deepEqual(normalizeChatMemory({ version: 1, activeConversationId: 42, threads: [null, { conversationId: '', actions: [] }] }).value, {
+    version: 1,
+    activeConversationId: '',
+    threads: [],
+  })
+})
+
+test('Project-aware Chat context carries a verified task and project forward without claiming external execution', () => {
+  const workspace = buildWorkspaceAwareness({
+    projects: [{ id: 'founderlab-project', name: 'FounderLab', type: 'product' }],
+    tasks: [{ id: 'task-1', title: 'Review onboarding flow', status: 'todo' }],
+  })
+  const memory = reconcileChatMemory({
+    version: 1,
+    activeConversationId: 'thread-1',
+    threads: [{
+      conversationId: 'thread-1', title: 'Onboarding', objective: 'Improve FounderLab onboarding.', updated_at: '2026-07-23T10:00:00.000Z',
+      actions: [{ id: 'create-task', status: 'completed', resource: { type: 'task', id: 'task-1', title: 'Review onboarding flow' } }],
+    }],
+  }, [{
+    id: 'thread-1', title: 'Onboarding', updated_at: '2026-07-23T10:00:00.000Z', messages: [{
+      role: 'assistant', content: 'The onboarding task is ready.', orchestration: {
+        mode: 'operator', operation: 'capture', actions: [{ id: 'create-task', status: 'completed', resource: { type: 'task', id: 'task-1', title: 'Review onboarding flow' } }],
+      },
+    }],
+  }], workspace, 'thread-1')
+  const orchestration = getChatOrchestrationContext([
+    { role: 'assistant', content: 'The onboarding task is ready.' },
+    { role: 'user', content: 'Continue the FounderLab work on that task from earlier.' },
+  ])
+  const awareness = getProjectAwareness(memory, workspace, {
+    conversationId: 'thread-1', request: 'Continue the FounderLab work on that task from earlier.', orchestration,
+  })
+  assert.equal(awareness.project.name, 'FounderLab')
+  assert.equal(awareness.task.title, 'Review onboarding flow')
+  const guidance = getProjectAwarenessGuidance(awareness)
+  assert.match(guidance, /does not confirm its files, repository, or deployment were inspected/i)
+  assert.match(guidance, /not proof that work was verified/i)
+  assert.match(getChatSystemPrompt({ intent: orchestration.intent, orchestration, projectAwareness: awareness }), /Current project-awareness note/i)
+
+  const resumed = getProjectAwareness(memory, workspace, {
+    conversationId: 'fresh-thread', request: 'Continue the FounderLab project we were working on.', orchestration,
+  })
+  assert.equal(resumed.scope, 'recent-memory')
+  assert.equal(resumed.task.title, 'Review onboarding flow')
+  assert.match(getProjectAwarenessGuidance(resumed), /recent saved Chat working context/i)
+
+  const codeMemory = reconcileChatMemory(null, [{
+    id: 'code-thread', title: 'Code', updated_at: '2026-07-23T11:00:00.000Z', messages: [
+      { role: 'user', content: 'Implement a signup form.' },
+      { role: 'assistant', content: '```tsx\nexport function Signup() { return null }\n```' },
+    ],
+  }], workspace, 'code-thread')
+  const codeAwareness = getProjectAwareness(codeMemory, workspace, {
+    conversationId: 'fresh-thread', request: 'Continue the code from before.', orchestration,
+  })
+  assert.equal(codeAwareness.artifact, 'code')
+  assert.match(getProjectAwarenessGuidance(codeAwareness), /raw content is not loaded into this thread/i)
 })
 
 test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
