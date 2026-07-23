@@ -3,6 +3,7 @@ import { getCompletedOrchestrationActions } from './chatOrchestrator.js'
 import { getExecutionBridgeHandoffAction } from './chatExecutionBridge.js'
 import { getCapabilityBridgeHandoffAction } from './chatCapabilityBridge.js'
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
+import { normalizeExecutionWorkflow } from './chatExecutionWorkflow.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -81,6 +82,21 @@ const CONTROL_ACTIONS = Object.freeze({
     icon: '✓',
     completedLabel: 'Approved',
   }),
+  'create-branch': Object.freeze({
+    id: 'create-branch',
+    label: 'Create approved branch',
+    detail: 'Create only the approved GitHub branch',
+    icon: '⎇',
+    completedLabel: 'Created',
+  }),
+  'connect-github': Object.freeze({
+    id: 'connect-github',
+    label: 'Connect GitHub',
+    detail: 'Enable an explicitly approved branch action',
+    icon: '⌘',
+    target: 'settings',
+    completedLabel: 'Opened',
+  }),
 })
 
 function requestText(value) {
@@ -121,7 +137,7 @@ function getPreviousUserRequest(messages, assistantIndex) {
 }
 
 /** Attach the triggering request in-memory so a clicked action transfers the right brief. */
-export function getAssistantControlActions(messages, assistantIndex) {
+export function getAssistantControlActions(messages, assistantIndex, { githubConnected = false } = {}) {
   if (messages?.[assistantIndex]?.role !== 'assistant') return []
   const assistant = messages[assistantIndex]
   const request = getPreviousUserRequest(messages, assistantIndex)
@@ -133,6 +149,7 @@ export function getAssistantControlActions(messages, assistantIndex) {
   const executionPrepared = completed.get('prepare-execution') === 'execution-prepared'
   const approvalRecorded = completed.get('approve-execution') === 'approval-recorded'
   const branchRequired = assistant.orchestration?.execution?.branch === 'required'
+  const workflow = normalizeExecutionWorkflow(assistant.orchestration?.workflow)
   if (inspectionCompleted) {
     actions = actions.filter((action) => action.id !== 'inspect-repo')
     if (branchRequired && !branchPrepared) {
@@ -141,6 +158,12 @@ export function getAssistantControlActions(messages, assistantIndex) {
       actions.push(CONTROL_ACTIONS['prepare-execution'])
     } else if (branchRequired && executionPrepared && !approvalRecorded) {
       actions.push(CONTROL_ACTIONS['approve-execution'])
+    } else if (branchRequired && approvalRecorded && workflow?.branch?.state === 'planned') {
+      if (githubConnected && (!workflow.block || workflow.block.retryable)) {
+        actions.push(CONTROL_ACTIONS['create-branch'])
+      } else if (!githubConnected && !workflow.block) {
+        actions.push(CONTROL_ACTIONS['connect-github'])
+      }
     }
   }
   const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)

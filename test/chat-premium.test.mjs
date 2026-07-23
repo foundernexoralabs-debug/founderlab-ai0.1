@@ -93,13 +93,27 @@ import {
 import {
   approveExecutionWorkflow,
   applyExecutionWorkflowEvidence,
+  canCreateApprovedBranchAction,
   createExecutionWorkflow,
   formatExecutionApprovalReport,
+  formatExecutionBlockedReport,
+  formatExecutionBranchCreatedReport,
   formatExecutionWorkflowReport,
   getExecutionWorkflowGuidance,
   getExecutionWorkflowPresentation,
   normalizeExecutionWorkflow,
+  recordExecutionWorkflowBlock,
+  recordExecutionWorkflowBranchCreated,
+  recordExecutionWorkflowReviewReadiness,
+  recordExecutionWorkflowValidation,
+  retryExecutionWorkflow,
 } from '../src/features/chat/chatExecutionWorkflow.js'
+import {
+  createGithubBranch,
+  getGithubBranchExecutionCapability,
+  getGithubBranchExecutionErrorPresentation,
+} from '../src/features/chat/githubBranchExecutor.js'
+import { getExecutionEvidenceTrail } from '../src/features/chat/chatExecutionTrail.js'
 import {
   getCapabilityBridgeGuidance,
   getCapabilityBridgeHandoffAction,
@@ -901,6 +915,7 @@ test('Execution workflow persists bounded branch-first preparation and approval 
     review: 'awaiting-approval',
     execution: 'awaiting-approval',
     executor: 'not-available',
+    capability: { connection: 'not-connected', authorization: 'not-authorized', execution: 'unavailable' },
   })
   assert.match(formatExecutionWorkflowReport(workflow), /No branch was created, no files were changed, and no tests or build were run/i)
   assert.match(getExecutionWorkflowGuidance(workflow), /still needs explicit approval/i)
@@ -911,7 +926,7 @@ test('Execution workflow persists bounded branch-first preparation and approval 
   assert.equal(approved.execution, 'awaiting-executor')
   assert.equal(approved.review, 'awaiting-executor')
   assert.deepEqual(getExecutionWorkflowPresentation(approved).state, 'approval-recorded')
-  assert.match(formatExecutionApprovalReport(approved), /secure executor is connected/i)
+  assert.match(formatExecutionApprovalReport(approved), /explicitly choose branch creation/i)
 
   const noOpEvidence = applyExecutionWorkflowEvidence(approved, { branch: { state: 'created' } })
   assert.equal(noOpEvidence.branch.state, 'planned')
@@ -925,6 +940,103 @@ test('Execution workflow persists bounded branch-first preparation and approval 
   const withApproval = recordOrchestrationAction(orchestration, { id: 'approve-execution', status: 'approval-recorded', workflow: approved })
   assert.equal(withApproval.workflow.approval, 'approved')
   assert.equal(getCompletedOrchestrationActions(withApproval).at(-1).status, 'approval-recorded')
+})
+
+test('Explicit approved GitHub branch creation is bounded, evidenced, and classifies recovery states', async () => {
+  assert.deepEqual(getGithubBranchExecutionCapability(''), { connection: 'not-connected', authorization: 'not-authorized', execution: 'unavailable' })
+  assert.deepEqual(getGithubBranchExecutionCapability('session-token'), { connection: 'connected', authorization: 'unverified', execution: 'unverified' })
+  const requests = []
+  const created = await createGithubBranch({
+    token: 'session-token',
+    repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' },
+    baseBranch: 'main',
+    proposedBranch: 'founderlab/fix-chat',
+    now: () => '2026-07-23T14:00:00.000Z',
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url, options })
+      if (url.endsWith('/git/ref/heads/main')) return { ok: true, status: 200, json: async () => ({ object: { sha: 'abc123' } }) }
+      return { ok: true, status: 201, json: async () => ({ ref: 'refs/heads/founderlab/fix-chat' }) }
+    },
+  })
+  assert.equal(requests.length, 2)
+  assert.match(requests[0].options.headers.Authorization, /^Bearer /)
+  assert.deepEqual(JSON.parse(requests[1].options.body), { ref: 'refs/heads/founderlab/fix-chat', sha: 'abc123' })
+  assert.equal(JSON.stringify(created).includes('session-token'), false)
+  let invalidBranchRequested = false
+  await assert.rejects(
+    () => createGithubBranch({
+      token: 'session-token', repository: created.repository, baseBranch: 'main', proposedBranch: 'founderlab/../unsafe',
+      fetchImpl: async () => { invalidBranchRequested = true; return { ok: true, json: async () => ({}) } },
+    }),
+    (error) => error?.code === 'execution-unavailable',
+  )
+  assert.equal(invalidBranchRequested, false)
+
+  const workflow = approveExecutionWorkflow(createExecutionWorkflow({
+    inspection: { reference: created.repository, repository: { defaultBranch: 'main' }, tree: { importantFiles: ['src/App.jsx'], sampleFiles: [] } },
+    preparation: { repository: created.repository, baseBranch: 'main', proposedBranch: 'founderlab/fix-chat', risk: 'medium' },
+    capability: getGithubBranchExecutionCapability('session-token'),
+  }))
+  assert.equal(canCreateApprovedBranchAction(workflow), false)
+  assert.equal(canCreateApprovedBranchAction(workflow, {
+    inspectionRecorded: true,
+    branchPlanRecorded: true,
+    approvalRecorded: true,
+  }), true)
+  const branchCreated = recordExecutionWorkflowBranchCreated(workflow)
+  assert.equal(branchCreated.branch.state, 'created')
+  assert.equal(branchCreated.execution, 'branch-created')
+  assert.equal(branchCreated.capability.authorization, 'writable')
+  assert.match(formatExecutionBranchCreatedReport(branchCreated), /GitHub confirmed branch creation/i)
+
+  const validation = recordExecutionWorkflowValidation(branchCreated, {
+    source: 'secure-executor', tests: 'passed', build: 'passed', report: 'passed',
+  })
+  const review = recordExecutionWorkflowReviewReadiness(validation)
+  assert.equal(review.review, 'ready-to-merge')
+  assert.equal(review.execution, 'reported')
+
+  const failedValidation = recordExecutionWorkflowValidation(branchCreated, {
+    source: 'secure-executor', tests: 'passed', build: 'failed', report: 'passed',
+  })
+  assert.equal(failedValidation.execution, 'blocked')
+  assert.equal(failedValidation.block.code, 'build-failed')
+  assert.equal(recordExecutionWorkflowReviewReadiness(failedValidation).execution, 'blocked')
+
+  const blocked = recordExecutionWorkflowBlock(workflow, { code: 'github-permission-denied', phase: 'branch' })
+  assert.equal(blocked.execution, 'blocked')
+  assert.equal(blocked.capability.authorization, 'denied')
+  assert.match(formatExecutionBlockedReport(blocked), /permission/i)
+  const cancelled = recordExecutionWorkflowBlock(workflow, { code: 'execution-cancelled', phase: 'branch' })
+  assert.equal(cancelled.execution, 'cancelled')
+  assert.equal(cancelled.review, 'not-ready')
+  const reconnectRequired = recordExecutionWorkflowBlock(workflow, { code: 'github-connection-required', phase: 'integration', retryable: true })
+  assert.equal(retryExecutionWorkflow(reconnectRequired).capability.execution, 'unavailable')
+  assert.match(getGithubBranchExecutionErrorPresentation({ code: 'branch-conflict' }), /branch already exists/i)
+  assert.equal(retryExecutionWorkflow(recordExecutionWorkflowBlock(workflow, { code: 'execution-unavailable', phase: 'branch', retryable: true })).execution, 'awaiting-executor')
+
+  await assert.rejects(
+    () => createGithubBranch({
+      token: 'session-token', repository: created.repository, baseBranch: 'main', proposedBranch: 'founderlab/fix-chat',
+      fetchImpl: async (url) => (url.endsWith('/git/ref/heads/main')
+        ? { ok: true, status: 200, json: async () => ({ object: { sha: 'abc123' } }) }
+        : { ok: false, status: 422, json: async () => ({}) }),
+    }),
+    (error) => error?.code === 'branch-conflict',
+  )
+})
+
+test('Execution evidence trail keeps inspected, planned, approved, blocked, and externally verified branch states distinct', () => {
+  const trail = getExecutionEvidenceTrail({
+    actions: [
+      { id: 'inspect-repo', status: 'inspection-completed', at: '2026-07-23T14:00:00.000Z', resource: { title: 'acme/founderlab' } },
+      { id: 'prepare-branch', status: 'branch-prepared', at: '2026-07-23T14:01:00.000Z', resource: { title: 'founderlab/fix-chat' } },
+      { id: 'approve-execution', status: 'approval-recorded', at: '2026-07-23T14:02:00.000Z' },
+      { id: 'create-branch', status: 'branch-created', at: '2026-07-23T14:03:00.000Z', resource: { title: 'founderlab/fix-chat' } },
+    ],
+  })
+  assert.deepEqual(trail.entries.map((entry) => entry.label), ['Repository inspected', 'Branch plan prepared', 'Execution approval recorded', 'Branch created'])
+  assert.equal(trail.entries.at(-1).resource, 'founderlab/fix-chat')
 })
 
 test('Capability bridge prepares real FounderLab routes and external integrations without inventing a connector action', () => {
@@ -973,6 +1085,24 @@ test('Capability bridge prepares real FounderLab routes and external integration
     routes: [{ id: 'github', kind: 'integration', availability: 'connected', action: 'github' }],
   })
   assert.equal(getCapabilityBridgeHandoffAction(githubCapability), 'github')
+
+  const readOnlyGithub = getChatCapabilityBridge({
+    request: 'Audit this repository and prepare branch work.',
+    intent: repositoryIntent,
+    executionBridge: repositoryExecution,
+    integrations: { github: { connected: true, writable: false } },
+  })
+  assert.equal(getCapabilityBridgePresentation(readOnlyGithub).state, 'read-only-integration')
+  assert.match(getCapabilityBridgeGuidance(readOnlyGithub), /read-only/i)
+  assert.equal(getChatExecutionState({ mode: 'operator', capability: getCapabilityBridgePresentation(readOnlyGithub) }).key, 'read-only-integration')
+
+  const unauthorizedGithub = getChatCapabilityBridge({
+    request: 'Audit this repository and prepare branch work.',
+    intent: repositoryIntent,
+    executionBridge: repositoryExecution,
+    integrations: { github: { connected: true, authorization: 'denied' } },
+  })
+  assert.equal(getCapabilityBridgePresentation(unauthorizedGithub).state, 'authorization-needed')
 
   const normalized = normalizeCapabilityBridge({
     primary: 'email',
@@ -1235,6 +1365,27 @@ test('Chat control center offers only explicit, real workspace actions and bound
     } },
   ], 1)
   assert.deepEqual(approvalActions.map((action) => action.id), ['approve-execution'])
+
+  const approvedWorkflow = approveExecutionWorkflow(preparedWorkflow)
+  const approvedAssistant = [
+    { role: 'user', content: 'Fix the onboarding crash in https://github.com/acme/founderlab.' },
+    { role: 'assistant', content: 'Approval is recorded.', orchestration: {
+      version: 1, mode: 'operator', operation: 'change',
+      execution: {
+        target: { surface: 'repository', repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' } },
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', inspection: 'completed', approval: 'required', handoff: 'code',
+      },
+      workflow: approvedWorkflow,
+      actions: [
+        { id: 'inspect-repo', status: 'inspection-completed', resource: { type: 'repository', id: 'github:acme/founderlab@main', title: 'acme/founderlab' } },
+        { id: 'prepare-branch', status: 'branch-prepared', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+        { id: 'prepare-execution', status: 'execution-prepared', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+        { id: 'approve-execution', status: 'approval-recorded', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+      ],
+    } },
+  ]
+  assert.deepEqual(getAssistantControlActions(approvedAssistant, 1).map((action) => action.id), ['connect-github'])
+  assert.deepEqual(getAssistantControlActions(approvedAssistant, 1, { githubConnected: true }).map((action) => action.id), ['create-branch'])
 
   const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
   assert.match(builderPayload.desc, /FounderLab Chat brief/)
@@ -1571,6 +1722,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /continueFromChat/)
   assert.match(workspaceSource, /prepareRepositoryExecutionFromChat/)
   assert.match(workspaceSource, /approveRepositoryExecutionFromChat/)
+  assert.match(workspaceSource, /createApprovedRepositoryBranchFromChat/)
+  assert.match(workspaceSource, /createGithubBranch/)
   assert.match(workspaceSource, /No branch or files changed/)
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
@@ -1637,6 +1790,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(controlUtilsSource, /getChatControlActions/)
   assert.match(controlUtilsSource, /Prepare execution workflow/)
   assert.match(controlUtilsSource, /Record execution approval/)
+  assert.match(controlUtilsSource, /Create approved branch/)
+  assert.match(controlUtilsSource, /Connect GitHub/)
   assert.match(appSource, /flConsumeHandoff\('youtube'\)/)
   assert.match(appSource, /Content brief ready from Chat/)
   assert.match(voiceSessionSource, /fl-chat-voice-dock/)

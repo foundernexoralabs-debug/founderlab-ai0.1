@@ -2,7 +2,8 @@
  * A bounded, evidence-first execution workflow for Chat. It can record a
  * prepared change path and explicit approval, but it never performs a git
  * mutation, file edit, test run, build, or merge. Those operations require a
- * future authenticated server-side executor.
+ * authenticated execution capability. It can also record a direct GitHub
+ * branch result only when the user explicitly authorizes that browser action.
  */
 
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
@@ -15,8 +16,29 @@ const CHANGE_STATES = new Set(['not-started', 'prepared', 'applied'])
 const VALIDATION_STATES = new Set(['not-needed', 'required', 'not-run', 'passed', 'failed'])
 const APPROVAL_STATES = new Set(['not-required', 'required', 'approved', 'rejected'])
 const REVIEW_STATES = new Set(['not-required', 'awaiting-approval', 'awaiting-executor', 'awaiting-validation', 'ready-to-merge', 'not-ready'])
-const EXECUTION_STATES = new Set(['not-started', 'prepared', 'awaiting-approval', 'awaiting-executor', 'change-applied', 'validation-complete', 'reported', 'externally-unverified'])
+const EXECUTION_STATES = new Set(['not-started', 'prepared', 'awaiting-approval', 'awaiting-executor', 'branch-created', 'change-applied', 'validation-complete', 'reported', 'blocked', 'cancelled', 'externally-unverified'])
 const EXECUTOR_STATES = new Set(['not-available', 'available', 'started'])
+const CONNECTION_STATES = new Set(['not-connected', 'connected', 'unavailable'])
+const AUTHORIZATION_STATES = new Set(['not-authorized', 'unverified', 'read-only', 'writable', 'denied'])
+const EXECUTION_ACCESS_STATES = new Set(['unavailable', 'unverified', 'read-only', 'write-ready', 'blocked'])
+const BLOCK_PHASES = new Set(['inspection', 'branch', 'change', 'validation', 'report', 'approval', 'integration', 'provider'])
+const BLOCK_CODES = new Set([
+  'github-connection-required',
+  'github-auth-required',
+  'github-permission-denied',
+  'repository-inaccessible',
+  'repository-read-only',
+  'branch-conflict',
+  'execution-conflict',
+  'execution-cancelled',
+  'provider-unavailable',
+  'validation-failed',
+  'build-failed',
+  'partial-execution',
+  'executor-unavailable',
+  'approval-required',
+  'execution-unavailable',
+])
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -74,6 +96,19 @@ function normalizeChange(value) {
   return Object.freeze({ state: value.state, risk, fileTargets: normalizeFileTargets(value.fileTargets) })
 }
 
+function normalizeCapability(value) {
+  if (!isRecord(value)) return Object.freeze({ connection: 'not-connected', authorization: 'not-authorized', execution: 'unavailable' })
+  const connection = CONNECTION_STATES.has(value.connection) ? value.connection : 'not-connected'
+  const authorization = AUTHORIZATION_STATES.has(value.authorization) ? value.authorization : 'not-authorized'
+  const execution = EXECUTION_ACCESS_STATES.has(value.execution) ? value.execution : 'unavailable'
+  return Object.freeze({ connection, authorization, execution })
+}
+
+function normalizeBlock(value) {
+  if (!isRecord(value) || !BLOCK_CODES.has(value.code) || !BLOCK_PHASES.has(value.phase)) return null
+  return Object.freeze({ code: value.code, phase: value.phase, retryable: value.retryable === true })
+}
+
 /** Persist only compact execution evidence, never raw repository data or credentials. */
 export function normalizeExecutionWorkflow(value) {
   if (!isRecord(value) || value.version !== 1) return null
@@ -85,8 +120,10 @@ export function normalizeExecutionWorkflow(value) {
   const review = REVIEW_STATES.has(value.review) ? value.review : ''
   const execution = EXECUTION_STATES.has(value.execution) ? value.execution : ''
   const executor = EXECUTOR_STATES.has(value.executor) ? value.executor : ''
+  const capability = normalizeCapability(value.capability)
+  const block = normalizeBlock(value.block)
   if (!repository || !branch || !change || !validation || !approval || !review || !execution || !executor) return null
-  return Object.freeze({ version: 1, repository, branch, change, validation, approval, review, execution, executor })
+  return Object.freeze({ version: 1, repository, branch, change, validation, approval, review, execution, executor, capability, ...(block ? { block } : {}) })
 }
 
 function requestTerms(value) {
@@ -129,7 +166,7 @@ export function getExecutionFileTargets({ inspection = null, request = '' } = {}
  * branch-first plan was deliberately prepared. Its executor is explicitly
  * unavailable until a future authenticated server-side action runner exists.
  */
-export function createExecutionWorkflow({ inspection = null, preparation = null, request = '' } = {}) {
+export function createExecutionWorkflow({ inspection = null, preparation = null, request = '', capability = null } = {}) {
   const repository = normalizeRepository(preparation?.repository || inspection?.reference)
   const base = text(preparation?.baseBranch || inspection?.repository?.defaultBranch, 100)
   const proposed = text(preparation?.proposedBranch, MAX_BRANCH_LENGTH)
@@ -151,6 +188,7 @@ export function createExecutionWorkflow({ inspection = null, preparation = null,
     review: 'awaiting-approval',
     execution: 'awaiting-approval',
     executor: 'not-available',
+    capability,
   })
 }
 
@@ -164,6 +202,110 @@ export function approveExecutionWorkflow(value) {
     review: 'awaiting-executor',
     execution: 'awaiting-executor',
   })
+}
+
+function capabilityForBlock(capability, code) {
+  if (code === 'github-connection-required') return { connection: 'not-connected', authorization: 'not-authorized', execution: 'unavailable' }
+  if (['github-auth-required', 'github-permission-denied'].includes(code)) return { connection: 'connected', authorization: 'denied', execution: 'blocked' }
+  if (code === 'repository-read-only') return { ...capability, authorization: 'read-only', execution: 'read-only' }
+  if (['repository-inaccessible', 'executor-unavailable', 'execution-unavailable'].includes(code)) return { ...capability, execution: 'unavailable' }
+  return { ...capability, execution: 'blocked' }
+}
+
+/** Record a safe, classified block without storing raw upstream errors or claiming partial work succeeded. */
+export function recordExecutionWorkflowBlock(value, { code = 'execution-unavailable', phase = 'integration', retryable = false } = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow || !BLOCK_CODES.has(code) || !BLOCK_PHASES.has(phase)) return workflow
+  return normalizeExecutionWorkflow({
+    ...workflow,
+    capability: capabilityForBlock(workflow.capability, code),
+    block: { code, phase, retryable: retryable === true },
+    execution: code === 'execution-cancelled' ? 'cancelled' : 'blocked',
+    review: 'not-ready',
+  })
+}
+
+/** Clear only a retryable recorded block; the underlying approval boundary remains intact. */
+export function retryExecutionWorkflow(value) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow?.block?.retryable || workflow.approval !== 'approved') return null
+  return normalizeExecutionWorkflow({
+    ...workflow,
+    block: undefined,
+    execution: 'awaiting-executor',
+    review: 'awaiting-executor',
+    capability: { ...workflow.capability, execution: workflow.capability.connection === 'connected' ? 'unverified' : 'unavailable' },
+  })
+}
+
+/** Record a GitHub-confirmed branch creation after an explicit approved action. */
+export function recordExecutionWorkflowBranchCreated(value) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow || workflow.approval !== 'approved' || workflow.branch.state !== 'planned') return null
+  return normalizeExecutionWorkflow({
+    ...workflow,
+    branch: { ...workflow.branch, state: 'created' },
+    capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' },
+    execution: 'branch-created',
+    review: 'awaiting-executor',
+    executor: 'available',
+    block: undefined,
+  })
+}
+
+/**
+ * A browser-side branch action must be backed by the recorded inspect → plan
+ * → approve sequence. This is intentionally separate from rendering controls
+ * so stale or malformed persisted message state cannot issue a GitHub request.
+ */
+export function canCreateApprovedBranchAction(value, {
+  inspectionRecorded = false,
+  branchPlanRecorded = false,
+  approvalRecorded = false,
+} = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  return Boolean(
+    workflow
+    && workflow.approval === 'approved'
+    && workflow.branch.state === 'planned'
+    && (!workflow.block || workflow.block.retryable)
+    && inspectionRecorded === true
+    && branchPlanRecorded === true
+    && approvalRecorded === true,
+  )
+}
+
+/** Future authenticated executors use this to attach validation evidence without implying a merge. */
+export function recordExecutionWorkflowValidation(value, { tests, build, report, source = '' } = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow || source !== 'secure-executor' || workflow.branch.state !== 'created') return null
+  const validation = normalizeValidation({ tests, build, report })
+  if (!validation) return null
+  const failed = ['failed'].some((state) => Object.values(validation).includes(state))
+  if (failed) {
+    return recordExecutionWorkflowBlock({ ...workflow, validation }, { code: validation.build === 'failed' ? 'build-failed' : 'validation-failed', phase: 'validation' })
+  }
+  const complete = [validation.tests, validation.build, validation.report].every((state) => ['passed', 'not-needed'].includes(state))
+  return normalizeExecutionWorkflow({
+    ...workflow,
+    validation,
+    execution: complete ? 'validation-complete' : 'change-applied',
+    review: complete ? 'awaiting-executor' : 'awaiting-validation',
+    executor: 'started',
+    capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' },
+    block: undefined,
+  })
+}
+
+/** Prepare review/merge readiness only after verified validation; this never performs a merge. */
+export function recordExecutionWorkflowReviewReadiness(value, { source = 'secure-executor' } = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow || source !== 'secure-executor' || workflow.branch.state !== 'created') return null
+  if (workflow.block) return normalizeExecutionWorkflow({ ...workflow, review: 'not-ready' })
+  const valid = [workflow.validation.tests, workflow.validation.build, workflow.validation.report]
+    .every((state) => ['passed', 'not-needed'].includes(state))
+  if (!valid) return normalizeExecutionWorkflow({ ...workflow, review: 'not-ready', execution: 'validation-complete' })
+  return normalizeExecutionWorkflow({ ...workflow, review: 'ready-to-merge', execution: 'reported', executor: 'started' })
 }
 
 /**
@@ -189,6 +331,8 @@ export function applyExecutionWorkflowEvidence(value, evidence = {}) {
     review: REVIEW_STATES.has(evidence.review) ? evidence.review : workflow.review,
     execution: EXECUTION_STATES.has(evidence.execution) ? evidence.execution : workflow.execution,
     executor: secureExecutorEvidence ? 'started' : workflow.executor,
+    capability: secureExecutorEvidence ? { connection: 'connected', authorization: 'writable', execution: 'write-ready' } : workflow.capability,
+    block: secureExecutorEvidence ? undefined : workflow.block,
   }
   return normalizeExecutionWorkflow(next)
 }
@@ -201,18 +345,54 @@ const VALIDATION_LABELS = Object.freeze({
   failed: 'Failed',
 })
 
+const BLOCK_COPY = Object.freeze({
+  'github-connection-required': 'GitHub is not connected for this browser session.',
+  'github-auth-required': 'GitHub requires a valid session token before this branch can be created.',
+  'github-permission-denied': 'The connected GitHub identity does not have permission to create this branch.',
+  'repository-inaccessible': 'This repository is inaccessible to the connected GitHub identity.',
+  'repository-read-only': 'This repository is available only as read-only for the requested workflow.',
+  'branch-conflict': 'The proposed branch already exists or conflicts with repository state.',
+  'execution-conflict': 'GitHub reported a conflict while preparing the branch.',
+  'execution-cancelled': 'The execution was cancelled before a completed result was recorded.',
+  'provider-unavailable': 'The selected provider is unavailable for this execution step.',
+  'validation-failed': 'Required validation failed; review the result before continuing.',
+  'build-failed': 'The required build failed; review the result before continuing.',
+  'partial-execution': 'Only part of the execution path is recorded; remaining steps are still unverified.',
+  'executor-unavailable': 'A secure executor is not connected for the next repository mutation step.',
+  'approval-required': 'Explicit approval is required before this mutating workflow can continue.',
+  'execution-unavailable': 'This execution path is unavailable in the current FounderLab session.',
+})
+
+function capabilityLabel(capability) {
+  if (capability.connection === 'not-connected') return 'GitHub not connected'
+  if (capability.authorization === 'denied') return 'GitHub permission denied'
+  if (capability.authorization === 'read-only') return 'GitHub read-only'
+  if (capability.authorization === 'writable') return 'GitHub writable'
+  if (capability.authorization === 'unverified') return 'GitHub connected · write permission unverified'
+  return 'Execution capability unavailable'
+}
+
 /** Compact, honest view model for the Operator report. */
 export function getExecutionWorkflowPresentation(value) {
   const workflow = normalizeExecutionWorkflow(value)
   if (!workflow) return null
+  const branchCreated = workflow.branch.state === 'created'
+  const blocked = workflow.block
   const approvalRecorded = workflow.approval === 'approved'
-  const label = approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
-  const detail = approvalRecorded
-    ? 'Approval is recorded in FounderLab. No branch was created, no files were changed, and execution access is still required.'
-    : 'Candidate files and validation needs are prepared. No branch was created, no files were changed, and no validation ran.'
+  const state = blocked ? 'execution-blocked' : branchCreated ? 'branch-created' : approvalRecorded ? 'approval-recorded' : 'execution-prepared'
+  const label = blocked ? 'Execution blocked' : branchCreated ? 'Branch created' : approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
+  const detail = blocked
+    ? BLOCK_COPY[blocked.code]
+    : branchCreated
+      ? 'GitHub confirmed the branch creation. No files were changed, no tests or build were run, and review is not ready yet.'
+      : approvalRecorded
+        ? workflow.capability.connection === 'connected'
+          ? 'Approval is recorded. GitHub is connected, but write permission will be verified only when the user explicitly creates this branch.'
+          : 'Approval is recorded. Connect GitHub before the user can explicitly create this branch.'
+        : 'Candidate files and validation needs are prepared. No branch was created, no files were changed, and no validation ran.'
   const validation = `Tests: ${VALIDATION_LABELS[workflow.validation.tests]} · Build: ${VALIDATION_LABELS[workflow.validation.build]} · Report: ${VALIDATION_LABELS[workflow.validation.report]}`
   return Object.freeze({
-    state: approvalRecorded ? 'approval-recorded' : 'execution-prepared',
+    state,
     label,
     detail,
     repository: workflow.repository.slug,
@@ -221,7 +401,9 @@ export function getExecutionWorkflowPresentation(value) {
     ...(workflow.change.fileTargets.length ? { fileTargets: workflow.change.fileTargets } : {}),
     validation,
     review: workflow.review === 'ready-to-merge' ? 'Ready to merge' : workflow.review.replace(/-/g, ' '),
-    executor: workflow.executor === 'not-available' ? 'Secure execution access is not connected' : workflow.executor.replace(/-/g, ' '),
+    capability: capabilityLabel(workflow.capability),
+    executor: workflow.executor === 'not-available' ? 'Server-side executor not connected' : workflow.executor.replace(/-/g, ' '),
+    ...(blocked ? { block: { code: blocked.code, phase: blocked.phase, retryable: blocked.retryable } } : {}),
   })
 }
 
@@ -232,8 +414,20 @@ export function getExecutionWorkflowGuidance(value) {
     ? `Candidate files to review: ${workflow.change.fileTargets.join(', ')}. These are candidates from the bounded inspection, not files that were changed.`
     : 'No candidate files are recorded; inspect the scoped repository paths before choosing a mutation target.'
   const validation = `Validation state: tests ${workflow.validation.tests}, build ${workflow.validation.build}, report ${workflow.validation.report}.`
+  if (workflow.block) {
+    const recovery = workflow.block.retryable
+      ? 'A retry is possible after confirming the same scope and connection.'
+      : 'Resolve the stated connection, permission, repository, or review boundary before continuing.'
+    return `The execution workflow for ${workflow.repository.slug} is blocked during ${workflow.block.phase}: ${BLOCK_COPY[workflow.block.code]} ${recovery} ${files} ${validation} Do not claim a branch, file change, test, build, or merge completed.`
+  }
+  if (workflow.branch.state === 'created') {
+    return `GitHub confirmed creation of ${workflow.branch.proposed} for ${workflow.repository.slug}. No files were changed, no tests or build ran, and merge review is not ready. ${files} ${validation}`
+  }
   if (workflow.approval === 'approved') {
-    return `A branch-first execution workflow is approved for ${workflow.repository.slug}, but no secure executor is connected. ${files} ${validation} Do not claim a branch was created, a file changed, tests ran, or a merge is ready.`
+    const next = workflow.capability.connection === 'connected'
+      ? 'GitHub write permission remains unverified until the user explicitly chooses branch creation.'
+      : 'Connect GitHub before the user can explicitly create the branch.'
+    return `A branch-first execution workflow is approved for ${workflow.repository.slug}. ${next} ${files} ${validation} Do not claim a branch was created, a file changed, tests ran, or a merge is ready.`
   }
   return `A branch-first execution workflow is prepared for ${workflow.repository.slug} and still needs explicit approval. ${files} ${validation} Do not claim a branch was created, a file changed, tests ran, or a merge is ready.`
 }
@@ -256,11 +450,42 @@ export function formatExecutionWorkflowReport(workflow) {
 export function formatExecutionApprovalReport(workflow) {
   const presentation = getExecutionWorkflowPresentation(workflow)
   if (!presentation || presentation.state !== 'approval-recorded') return ''
+  const next = presentation.capability === 'GitHub not connected'
+    ? 'Connect GitHub in this browser session, then explicitly choose branch creation.'
+    : 'Explicitly choose branch creation when ready; GitHub will verify write permission at that point.'
   return [
     '## Execution approval recorded',
     `**Repository:** \`${presentation.repository}\``,
     `**Planned branch:** \`${presentation.branch}\``,
     '',
-    'FounderLab recorded approval for a future branch-first mutation workflow. No branch was created, no files were changed, no tests or build were run, and external execution remains unverified until a secure executor is connected.',
+    `FounderLab recorded approval for a future branch-first mutation workflow. ${next} No branch was created, no files were changed, and no tests or build were run.`,
+  ].join('\n')
+}
+
+export function formatExecutionBranchCreatedReport(workflow) {
+  const presentation = getExecutionWorkflowPresentation(workflow)
+  if (!presentation || presentation.state !== 'branch-created') return ''
+  return [
+    '## Branch created',
+    `**Repository:** \`${presentation.repository}\``,
+    `**Branch:** \`${presentation.branch}\``,
+    '',
+    'GitHub confirmed branch creation. No files were changed, no tests or build were run, and this work is not ready for review or merge yet.',
+  ].join('\n')
+}
+
+export function formatExecutionBlockedReport(workflow) {
+  const presentation = getExecutionWorkflowPresentation(workflow)
+  if (!presentation?.block) return ''
+  const recovery = presentation.block.retryable
+    ? 'Retry after confirming the connection and current repository state.'
+    : 'Resolve the stated boundary, then prepare the next explicit action.'
+  return [
+    '## Execution blocked',
+    `**Repository:** \`${presentation.repository}\``,
+    `**State:** ${presentation.detail}`,
+    `**Next step:** ${recovery}`,
+    '',
+    'No additional branch, file, test, build, review, or merge result is claimed.',
   ].join('\n')
 }

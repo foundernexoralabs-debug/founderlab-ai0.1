@@ -6,6 +6,7 @@
  */
 
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
+import { isChatExecutionActionId, isChatExecutionActionStatus } from './chatExecutionVocabulary.js'
 
 const SURFACES = new Set(['workspace', 'builder', 'code', 'repository', 'github', 'project'])
 const OPERATIONS = new Set(['explain', 'plan', 'capture', 'create', 'change', 'inspect', 'handoff', 'continue'])
@@ -24,8 +25,6 @@ const BRANCH_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
 const INSPECTION_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required', 'completed'])
 const APPROVAL_REQUIREMENTS = new Set(['not-required', 'required'])
 const HANDOFFS = new Set(['builder', 'code', 'github'])
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch', 'prepare-execution', 'approve-execution'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared', 'execution-prepared', 'approval-recorded'])
 
 function text(value, limit = 160) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, limit) : ''
@@ -150,8 +149,8 @@ function selectHandoff(surface, intent) {
 
 function latestMatchingAction(actions, handoff) {
   if (!Array.isArray(actions)) return null
-  return [...actions].reverse().find((action) => ACTION_IDS.has(action?.id)
-    && ACTION_STATUSES.has(action?.status)
+  return [...actions].reverse().find((action) => isChatExecutionActionId(action?.id)
+    && isChatExecutionActionStatus(action?.status)
     && (!handoff || action.id === handoff || (handoff === 'github' && action.id === 'code'))) || null
 }
 

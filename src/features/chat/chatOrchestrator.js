@@ -11,6 +11,11 @@
 import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
 import { normalizeCapabilityBridge } from './chatCapabilityBridge.js'
 import { normalizeExecutionWorkflow } from './chatExecutionWorkflow.js'
+import {
+  isChatExecutionActionId,
+  isChatExecutionActionStatus,
+  isChatExecutionResourceType,
+} from './chatExecutionVocabulary.js'
 
 const MAX_ACTION_EVIDENCE = 12
 const MAX_OBJECTIVE_LENGTH = 220
@@ -372,9 +377,6 @@ export function createAssistantOrchestration(context) {
   })
 }
 
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch', 'prepare-execution', 'approve-execution'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared', 'execution-prepared', 'approval-recorded'])
-const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project', 'repository', 'branch'])
 const ROUTING_TASK_CLASSES = new Set(['conversation', 'planning', 'code', 'execution'])
 const ROUTING_REASONING_LEVELS = new Set(['light', 'focused', 'high'])
 const ROUTING_PATHS = new Set(['cloud', 'local'])
@@ -407,11 +409,16 @@ function normalizeRoutingEvidence(value) {
 }
 
 function normalizeActionResource(value) {
-  if (!value || typeof value !== 'object' || !ACTION_RESOURCE_TYPES.has(value.type)) return null
+  if (!value || typeof value !== 'object' || !isChatExecutionResourceType(value.type)) return null
   const id = requestText(value.id).slice(0, 160)
   const title = requestText(value.title).replace(/\s+/g, ' ').slice(0, 120)
   if (!id || !title) return null
   return Object.freeze({ type: value.type, id, title })
+}
+
+function normalizeActionTimestamp(value) {
+  if (typeof value !== 'string' || !value || Number.isNaN(Date.parse(value))) return ''
+  return value.slice(0, 40)
 }
 
 /** Keep action evidence compact, serializable, and impossible to confuse with an external artifact. */
@@ -425,11 +432,12 @@ export function normalizeMessageOrchestration(value) {
   const workflow = normalizeExecutionWorkflow(value.workflow)
   const actions = Array.isArray(value.actions)
     ? value.actions
-      .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
+      .filter((action) => action && isChatExecutionActionId(action.id) && isChatExecutionActionStatus(action.status))
       .slice(-MAX_ACTION_EVIDENCE)
       .map((action) => {
         const resource = normalizeActionResource(action.resource)
-        return Object.freeze({ id: action.id, status: action.status, ...(resource ? { resource } : {}) })
+        const at = normalizeActionTimestamp(action.at)
+        return Object.freeze({ id: action.id, status: action.status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })
       })
     : []
   return Object.freeze({
@@ -446,12 +454,16 @@ export function normalizeMessageOrchestration(value) {
   })
 }
 
-export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource, workflow: actionWorkflow } = {}) {
+export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource, workflow: actionWorkflow, at: actionAt } = {}) {
   const current = normalizeMessageOrchestration(orchestration) || createAssistantOrchestration()
-  if (!ACTION_IDS.has(id) || !ACTION_STATUSES.has(status)) return current
+  if (!isChatExecutionActionId(id) || !isChatExecutionActionStatus(status)) return current
   const resource = normalizeActionResource(actionResource)
+  const at = normalizeActionTimestamp(actionAt)
   const workflow = normalizeExecutionWorkflow(actionWorkflow) || current.workflow
-  const actions = [...current.actions.filter((action) => action.id !== id), Object.freeze({ id, status, ...(resource ? { resource } : {}) })].slice(-MAX_ACTION_EVIDENCE)
+  const duplicate = current.actions.some((action) => action.id === id && action.status === status && action.resource?.id === resource?.id)
+  const actions = duplicate
+    ? current.actions
+    : [...current.actions, Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })].slice(-MAX_ACTION_EVIDENCE)
   return Object.freeze({ ...current, ...(workflow ? { workflow } : {}), actions: Object.freeze(actions) })
 }
 

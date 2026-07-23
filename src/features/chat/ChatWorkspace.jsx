@@ -52,10 +52,21 @@ import {
 } from './chatRepositoryInspection'
 import {
   approveExecutionWorkflow,
+  canCreateApprovedBranchAction,
   createExecutionWorkflow,
+  formatExecutionBlockedReport,
+  formatExecutionBranchCreatedReport,
   formatExecutionApprovalReport,
   formatExecutionWorkflowReport,
+  normalizeExecutionWorkflow,
+  recordExecutionWorkflowBlock,
+  recordExecutionWorkflowBranchCreated,
 } from './chatExecutionWorkflow'
+import {
+  createGithubBranch,
+  getGithubBranchExecutionCapability,
+  getGithubBranchExecutionErrorPresentation,
+} from './githubBranchExecutor'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
@@ -1206,7 +1217,7 @@ export function ChatWorkspace({ user }) {
     const conversation = conversationsRef.current.find((entry) => entry.messages?.some((message) => message.id === messageId))
     if (!conversation || !action?.id || !action?.status) return false
     const messagesWithEvidence = conversation.messages.map((entry) => entry.id === messageId
-      ? { ...entry, orchestration: recordOrchestrationAction(entry.orchestration, action) }
+      ? { ...entry, orchestration: recordOrchestrationAction(entry.orchestration, { ...action, at: action.at || ts() }) }
       : entry)
     updateConversation(conversation.id, { messages: messagesWithEvidence })
     return true
@@ -1303,7 +1314,12 @@ export function ChatWorkspace({ user }) {
       toast('Inspect the repository and prepare a branch plan before preparing execution.', 'error')
       return false
     }
-    const workflow = createExecutionWorkflow({ inspection, preparation, request: action?.request || '' })
+    const workflow = createExecutionWorkflow({
+      inspection,
+      preparation,
+      request: action?.request || '',
+      capability: getGithubBranchExecutionCapability(getGithubToken()),
+    })
     if (!workflow) {
       toast('FounderLab could not prepare a bounded execution workflow from this plan.', 'error')
       return false
@@ -1340,8 +1356,79 @@ export function ChatWorkspace({ user }) {
       workflow,
     })
     appendActionReport(message.id, formatExecutionApprovalReport(workflow))
-    toast('Approval recorded. Secure execution access is still required before repository work begins.', 'success')
+    toast('Approval recorded. Connect GitHub if needed, then explicitly create the approved branch.', 'success')
     return true
+  }
+
+  async function createApprovedRepositoryBranchFromChat(action, message) {
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    const inspection = getRecordedInspection(message)
+    const preparation = getRecordedBranchPreparation(message)
+    const branchId = workflow ? `github:${workflow.repository.slug}#${workflow.branch.proposed}` : ''
+    const approvalRecorded = message?.orchestration?.actions?.some((entry) => entry?.id === 'approve-execution'
+      && entry?.status === 'approval-recorded' && entry?.resource?.id === branchId)
+    const actionReady = canCreateApprovedBranchAction(workflow, {
+      inspectionRecorded: Boolean(inspection && inspection.reference?.slug === workflow?.repository?.slug),
+      branchPlanRecorded: Boolean(preparation && preparation.proposedBranch === workflow?.branch?.proposed),
+      approvalRecorded,
+    })
+    if (!actionReady) {
+      toast('Record approval and resolve any blocked state before creating this branch.', 'error')
+      return false
+    }
+    // Validate the local state transition before issuing the external request.
+    // This keeps a malformed/stale message from creating an unapproved ref.
+    const branchCreatedWorkflow = recordExecutionWorkflowBranchCreated(workflow)
+    if (!branchCreatedWorkflow) {
+      toast('FounderLab could not verify this approved branch workflow safely.', 'error')
+      return false
+    }
+    const token = getGithubToken()
+    if (!token) {
+      const blocked = recordExecutionWorkflowBlock(workflow, { code: 'github-connection-required', phase: 'integration', retryable: true })
+      if (blocked) {
+        recordActionEvidence(message.id, { id: 'create-branch', status: 'execution-blocked', workflow: blocked })
+        appendActionReport(message.id, formatExecutionBlockedReport(blocked))
+      }
+      toast('Connect GitHub in Settings before creating this approved branch.', 'error')
+      return false
+    }
+    try {
+      await createGithubBranch({
+        token,
+        repository: workflow?.repository,
+        baseBranch: workflow?.branch?.base,
+        proposedBranch: workflow?.branch?.proposed,
+      })
+      const recorded = recordActionEvidence(message.id, {
+        id: 'create-branch',
+        status: 'branch-created',
+        resource: { type: 'branch', id: `github:${branchCreatedWorkflow.repository.slug}#${branchCreatedWorkflow.branch.proposed}`, title: branchCreatedWorkflow.branch.proposed },
+        workflow: branchCreatedWorkflow,
+      })
+      if (!recorded) {
+        toast('GitHub created the branch, but FounderLab could not save its evidence. Re-inspect before continuing.', 'error')
+        return false
+      }
+      appendActionReport(message.id, formatExecutionBranchCreatedReport(branchCreatedWorkflow))
+      toast('GitHub confirmed the branch. No files, commits, tests, or build were run.', 'success')
+      return true
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : 'execution-unavailable'
+      const retryable = ['github-auth-required', 'execution-unavailable', 'execution-conflict'].includes(code)
+      const blocked = recordExecutionWorkflowBlock(workflow, { code, phase: 'branch', retryable })
+      if (blocked) {
+        recordActionEvidence(message.id, {
+          id: 'create-branch',
+          status: 'execution-blocked',
+          resource: { type: 'branch', id: `github:${blocked.repository.slug}#${blocked.branch.proposed}`, title: blocked.branch.proposed },
+          workflow: blocked,
+        })
+        appendActionReport(message.id, formatExecutionBlockedReport(blocked))
+      }
+      toast(getGithubBranchExecutionErrorPresentation(error), 'error')
+      return false
+    }
   }
 
   function saveRename(conversationId) {
@@ -1389,6 +1476,13 @@ export function ChatWorkspace({ user }) {
     if (action.id === 'prepare-branch') return prepareRepositoryBranchFromChat(action, message)
     if (action.id === 'prepare-execution') return prepareRepositoryExecutionFromChat(action, message)
     if (action.id === 'approve-execution') return approveRepositoryExecutionFromChat(action, message)
+    if (action.id === 'create-branch') return createApprovedRepositoryBranchFromChat(action, message)
+    if (action.id === 'connect-github') {
+      recordActionEvidence(message.id, { id: 'connect-github', status: 'handoff-opened' })
+      flNavigate('settings')
+      toast('Open Integrations in Settings to connect GitHub for this browser session.', 'success')
+      return true
+    }
     const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
     if (!payload || !action.target) return false
     recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })
@@ -1521,7 +1615,7 @@ export function ChatWorkspace({ user }) {
             <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
-                {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index)} onControlAction={continueFromChat} />)}
+                {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index, { githubConnected: Boolean(getGithubToken()) })} onControlAction={continueFromChat} />)}
                 {streamingReply?.conversationId === activeId && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatMessage key={streamingReply.id} message={streamingReply} user={user} sending={sending} activeTTS={activeTTS} streaming onStopStreaming={stopGenerating} />}
                 {sending && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && !streamingReply && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}

@@ -193,13 +193,20 @@ export function ChatMessage({
                     {operatorReport.workflow.branch}<br />
                     {operatorReport.workflow.change}<br />
                     {operatorReport.workflow.validation}<br />
-                    Review: {operatorReport.workflow.review} · {operatorReport.workflow.executor}
+                    Review: {operatorReport.workflow.review} · {operatorReport.workflow.capability}<br />
+                    Execution access: {operatorReport.workflow.executor}
                     {operatorReport.workflow.fileTargets?.length ? <><br />Candidate files: {operatorReport.workflow.fileTargets.join(', ')}</> : null}
                   </span>
                 </p>
               )}
               {operatorReport.capability && <p><b>{operatorReport.capability.label}</b><br />{operatorReport.capability.detail}</p>}
               {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
+              {operatorReport.trail?.entries?.length ? (
+                <p>
+                  <b>Execution trail</b><br />
+                  {operatorReport.trail.entries.map((entry) => <span key={entry.id} className="fl-chat-operator-report-next">{entry.phase} · {entry.label}{entry.resource ? ` · ${entry.resource}` : ''}<br /></span>)}
+                </p>
+              ) : null}
               {operatorReport.facts.filter((fact) => fact.label !== operatorReport.outcome.label).map((fact) => <p key={`${fact.kind}-${fact.label}`}><b>{fact.label}</b><br />{fact.detail}</p>)}
               <p className="fl-chat-operator-report-next">{operatorReport.nextStep}</p>
             </div>

@@ -5,11 +5,12 @@
  * route recommendation into an unverified tool claim.
  */
 
+import { isChatExecutionActionId } from './chatExecutionVocabulary.js'
+
 const MAX_ROUTES = 3
 const CAPABILITY_IDS = new Set(['notes', 'tasks', 'builder', 'code', 'github', 'youtube', 'repo-inspection', 'email', 'calendar', 'external-app'])
 const CAPABILITY_KINDS = new Set(['workspace', 'tool', 'integration'])
-const AVAILABILITY = new Set(['available', 'connected', 'not-connected', 'not-implemented'])
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
+const AVAILABILITY = new Set(['available', 'connected', 'not-connected', 'read-only', 'unauthorized', 'unavailable', 'not-implemented'])
 
 const CAPABILITY_COPY = Object.freeze({
   notes: Object.freeze({ label: 'Notes', kind: 'workspace', action: 'save-note' }),
@@ -45,7 +46,12 @@ function mentionsAny(value, terms) {
 }
 
 function getIntegrationAvailability(integrations, id) {
-  if (id === 'github') return integrations?.github?.connected === true ? 'connected' : 'not-connected'
+  if (id === 'github') {
+    if (integrations?.github?.connected !== true) return 'not-connected'
+    if (integrations?.github?.authorization === 'denied') return 'unauthorized'
+    if (integrations?.github?.writable === false) return 'read-only'
+    return 'connected'
+  }
   if (['email', 'calendar', 'external-app'].includes(id)) return 'not-connected'
   return 'available'
 }
@@ -70,7 +76,7 @@ export function normalizeCapabilityBridge(value) {
     if (!isRecord(route) || !CAPABILITY_IDS.has(route.id) || seen.has(route.id)) return items
     const definition = CAPABILITY_COPY[route.id]
     if (!definition || !CAPABILITY_KINDS.has(route.kind) || route.kind !== definition.kind || !AVAILABILITY.has(route.availability)) return items
-    const action = ACTION_IDS.has(route.action) && route.action === definition.action ? route.action : ''
+    const action = isChatExecutionActionId(route.action) && route.action === definition.action ? route.action : ''
     seen.add(route.id)
     items.push(Object.freeze({ id: route.id, kind: route.kind, availability: route.availability, ...(action ? { action } : {}) }))
     return items
@@ -90,6 +96,10 @@ function inferRepositoryRoute(request, executionBridge) {
   if (executionBridge?.target?.repository?.slug) return 'repo-inspection'
   if (executionBridge?.target?.surface === 'repository' || executionBridge?.target?.surface === 'github') return 'github'
   return ''
+}
+
+function needsGithubWrite(executionBridge) {
+  return executionBridge?.target?.repository && executionBridge.branch === 'required'
 }
 
 function requestsExternalAction(request, intent) {
@@ -115,6 +125,7 @@ export function getChatCapabilityBridge({ request = '', intent = null, execution
   if (intent?.wantsNote) add('notes')
   add(routeIdForTool(intent?.primaryTool))
   add(inferRepositoryRoute(request, executionBridge))
+  if (needsGithubWrite(executionBridge)) add('github')
   if (requestsExternalAction(request, intent)) {
     if (mentionsAny(request, EMAIL_TERMS)) add('email')
     if (mentionsAny(request, CALENDAR_TERMS)) add('calendar')
@@ -122,7 +133,7 @@ export function getChatCapabilityBridge({ request = '', intent = null, execution
   }
   const routes = routeIds.map((id) => createRoute(id, integrations)).filter(Boolean)
   if (!routes.length) return null
-  const external = routes.find((route) => route.kind === 'integration' && route.availability !== 'connected')
+  const external = routes.find((route) => route.kind === 'integration' && !['connected', 'available'].includes(route.availability))
   return normalizeCapabilityBridge({
     primary: external?.id || routes[0].id,
     routes,
@@ -141,6 +152,12 @@ export function getCapabilityBridgeGuidance(value) {
     const label = routeLabel(route)
     if (route.kind === 'integration' && route.availability === 'not-connected') {
       return `${label} is an external integration route that is not connected for this workspace. Do not claim an email, repository mutation, sync, or external app action occurred. Provide the useful draft or plan now and label connection as the required next step.`
+    }
+    if (route.kind === 'integration' && route.availability === 'read-only') {
+      return `${label} is connected only for read-only work. Do not claim a branch or file mutation is available; request writable authorization before an explicit change action.`
+    }
+    if (route.kind === 'integration' && route.availability === 'unauthorized') {
+      return `${label} is connected but not authorized for this workflow. Do not retry a mutation until the user reconnects with the required permission.`
     }
     if (route.kind === 'integration' && route.availability === 'connected') {
       return `${label} is connected for this browser session, but connection is not proof that a repository, branch, pull request, or external action was inspected or changed. Keep execution explicit and evidence-based.`
@@ -164,6 +181,22 @@ export function getCapabilityBridgePresentation(value) {
       detail: `${label} is not connected for this workspace. FounderLab did not attempt an external action.`,
     })
   }
+  if (route.kind === 'integration' && route.availability === 'read-only') {
+    return Object.freeze({
+      id: route.id,
+      state: 'read-only-integration',
+      label: `Capability route: ${label} read-only`,
+      detail: `${label} can support inspection, but writable authorization is required before a branch or file mutation.`,
+    })
+  }
+  if (route.kind === 'integration' && route.availability === 'unauthorized') {
+    return Object.freeze({
+      id: route.id,
+      state: 'authorization-needed',
+      label: `Capability route: ${label} authorization needed`,
+      detail: `${label} is connected but not authorized for this workflow. FounderLab did not attempt a mutation.`,
+    })
+  }
   if (route.kind === 'integration' && route.availability === 'connected') {
     return Object.freeze({
       id: route.id,
@@ -185,7 +218,7 @@ export function getCapabilityBridgeHandoffAction(value) {
   const bridge = normalizeCapabilityBridge(value)
   if (!bridge) return ''
   const route = bridge.routes.find((item) => item.id === bridge.primary) || bridge.routes[0]
-  if (!route?.action || !ACTION_IDS.has(route.action)) return ''
+  if (!route?.action || !isChatExecutionActionId(route.action)) return ''
   if (route.kind === 'integration' && route.availability !== 'connected') return ''
   return route.action
 }

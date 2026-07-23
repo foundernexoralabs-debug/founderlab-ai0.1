@@ -90,7 +90,8 @@ function cleanAction(action) {
   const status = safeText(action.status, 36)
   if (!id || !status) return null
   const resource = cleanResource(action.resource)
-  return Object.freeze({ id, status, ...(resource ? { resource } : {}) })
+  const at = typeof action.at === 'string' && !Number.isNaN(Date.parse(action.at)) ? action.at.slice(0, 40) : ''
+  return Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })
 }
 
 function cleanThreadMemory(value) {
@@ -293,8 +294,12 @@ function actionEvidenceLabel(action) {
     ? `A bounded execution workflow was prepared for ${action.resource.title}; no branch, file change, test, or build is recorded.`
     : 'A bounded execution workflow was prepared; no branch, file change, test, or build is recorded.'
   if (action.id === 'approve-execution' && action.status === 'approval-recorded') return action.resource?.title
-    ? `Approval was recorded for ${action.resource.title}; secure execution access is still required and no repository mutation is recorded.`
-    : 'Approval was recorded for a future execution workflow; secure execution access is still required and no repository mutation is recorded.'
+    ? `Approval was recorded for ${action.resource.title}; branch creation remains a separate explicit GitHub action and no repository mutation is recorded.`
+    : 'Approval was recorded for a future execution workflow; branch creation remains a separate explicit GitHub action and no repository mutation is recorded.'
+  if (action.id === 'create-branch' && action.status === 'branch-created') return action.resource?.title
+    ? `GitHub confirmed branch creation for ${action.resource.title}; no files, tests, build, review, or merge are recorded.`
+    : 'GitHub confirmed branch creation; no files, tests, build, review, or merge are recorded.'
+  if (action.id === 'create-branch' && action.status === 'execution-blocked') return 'A requested branch action was blocked; no additional repository mutation is recorded.'
   return ''
 }
 
