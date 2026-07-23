@@ -10,6 +10,7 @@
 
 import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
 import { normalizeCapabilityBridge } from './chatCapabilityBridge.js'
+import { normalizeExecutionWorkflow } from './chatExecutionWorkflow.js'
 
 const MAX_ACTION_EVIDENCE = 12
 const MAX_OBJECTIVE_LENGTH = 220
@@ -251,6 +252,14 @@ function getRecentActionEvidence(messages) {
   return Object.freeze(evidence.reverse())
 }
 
+function getRecentExecutionWorkflow(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const workflow = normalizeExecutionWorkflow(messages[index]?.orchestration?.workflow)
+    if (workflow) return workflow
+  }
+  return null
+}
+
 function getActiveObjective(messages, latestUserIndex) {
   for (let index = latestUserIndex; index >= 0; index -= 1) {
     const message = messages[index]
@@ -276,7 +285,7 @@ export function getChatOrchestrationContext(messages = []) {
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
     const intent = classifyChatRequest('')
-    return Object.freeze({ intent, reference: Object.freeze({ referencesPrevious: false, explicitlyRequestsFullRepeat: false, artifactKind: '' }), activeObjective: '', actionEvidence: Object.freeze([]) })
+    return Object.freeze({ intent, reference: Object.freeze({ referencesPrevious: false, explicitlyRequestsFullRepeat: false, artifactKind: '' }), activeObjective: '', actionEvidence: Object.freeze([]), executionWorkflow: null })
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = getPreviousAssistant(items, latestUserIndex)
@@ -287,6 +296,7 @@ export function getChatOrchestrationContext(messages = []) {
     reference,
     activeObjective: getActiveObjective(items, latestUserIndex),
     actionEvidence: getRecentActionEvidence(items),
+    executionWorkflow: getRecentExecutionWorkflow(items),
   })
 }
 
@@ -298,6 +308,10 @@ function evidenceLabel({ id, status }) {
     code: status === 'handoff-opened' ? 'A Code AI handoff was opened; this does not confirm code was changed.' : 'A Code AI handoff was prepared but not opened.',
     github: status === 'handoff-opened' ? 'A Code AI GitHub-preparation handoff was opened; no repository action is confirmed.' : 'A GitHub-preparation handoff was prepared but not opened.',
     youtube: status === 'handoff-opened' ? 'A YouTube AI handoff was opened; no content was published.' : 'A YouTube AI handoff was prepared but not opened.',
+    'inspect-repo': status === 'inspection-completed' ? 'A bounded, read-only repository inspection was completed.' : '',
+    'prepare-branch': status === 'branch-prepared' ? 'A branch-first change plan was prepared; no branch was created.' : '',
+    'prepare-execution': status === 'execution-prepared' ? 'A branch-first execution workflow was prepared; no branch or files were changed.' : '',
+    'approve-execution': status === 'approval-recorded' ? 'Approval for a future branch-first workflow was recorded; no execution ran.' : '',
   }
   return labels[id] || ''
 }
@@ -311,6 +325,7 @@ export function getOrchestratorGuidance(context) {
   const hasSpecificState = context.intent.mode !== 'conversation'
     || context.reference?.referencesPrevious
     || context.actionEvidence?.length
+    || context.executionWorkflow
   if (!hasSpecificState) return ''
   const notes = [
     'Operator integrity: inspect the provided thread evidence before making a status claim. Separate what the conversation proves, what you infer, and what you recommend next. A plan, draft, or handoff is not completed work.',
@@ -327,6 +342,9 @@ export function getOrchestratorGuidance(context) {
   }
   if (activeObjective) notes.push(`Current operational objective in this thread: “${activeObjective}”`)
   actionEvidence.map(evidenceLabel).filter(Boolean).forEach((label) => notes.push(`Verified thread evidence: ${label}`))
+  if (context.executionWorkflow) {
+    notes.push('A bounded branch-first execution workflow is recorded in this thread. Its state is evidence of preparation or approval only; do not claim a branch, file change, test, build, report, review, or merge unless explicit execution evidence is recorded.')
+  }
   if (intent.isOperational) {
     notes.push('For an operator-style reply, make the outcome concrete: label a recommendation or prepared handoff as such, and reserve “completed” or “verified” for explicit thread evidence. Do not present a plan as execution.')
   }
@@ -339,6 +357,7 @@ export function createAssistantOrchestration(context) {
   const routing = normalizeRoutingEvidence(context?.modelRouting)
   const execution = normalizeExecutionBridgeEvidence(context?.executionBridge)
   const capabilities = normalizeCapabilityBridge(context?.capabilityBridge)
+  const workflow = normalizeExecutionWorkflow(context?.executionWorkflow)
   return Object.freeze({
     version: 1,
     mode: intent.mode,
@@ -348,12 +367,13 @@ export function createAssistantOrchestration(context) {
     ...(routing ? { routing } : {}),
     ...(execution && execution.readiness !== 'not-started' ? { execution } : {}),
     ...(capabilities ? { capabilities } : {}),
+    ...(workflow ? { workflow } : {}),
     actions: Object.freeze([]),
   })
 }
 
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared'])
+const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch', 'prepare-execution', 'approve-execution'])
+const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared', 'execution-prepared', 'approval-recorded'])
 const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project', 'repository', 'branch'])
 const ROUTING_TASK_CLASSES = new Set(['conversation', 'planning', 'code', 'execution'])
 const ROUTING_REASONING_LEVELS = new Set(['light', 'focused', 'high'])
@@ -402,6 +422,7 @@ export function normalizeMessageOrchestration(value) {
   const routing = normalizeRoutingEvidence(value.routing)
   const execution = normalizeExecutionBridgeEvidence(value.execution)
   const capabilities = normalizeCapabilityBridge(value.capabilities)
+  const workflow = normalizeExecutionWorkflow(value.workflow)
   const actions = Array.isArray(value.actions)
     ? value.actions
       .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
@@ -420,16 +441,18 @@ export function normalizeMessageOrchestration(value) {
     ...(routing ? { routing } : {}),
     ...(execution ? { execution } : {}),
     ...(capabilities ? { capabilities } : {}),
+    ...(workflow ? { workflow } : {}),
     actions: Object.freeze(actions),
   })
 }
 
-export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource } = {}) {
+export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource, workflow: actionWorkflow } = {}) {
   const current = normalizeMessageOrchestration(orchestration) || createAssistantOrchestration()
   if (!ACTION_IDS.has(id) || !ACTION_STATUSES.has(status)) return current
   const resource = normalizeActionResource(actionResource)
+  const workflow = normalizeExecutionWorkflow(actionWorkflow) || current.workflow
   const actions = [...current.actions.filter((action) => action.id !== id), Object.freeze({ id, status, ...(resource ? { resource } : {}) })].slice(-MAX_ACTION_EVIDENCE)
-  return Object.freeze({ ...current, actions: Object.freeze(actions) })
+  return Object.freeze({ ...current, ...(workflow ? { workflow } : {}), actions: Object.freeze(actions) })
 }
 
 export function getCompletedOrchestrationActions(orchestration) {

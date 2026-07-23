@@ -67,6 +67,20 @@ const CONTROL_ACTIONS = Object.freeze({
     icon: '⎇',
     completedLabel: 'Prepared',
   }),
+  'prepare-execution': Object.freeze({
+    id: 'prepare-execution',
+    label: 'Prepare execution workflow',
+    detail: 'Scope candidate files and validation',
+    icon: '◈',
+    completedLabel: 'Prepared',
+  }),
+  'approve-execution': Object.freeze({
+    id: 'approve-execution',
+    label: 'Record execution approval',
+    detail: 'Approve a future branch-first workflow',
+    icon: '✓',
+    completedLabel: 'Approved',
+  }),
 })
 
 function requestText(value) {
@@ -116,10 +130,18 @@ export function getAssistantControlActions(messages, assistantIndex) {
   let actions = getChatControlActions(request)
   const inspectionCompleted = completed.get('inspect-repo') === 'inspection-completed'
   const branchPrepared = completed.get('prepare-branch') === 'branch-prepared'
+  const executionPrepared = completed.get('prepare-execution') === 'execution-prepared'
+  const approvalRecorded = completed.get('approve-execution') === 'approval-recorded'
   const branchRequired = assistant.orchestration?.execution?.branch === 'required'
   if (inspectionCompleted) {
     actions = actions.filter((action) => action.id !== 'inspect-repo')
-    if (branchRequired && !branchPrepared) actions.push(CONTROL_ACTIONS['prepare-branch'])
+    if (branchRequired && !branchPrepared) {
+      actions.push(CONTROL_ACTIONS['prepare-branch'])
+    } else if (branchRequired && branchPrepared && !executionPrepared) {
+      actions.push(CONTROL_ACTIONS['prepare-execution'])
+    } else if (branchRequired && executionPrepared && !approvalRecorded) {
+      actions.push(CONTROL_ACTIONS['approve-execution'])
+    }
   }
   const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)
   const capabilityHandoff = getCapabilityBridgeHandoffAction(assistant.orchestration?.capabilities)

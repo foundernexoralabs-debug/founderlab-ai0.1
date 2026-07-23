@@ -185,6 +185,19 @@ export function ChatMessage({
                   </span>
                 </p>
               )}
+              {operatorReport.workflow && (
+                <p>
+                  <b>{operatorReport.workflow.label}</b><br />
+                  {operatorReport.workflow.detail}<br />
+                  <span className="fl-chat-operator-report-next">
+                    {operatorReport.workflow.branch}<br />
+                    {operatorReport.workflow.change}<br />
+                    {operatorReport.workflow.validation}<br />
+                    Review: {operatorReport.workflow.review} · {operatorReport.workflow.executor}
+                    {operatorReport.workflow.fileTargets?.length ? <><br />Candidate files: {operatorReport.workflow.fileTargets.join(', ')}</> : null}
+                  </span>
+                </p>
+              )}
               {operatorReport.capability && <p><b>{operatorReport.capability.label}</b><br />{operatorReport.capability.detail}</p>}
               {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
               {operatorReport.facts.filter((fact) => fact.label !== operatorReport.outcome.label).map((fact) => <p key={`${fact.kind}-${fact.label}`}><b>{fact.label}</b><br />{fact.detail}</p>)}

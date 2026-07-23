@@ -91,6 +91,16 @@ import {
   parsePublicGithubRepositoryReference,
 } from '../src/features/chat/chatRepositoryInspection.js'
 import {
+  approveExecutionWorkflow,
+  applyExecutionWorkflowEvidence,
+  createExecutionWorkflow,
+  formatExecutionApprovalReport,
+  formatExecutionWorkflowReport,
+  getExecutionWorkflowGuidance,
+  getExecutionWorkflowPresentation,
+  normalizeExecutionWorkflow,
+} from '../src/features/chat/chatExecutionWorkflow.js'
+import {
   getCapabilityBridgeGuidance,
   getCapabilityBridgeHandoffAction,
   getCapabilityBridgePresentation,
@@ -846,6 +856,75 @@ test('Execution bridge promotes explicit public repository work through inspect 
   })
   assert.equal(branchTransparency.state.key, 'branch-prepared')
   assert.equal(branchTransparency.outcome.kind, 'branch-prepared')
+  const workflowTransparency = getChatExecutionTransparency({
+    mode: 'operator', operation: 'change',
+    actions: [{ id: 'prepare-execution', status: 'execution-prepared' }],
+    workflow: normalizeExecutionWorkflow({
+      version: 1, repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' },
+      branch: { state: 'planned', base: 'main', proposed: 'founderlab/fix-chat' },
+      change: { state: 'prepared', risk: 'medium', fileTargets: ['src/App.jsx'] },
+      validation: { tests: 'required', build: 'required', report: 'required' },
+      approval: 'required', review: 'awaiting-approval', execution: 'awaiting-approval', executor: 'not-available',
+    }),
+  })
+  assert.equal(workflowTransparency.state.key, 'execution-prepared')
+  assert.equal(workflowTransparency.outcome.kind, 'execution-prepared')
+  assert.match(workflowTransparency.workflow.detail, /No branch was created/i)
+})
+
+test('Execution workflow persists bounded branch-first preparation and approval without inventing a repository mutation', () => {
+  const inspection = {
+    reference: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' },
+    repository: { defaultBranch: 'main' },
+    tree: {
+      importantFiles: ['package.json', 'README.md'],
+      sampleFiles: ['src/features/chat/ChatWorkspace.jsx', 'test/chat-premium.test.mjs', '../not-a-path', '/not-a-path'],
+    },
+  }
+  const preparation = {
+    repository: inspection.reference,
+    baseBranch: 'main',
+    proposedBranch: 'founderlab/fix-chat-workflow',
+    risk: 'medium',
+  }
+  const workflow = createExecutionWorkflow({ inspection, preparation, request: 'Fix the Chat workflow and add a regression test.' })
+  assert.deepEqual(workflow, {
+    version: 1,
+    repository: inspection.reference,
+    branch: { state: 'planned', base: 'main', proposed: 'founderlab/fix-chat-workflow' },
+    change: {
+      state: 'prepared', risk: 'medium',
+      fileTargets: ['test/chat-premium.test.mjs', 'package.json', 'src/features/chat/ChatWorkspace.jsx', 'README.md'],
+    },
+    validation: { tests: 'required', build: 'required', report: 'required' },
+    approval: 'required',
+    review: 'awaiting-approval',
+    execution: 'awaiting-approval',
+    executor: 'not-available',
+  })
+  assert.match(formatExecutionWorkflowReport(workflow), /No branch was created, no files were changed, and no tests or build were run/i)
+  assert.match(getExecutionWorkflowGuidance(workflow), /still needs explicit approval/i)
+  assert.equal(JSON.stringify(normalizeExecutionWorkflow({ ...workflow, token: 'never persist' })).includes('token'), false)
+
+  const approved = approveExecutionWorkflow(workflow)
+  assert.equal(approved.approval, 'approved')
+  assert.equal(approved.execution, 'awaiting-executor')
+  assert.equal(approved.review, 'awaiting-executor')
+  assert.deepEqual(getExecutionWorkflowPresentation(approved).state, 'approval-recorded')
+  assert.match(formatExecutionApprovalReport(approved), /secure executor is connected/i)
+
+  const noOpEvidence = applyExecutionWorkflowEvidence(approved, { branch: { state: 'created' } })
+  assert.equal(noOpEvidence.branch.state, 'planned')
+  assert.equal(noOpEvidence.executor, 'not-available')
+  assert.match(getExecutionWorkflowGuidance(noOpEvidence), /Do not claim a branch was created/i)
+
+  const orchestration = recordOrchestrationAction(
+    createAssistantOrchestration({ intent: classifyChatRequest('Fix this repository bug.') }),
+    { id: 'prepare-execution', status: 'execution-prepared', workflow },
+  )
+  const withApproval = recordOrchestrationAction(orchestration, { id: 'approve-execution', status: 'approval-recorded', workflow: approved })
+  assert.equal(withApproval.workflow.approval, 'approved')
+  assert.equal(getCompletedOrchestrationActions(withApproval).at(-1).status, 'approval-recorded')
 })
 
 test('Capability bridge prepares real FounderLab routes and external integrations without inventing a connector action', () => {
@@ -1110,6 +1189,52 @@ test('Chat control center offers only explicit, real workspace actions and bound
     } },
   ], 1)
   assert.deepEqual(branchActions.map((action) => action.id), ['prepare-branch'])
+
+  const preparedWorkflow = normalizeExecutionWorkflow({
+    version: 1,
+    repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' },
+    branch: { state: 'planned', base: 'main', proposed: 'founderlab/fix-onboarding-crash' },
+    change: { state: 'prepared', risk: 'medium', fileTargets: ['src/App.jsx'] },
+    validation: { tests: 'required', build: 'required', report: 'required' },
+    approval: 'required', review: 'awaiting-approval', execution: 'awaiting-approval', executor: 'not-available',
+  })
+  const executionWorkflowActions = getAssistantControlActions([
+    { role: 'user', content: 'Fix the onboarding crash in https://github.com/acme/founderlab.' },
+    { role: 'assistant', content: 'The branch plan is ready.', orchestration: {
+      version: 1,
+      mode: 'operator',
+      operation: 'change',
+      execution: {
+        target: { surface: 'repository', repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' } },
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', inspection: 'completed', approval: 'required', handoff: 'code',
+      },
+      actions: [
+        { id: 'inspect-repo', status: 'inspection-completed', resource: { type: 'repository', id: 'github:acme/founderlab@main', title: 'acme/founderlab' } },
+        { id: 'prepare-branch', status: 'branch-prepared', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+      ],
+    } },
+  ], 1)
+  assert.deepEqual(executionWorkflowActions.map((action) => action.id), ['prepare-execution'])
+
+  const approvalActions = getAssistantControlActions([
+    { role: 'user', content: 'Fix the onboarding crash in https://github.com/acme/founderlab.' },
+    { role: 'assistant', content: 'The execution workflow is ready.', orchestration: {
+      version: 1,
+      mode: 'operator',
+      operation: 'change',
+      execution: {
+        target: { surface: 'repository', repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' } },
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', inspection: 'completed', approval: 'required', handoff: 'code',
+      },
+      workflow: preparedWorkflow,
+      actions: [
+        { id: 'inspect-repo', status: 'inspection-completed', resource: { type: 'repository', id: 'github:acme/founderlab@main', title: 'acme/founderlab' } },
+        { id: 'prepare-branch', status: 'branch-prepared', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+        { id: 'prepare-execution', status: 'execution-prepared', resource: { type: 'branch', id: 'github:acme/founderlab#founderlab/fix-onboarding-crash', title: 'founderlab/fix-onboarding-crash' } },
+      ],
+    } },
+  ], 1)
+  assert.deepEqual(approvalActions.map((action) => action.id), ['approve-execution'])
 
   const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
   assert.match(builderPayload.desc, /FounderLab Chat brief/)
@@ -1444,6 +1569,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /createVoiceResponsePlan/)
   assert.match(workspaceSource, /createReadAloudPlan/)
   assert.match(workspaceSource, /continueFromChat/)
+  assert.match(workspaceSource, /prepareRepositoryExecutionFromChat/)
+  assert.match(workspaceSource, /approveRepositoryExecutionFromChat/)
+  assert.match(workspaceSource, /No branch or files changed/)
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
@@ -1507,6 +1635,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(controlActionsSource, /mountedRef/)
   assert.match(controlUtilsSource, /Do not push anything until the user explicitly confirms/)
   assert.match(controlUtilsSource, /getChatControlActions/)
+  assert.match(controlUtilsSource, /Prepare execution workflow/)
+  assert.match(controlUtilsSource, /Record execution approval/)
   assert.match(appSource, /flConsumeHandoff\('youtube'\)/)
   assert.match(appSource, /Content brief ready from Chat/)
   assert.match(voiceSessionSource, /fl-chat-voice-dock/)

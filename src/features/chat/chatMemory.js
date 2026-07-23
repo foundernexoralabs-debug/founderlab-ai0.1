@@ -289,6 +289,12 @@ function actionEvidenceLabel(action) {
   if (action.id === 'prepare-branch' && action.status === 'branch-prepared') return action.resource?.title
     ? `A branch-first plan was prepared for ${action.resource.title}; no branch was created and no files were changed.`
     : 'A branch-first plan was prepared; no branch was created and no files were changed.'
+  if (action.id === 'prepare-execution' && action.status === 'execution-prepared') return action.resource?.title
+    ? `A bounded execution workflow was prepared for ${action.resource.title}; no branch, file change, test, or build is recorded.`
+    : 'A bounded execution workflow was prepared; no branch, file change, test, or build is recorded.'
+  if (action.id === 'approve-execution' && action.status === 'approval-recorded') return action.resource?.title
+    ? `Approval was recorded for ${action.resource.title}; secure execution access is still required and no repository mutation is recorded.`
+    : 'Approval was recorded for a future execution workflow; secure execution access is still required and no repository mutation is recorded.'
   return ''
 }
 

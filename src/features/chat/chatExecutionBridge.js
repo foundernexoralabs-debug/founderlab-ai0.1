@@ -24,8 +24,8 @@ const BRANCH_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
 const INSPECTION_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required', 'completed'])
 const APPROVAL_REQUIREMENTS = new Set(['not-required', 'required'])
 const HANDOFFS = new Set(['builder', 'code', 'github'])
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared'])
+const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch', 'prepare-execution', 'approve-execution'])
+const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared', 'execution-prepared', 'approval-recorded'])
 
 function text(value, limit = 160) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, limit) : ''

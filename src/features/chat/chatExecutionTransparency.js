@@ -7,6 +7,7 @@
 
 import { getExecutionBridgePresentation } from './chatExecutionBridge.js'
 import { getCapabilityBridgePresentation } from './chatCapabilityBridge.js'
+import { getExecutionWorkflowPresentation } from './chatExecutionWorkflow.js'
 
 const ACTION_COPY = Object.freeze({
   'save-note': 'Saved a note in FounderLab',
@@ -17,6 +18,8 @@ const ACTION_COPY = Object.freeze({
   youtube: 'Opened a YouTube AI handoff',
   'inspect-repo': 'Completed a read-only repository inspection',
   'prepare-branch': 'Prepared a branch-first change plan',
+  'prepare-execution': 'Prepared a branch-first execution workflow',
+  'approve-execution': 'Recorded execution approval',
 })
 
 function text(value) {
@@ -38,6 +41,12 @@ function getActionFact(action) {
   }
   if (action.id === 'prepare-branch' && action.status === 'branch-prepared') {
     return { kind: 'branch-prepared', label, detail: 'A proposed branch and scope were prepared. No Git branch was created and no files were changed.' }
+  }
+  if (action.id === 'prepare-execution' && action.status === 'execution-prepared') {
+    return { kind: 'execution-prepared', label, detail: 'Candidate files, validation needs, and risk were prepared. No branch was created, no files changed, and no validation ran.' }
+  }
+  if (action.id === 'approve-execution' && action.status === 'approval-recorded') {
+    return { kind: 'approval-recorded', label, detail: 'Approval for a future branch-first workflow is recorded. Secure execution access is still required; no repository mutation ran.' }
   }
   return null
 }
@@ -66,6 +75,8 @@ const EXECUTION_STATE_COPY = Object.freeze({
   'inspection-needed': Object.freeze({ label: 'Inspection needed', detail: 'FounderLab needs a scoped inspection before any execution claim.' }),
   'inspection-completed': Object.freeze({ label: 'Inspection completed', detail: 'A bounded, read-only inspection is recorded. No repository mutation is confirmed.' }),
   'branch-prepared': Object.freeze({ label: 'Branch plan prepared', detail: 'A branch-first change plan is recorded. No Git branch was created.' }),
+  'execution-prepared': Object.freeze({ label: 'Execution workflow prepared', detail: 'Candidate scope and validation are recorded. No repository mutation or validation ran.' }),
+  'approval-recorded': Object.freeze({ label: 'Approval recorded', detail: 'Approval is recorded, but a secure executor is still required before repository work can begin.' }),
   'ready-for-execution': Object.freeze({ label: 'Ready for execution', detail: 'A scoped path is prepared. The user still chooses the explicit next action.' }),
   'handoff-opened': Object.freeze({ label: 'Handoff opened', detail: 'The destination was opened; no downstream result is confirmed.' }),
   'external-integration-needed': Object.freeze({ label: 'External integration needed', detail: 'A connection is required before FounderLab can perform this external action.' }),
@@ -78,13 +89,19 @@ const EXECUTION_STATE_COPY = Object.freeze({
  * A reusable status projection for future action logs. It deliberately keeps
  * execution evidence and external integration availability separate.
  */
-export function getChatExecutionState({ mode = 'conversation', actions = [], execution = null, capability = null } = {}) {
+export function getChatExecutionState({ mode = 'conversation', actions = [], execution = null, capability = null, workflow = null } = {}) {
   const externalRoute = capability?.state === 'external-integration-needed'
     && ['email', 'calendar', 'external-app'].includes(capability.id)
   if (externalRoute) return Object.freeze({ key: 'external-integration-needed', ...EXECUTION_STATE_COPY['external-integration-needed'] })
 
   const completed = actions.find((action) => action.kind === 'completed')
   if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
+
+  const approvalRecorded = actions.find((action) => action.kind === 'approval-recorded')
+  if (approvalRecorded || workflow?.state === 'approval-recorded') return Object.freeze({ key: 'approval-recorded', ...EXECUTION_STATE_COPY['approval-recorded'] })
+
+  const executionPrepared = actions.find((action) => action.kind === 'execution-prepared')
+  if (executionPrepared || workflow?.state === 'execution-prepared') return Object.freeze({ key: 'execution-prepared', ...EXECUTION_STATE_COPY['execution-prepared'] })
 
   const branchPrepared = actions.find((action) => action.kind === 'branch-prepared')
   if (branchPrepared) return Object.freeze({ key: 'branch-prepared', ...EXECUTION_STATE_COPY['branch-prepared'] })
@@ -113,6 +130,8 @@ function getExecutionNextStep({ state, completed, handoff }) {
   if (state.key === 'inspection-needed') return 'Start the scoped inspection before deciding on a branch or implementation change.'
   if (state.key === 'inspection-completed') return 'Review the recorded findings, then prepare a branch-first plan or explicit Code AI handoff when appropriate.'
   if (state.key === 'branch-prepared') return 'Review the proposed branch scope and explicitly approve any future repository mutation.'
+  if (state.key === 'execution-prepared') return 'Review the candidate file scope, risk, and validation needs, then explicitly approve the future branch-first workflow.'
+  if (state.key === 'approval-recorded') return 'Approval is recorded. Connect a secure executor before creating a branch, changing files, running validation, or preparing a merge review.'
   if (state.key === 'waiting-for-approval') return 'Review the proposed scope, risk, and verification, then explicitly approve any future branch-first change.'
   if (state.key === 'ready-for-execution') return 'Choose the explicit FounderLab handoff when you want to continue with this prepared path.'
   if (state.key === 'externally-unverified') return 'Confirm the downstream result with evidence before reporting external completion.'
@@ -129,28 +148,29 @@ export function getChatExecutionTransparency(orchestration) {
   const route = getRouteFact(orchestration.routing)
   const execution = getExecutionBridgePresentation(orchestration.execution)
   const capability = getCapabilityBridgePresentation(orchestration.capabilities)
-  const operational = mode !== 'conversation' || actions.length > 0 || execution || capability
+  const workflow = getExecutionWorkflowPresentation(orchestration.workflow)
+  const operational = mode !== 'conversation' || actions.length > 0 || execution || capability || workflow
   if (!operational) return null
 
   const completed = actions.find((action) => action.kind === 'completed')
   const inspection = actions.find((action) => action.kind === 'inspection')
   const branchPrepared = actions.find((action) => action.kind === 'branch-prepared')
+  const executionPrepared = actions.find((action) => action.kind === 'execution-prepared')
+  const approvalRecorded = actions.find((action) => action.kind === 'approval-recorded')
   const handoff = actions.find((action) => action.kind === 'handoff')
-  const outcome = completed
-    ? { kind: 'completed', label: completed.label, detail: completed.detail }
-    : branchPrepared
-      ? { kind: 'branch-prepared', label: branchPrepared.label, detail: branchPrepared.detail }
-      : inspection
-        ? { kind: 'inspection', label: inspection.label, detail: inspection.detail }
-        : handoff
-          ? { kind: 'handoff', label: handoff.label, detail: handoff.detail }
-          : {
-              kind: 'recommendation',
-              label: mode === 'planning' ? 'Plan prepared' : 'Recommendation prepared',
-              detail: 'FounderLab has not performed a workspace or external action from this reply.',
-            }
+  let outcome = {
+    kind: 'recommendation',
+    label: mode === 'planning' ? 'Plan prepared' : 'Recommendation prepared',
+    detail: 'FounderLab has not performed a workspace or external action from this reply.',
+  }
+  if (handoff) outcome = { kind: 'handoff', label: handoff.label, detail: handoff.detail }
+  if (inspection) outcome = { kind: 'inspection', label: inspection.label, detail: inspection.detail }
+  if (branchPrepared) outcome = { kind: 'branch-prepared', label: branchPrepared.label, detail: branchPrepared.detail }
+  if (executionPrepared) outcome = { kind: 'execution-prepared', label: executionPrepared.label, detail: executionPrepared.detail }
+  if (approvalRecorded) outcome = { kind: 'approval-recorded', label: approvalRecorded.label, detail: approvalRecorded.detail }
+  if (completed) outcome = { kind: 'completed', label: completed.label, detail: completed.detail }
 
-  const state = getChatExecutionState({ mode, actions, execution, capability })
+  const state = getChatExecutionState({ mode, actions, execution, capability, workflow })
 
   return Object.freeze({
     mode,
@@ -160,6 +180,7 @@ export function getChatExecutionTransparency(orchestration) {
     route,
     execution,
     capability,
+    workflow,
     state,
     facts: Object.freeze(actions),
     nextStep: getExecutionNextStep({ state, completed, handoff }),

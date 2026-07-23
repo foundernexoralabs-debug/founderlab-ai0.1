@@ -50,6 +50,12 @@ import {
   getRepositoryInspectionErrorPresentation,
   inspectPublicGithubRepository,
 } from './chatRepositoryInspection'
+import {
+  approveExecutionWorkflow,
+  createExecutionWorkflow,
+  formatExecutionApprovalReport,
+  formatExecutionWorkflowReport,
+} from './chatExecutionWorkflow'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
@@ -1230,6 +1236,22 @@ export function ChatWorkspace({ user }) {
     }
   }
 
+  function getRecordedBranchPreparation(message) {
+    const action = [...(message?.orchestration?.actions || [])].reverse()
+      .find((entry) => entry?.id === 'prepare-branch' && entry?.status === 'branch-prepared')
+    const identifier = typeof action?.resource?.id === 'string' ? action.resource.id : ''
+    const match = identifier.match(/^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([A-Za-z0-9_./-]+)$/)
+    const inspection = getRecordedInspection(message)
+    if (!match || !inspection?.reference || inspection.reference.slug !== match[1]) return null
+    return {
+      repository: inspection.reference,
+      baseBranch: inspection.repository.defaultBranch,
+      proposedBranch: match[2],
+      risk: message?.orchestration?.execution?.risk || 'medium',
+      state: 'prepared',
+    }
+  }
+
   async function inspectRepositoryFromChat(action, message) {
     try {
       const inspection = await inspectPublicGithubRepository(action.request)
@@ -1271,6 +1293,54 @@ export function ChatWorkspace({ user }) {
     })
     appendActionReport(message.id, formatRepositoryBranchPreparationReport(preparation))
     toast('Branch-first plan prepared. No branch was created.', 'success')
+    return true
+  }
+
+  function prepareRepositoryExecutionFromChat(action, message) {
+    const inspection = getRecordedInspection(message)
+    const preparation = getRecordedBranchPreparation(message)
+    if (!inspection || !preparation) {
+      toast('Inspect the repository and prepare a branch plan before preparing execution.', 'error')
+      return false
+    }
+    const workflow = createExecutionWorkflow({ inspection, preparation, request: action?.request || '' })
+    if (!workflow) {
+      toast('FounderLab could not prepare a bounded execution workflow from this plan.', 'error')
+      return false
+    }
+    recordActionEvidence(message.id, {
+      id: 'prepare-execution',
+      status: 'execution-prepared',
+      resource: {
+        type: 'branch',
+        id: `github:${workflow.repository.slug}#${workflow.branch.proposed}`,
+        title: workflow.branch.proposed,
+      },
+      workflow,
+    })
+    appendActionReport(message.id, formatExecutionWorkflowReport(workflow))
+    toast('Execution workflow prepared. No branch or files changed.', 'success')
+    return true
+  }
+
+  function approveRepositoryExecutionFromChat(action, message) {
+    const workflow = approveExecutionWorkflow(message?.orchestration?.workflow)
+    if (!workflow) {
+      toast('Prepare a branch-first execution workflow before recording approval.', 'error')
+      return false
+    }
+    recordActionEvidence(message.id, {
+      id: 'approve-execution',
+      status: 'approval-recorded',
+      resource: {
+        type: 'branch',
+        id: `github:${workflow.repository.slug}#${workflow.branch.proposed}`,
+        title: workflow.branch.proposed,
+      },
+      workflow,
+    })
+    appendActionReport(message.id, formatExecutionApprovalReport(workflow))
+    toast('Approval recorded. Secure execution access is still required before repository work begins.', 'success')
     return true
   }
 
@@ -1317,6 +1387,8 @@ export function ChatWorkspace({ user }) {
     if (action.id === 'create-task') return createTask(message)
     if (action.id === 'inspect-repo') return inspectRepositoryFromChat(action, message)
     if (action.id === 'prepare-branch') return prepareRepositoryBranchFromChat(action, message)
+    if (action.id === 'prepare-execution') return prepareRepositoryExecutionFromChat(action, message)
+    if (action.id === 'approve-execution') return approveRepositoryExecutionFromChat(action, message)
     const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
     if (!payload || !action.target) return false
     recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })
