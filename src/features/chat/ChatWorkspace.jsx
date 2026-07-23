@@ -40,6 +40,7 @@ import {
   toChatRequestMessages,
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
+import { createAssistantOrchestration, recordOrchestrationAction } from './chatOrchestrator'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
@@ -727,11 +728,12 @@ export function ChatWorkspace({ user }) {
     setSending(true)
     setErrorState(null)
 
+    const requestContext = getChatRequestContext(conversationMessages)
     const result = await requestAIResult({
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(conversationMessages, providerId),
-      system: getChatSystemPrompt(getChatRequestContext(conversationMessages)),
+      system: getChatSystemPrompt(requestContext),
       maxTokens: CHAT_RESPONSE_OPTIONS.maxTokens,
       temperature: CHAT_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
@@ -756,6 +758,7 @@ export function ChatWorkspace({ user }) {
       content: result.text,
       provider: result.provider || providerId,
       model: result.model || modelId,
+      orchestration: createAssistantOrchestration(requestContext),
       ts: ts(),
     }
     const latest = conversationsRef.current
@@ -1019,6 +1022,21 @@ export function ChatWorkspace({ user }) {
     if (action.type === 'message') deleteMessage(action.conversationId, action.messageId)
   }
 
+  /**
+   * Chat records only the action it actually completed. This compact evidence
+   * is persisted with the assistant response so a later follow-up can
+   * distinguish “opened Builder” from “a Builder project was created”.
+   */
+  function recordActionEvidence(messageId, action) {
+    const conversation = conversationsRef.current.find((entry) => entry.messages?.some((message) => message.id === messageId))
+    if (!conversation || !action?.id || !action?.status) return false
+    const messagesWithEvidence = conversation.messages.map((entry) => entry.id === messageId
+      ? { ...entry, orchestration: recordOrchestrationAction(entry.orchestration, action) }
+      : entry)
+    updateConversation(conversation.id, { messages: messagesWithEvidence })
+    return true
+  }
+
   function saveRename(conversationId) {
     const title = renameValue.trim()
     if (title) updateConversation(conversationId, { title })
@@ -1030,6 +1048,7 @@ export function ChatWorkspace({ user }) {
       const notes = await load('fl_notes', [])
       const note = { id: uid(), title: message.content.slice(0, 50) || 'Chat note', content: message.content, tags: ['from-chat'], created_at: ts(), updated_at: ts() }
       await save('fl_notes', [note, ...(Array.isArray(notes) ? notes : [])])
+      recordActionEvidence(message.id, { id: 'save-note', status: 'completed' })
       toast('Saved to Notes', 'success')
       return true
     } catch {
@@ -1043,6 +1062,7 @@ export function ChatWorkspace({ user }) {
       const tasks = await load('fl_tasks', [])
       const task = { id: uid(), title: message.content.slice(0, 80), status: 'todo', priority: 'medium', description: message.content, due_date: '', created_at: ts(), updated_at: ts() }
       await save('fl_tasks', [task, ...(Array.isArray(tasks) ? tasks : [])])
+      recordActionEvidence(message.id, { id: 'create-task', status: 'completed' })
       toast('Task created', 'success')
       return true
     } catch {
@@ -1056,6 +1076,7 @@ export function ChatWorkspace({ user }) {
     if (action.id === 'create-task') return createTask(message)
     const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
     if (!payload || !action.target) return false
+    recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })
     flNavigate(action.target, payload)
     const destination = action.target === 'builder' ? 'Builder' : action.target === 'code' ? 'Code AI' : 'YouTube AI'
     toast(`Opening ${destination} with this chat brief.`, 'success')

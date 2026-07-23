@@ -12,7 +12,7 @@ export function ChatControlActions({ actions = [], onAction }) {
   if (!actions.length) return null
 
   async function chooseAction(action) {
-    if (busyAction || completedActions.has(action.id)) return
+    if (busyAction || action.completed || completedActions.has(action.id)) return
     setBusyAction(action.id)
     try {
       const completed = await onAction?.(action)
@@ -29,7 +29,7 @@ export function ChatControlActions({ actions = [], onAction }) {
       <span className="fl-chat-control-actions-label">Continue in FounderLab</span>
       <div className="fl-chat-control-actions-list">
         {actions.map((action) => {
-          const completed = completedActions.has(action.id)
+          const completed = action.completed || completedActions.has(action.id)
           const busy = busyAction === action.id
           return (
             <button

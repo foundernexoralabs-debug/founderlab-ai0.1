@@ -1,6 +1,12 @@
 import { getProvider, getProviderModel } from '../../ai/providerRegistry.js'
 import { hasExplicitSelfCorrection as hasExplicitSelfCorrectionPhrase } from '../../lib/conversationLanguage.js'
-import { classifyChatRequest, getChatIntentGuidance } from './chatRequestIntent.js'
+import {
+  classifyChatRequest,
+  getChatIntentGuidance,
+  getChatOrchestrationContext,
+  getOrchestratorGuidance,
+  normalizeMessageOrchestration,
+} from './chatOrchestrator.js'
 import { LIVE_CALL_MAX_OUTPUT_TOKENS } from './liveCallUtils.js'
 
 // Keep model behavior consistent across cloud and local routes without
@@ -44,6 +50,7 @@ export const CHAT_CONTROL_CENTER_PROMPT = `FounderLab workflow guidance:
 - For websites, landing pages, and product concepts, prepare a concrete brief that can continue in Builder. For components, code, debugging, tests, or GitHub preparation, prepare a concrete implementation plan that can continue in Code AI.
 - When a user asks to turn work into a task or note, provide the useful result first. FounderLab may offer an explicit action after your response; never claim a task, note, GitHub repository, commit, or deployment was created unless it actually happened.
 - When a user asks for YouTube content, create a usable content brief and suggest continuing in YouTube AI when it would help.
+- For an operational question, inspect the current thread before claiming progress: distinguish facts in the conversation, a reasonable inference, and a proposed next action. If a repository, project, task, or deployment was not inspected, say so plainly rather than implying completion.
 - Keep tool handoffs scoped and reversible. Never imply a cloud provider, Local Ollama, Builder, Code AI, or GitHub action was used unless the user selected that action.`
 
 export const LIVE_CALL_SYSTEM_PROMPT = `Live-call response rules:
@@ -83,7 +90,7 @@ export function getChatResponseGuidance(value = '', intent = null) {
  * prevents a common low-quality failure mode: rewriting the previous answer
  * from scratch when the user is asking how to use, refine, or clarify it.
  */
-export function getConversationMemoryGuidance(messages = []) {
+export function getConversationMemoryGuidance(messages = [], orchestrationContext = null) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 1) return ''
@@ -91,34 +98,36 @@ export function getConversationMemoryGuidance(messages = []) {
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant' && typeof message?.content === 'string' && message.content.trim())
   if (!latestUser || !previousAssistant) return ''
 
-  const referencesRecentAnswer = /\b(?:that|this|it|the previous|above)\s+(?:answer|code|plan|example|snippet|implementation|approach)\b|\b(?:use|run|apply|change|improve|explain|summari[sz]e|fix|adapt|review)\s+(?:that|this|it)\b/i.test(latestUser)
-  const explicitlyRequestsFullRepeat = /\b(?:repeat|repost|resend|paste|show|print)\b[^.?!]{0,36}\b(?:again|full|entire|complete|all|code|answer)\b|\b(?:full|entire|complete)\s+(?:code|answer|plan)\b/i.test(latestUser)
-  if (!referencesRecentAnswer && !explicitlyRequestsFullRepeat) return ''
-  return explicitlyRequestsFullRepeat
+  const orchestration = orchestrationContext || getChatOrchestrationContext(items)
+  if (!orchestration.reference.referencesPrevious) return ''
+  return orchestration.reference.explicitlyRequestsFullRepeat
     ? 'The user explicitly asked to see recent content again. Reproduce the relevant answer or code cleanly, then add only the useful update.'
-    : 'The latest request likely refers to the immediately preceding assistant answer. Use that answer as context: briefly orient the user, explain, refine, or apply the relevant part, and avoid rewriting the whole answer unless they clearly ask for it again.'
+    : `The latest request refers to the immediately preceding assistant answer${orchestration.reference.artifactKind && orchestration.reference.artifactKind !== 'response' ? ` (${orchestration.reference.artifactKind})` : ''}. Use it as context: briefly orient the user, explain, refine, or apply the relevant part, and avoid rewriting the whole answer unless they clearly ask for it again.`
 }
 
 export function getChatRequestContext(messages) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: classifyChatRequest(''), responseGuidance: getChatResponseGuidance(''), memoryGuidance: '' }
+    const orchestration = getChatOrchestrationContext(items)
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: orchestration.intent || classifyChatRequest(''), responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
-  const intent = classifyChatRequest(latestUser?.content)
+  const orchestration = getChatOrchestrationContext(items)
+  const intent = orchestration.intent
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
     latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
     followsAssistantQuestion: typeof previousAssistant?.content === 'string' && /\?\s*$/.test(previousAssistant.content.trim()),
     intent,
     responseGuidance: getChatResponseGuidance(latestUser?.content, intent),
-    memoryGuidance: getConversationMemoryGuidance(items),
+    memoryGuidance: getConversationMemoryGuidance(items, orchestration),
+    orchestration,
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '' } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -138,6 +147,10 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   }
   if (memoryGuidance) {
     notes.push(`Current conversation-memory note: ${memoryGuidance}`)
+  }
+  const orchestratorGuidance = getOrchestratorGuidance(orchestration)
+  if (orchestratorGuidance) {
+    notes.push(`Current operator-state note: ${orchestratorGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt
@@ -223,6 +236,9 @@ function cleanMessage(message) {
   if (message.role !== 'user' && message.role !== 'assistant') return null
   const content = typeof message.content === 'string' ? message.content : ''
   if (!content.trim() && !message.image) return null
+  const orchestration = message.role === 'assistant'
+    ? normalizeMessageOrchestration(message.orchestration)
+    : null
   return {
     id: typeof message.id === 'string' && message.id ? message.id : null,
     role: message.role,
@@ -231,6 +247,7 @@ function cleanMessage(message) {
     ...(typeof message.provider === 'string' ? { provider: message.provider } : {}),
     ...(typeof message.model === 'string' ? { model: message.model } : {}),
     ...(message.role === 'user' && message.source === 'voice' ? { source: 'voice' } : {}),
+    ...(orchestration ? { orchestration } : {}),
     ...(typeof message.ts === 'string' ? { ts: message.ts } : {}),
   }
 }

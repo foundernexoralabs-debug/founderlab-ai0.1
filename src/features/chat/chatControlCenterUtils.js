@@ -1,4 +1,5 @@
 import { classifyChatRequest } from './chatRequestIntent.js'
+import { getCompletedOrchestrationActions } from './chatOrchestrator.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -86,7 +87,13 @@ function getPreviousUserRequest(messages, assistantIndex) {
 export function getAssistantControlActions(messages, assistantIndex) {
   if (messages?.[assistantIndex]?.role !== 'assistant') return []
   const request = getPreviousUserRequest(messages, assistantIndex)
-  return getChatControlActions(request).map((action) => Object.freeze({ ...action, request }))
+  const completed = new Map(getCompletedOrchestrationActions(messages[assistantIndex].orchestration)
+    .map((action) => [action.id, action.status]))
+  return getChatControlActions(request).map((action) => Object.freeze({
+    ...action,
+    request,
+    ...(completed.has(action.id) ? { completed: true, completionStatus: completed.get(action.id) } : {}),
+  }))
 }
 
 function trimHandoffText(value, limit = MAX_HANDOFF_TEXT_LENGTH) {

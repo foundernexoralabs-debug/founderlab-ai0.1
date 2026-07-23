@@ -64,6 +64,14 @@ import {
 } from '../src/features/chat/chatControlCenterUtils.js'
 import { classifyChatRequest, getChatIntentGuidance } from '../src/features/chat/chatRequestIntent.js'
 import {
+  createAssistantOrchestration,
+  getChatOrchestrationContext,
+  getCompletedOrchestrationActions,
+  getOrchestratorGuidance,
+  normalizeMessageOrchestration,
+  recordOrchestrationAction,
+} from '../src/features/chat/chatOrchestrator.js'
+import {
   applyFinalSpeechPhrase,
   appendVoiceTranscript,
   commitInterimTranscript,
@@ -369,6 +377,87 @@ test('Chat request intent keeps planning guidance and explicit handoffs aligned'
   const plannedPrompt = getChatSystemPrompt({ intent: builder })
   assert.match(plannedPrompt, /Current request capability note/i)
   assert.match(plannedPrompt, /Builder handoff/i)
+})
+
+test('Chat orchestrator differentiates conversation, planning, operator, and thread-follow-up requests without treating a tool mention as a command', () => {
+  const conversation = classifyChatRequest('What is GitHub and how does an API work?')
+  assert.equal(conversation.mode, 'conversation')
+  assert.equal(conversation.primaryTool, '')
+
+  const plan = classifyChatRequest('Give me a roadmap for the new onboarding project.')
+  assert.equal(plan.mode, 'planning')
+  assert.equal(plan.operation, 'plan')
+  assert.equal(plan.requiresPlan, true)
+
+  const operator = classifyChatRequest('Build a landing page for the founder coaching app.')
+  assert.equal(operator.mode, 'operator')
+  assert.equal(operator.operation, 'create')
+  assert.equal(operator.primaryTool, 'builder')
+  assert.equal(operator.isOperational, true)
+
+  const followUp = classifyChatRequest('Continue from that and fix the code above.', { hasThreadReference: true })
+  assert.equal(followUp.mode, 'follow-up')
+  assert.equal(followUp.operation, 'continue')
+})
+
+test('Chat orchestrator carries immediate thread references and only treats explicit action records as completed work', () => {
+  const context = getChatOrchestrationContext([
+    { role: 'user', content: 'Build a landing page for a coaching product.' },
+    {
+      role: 'assistant',
+      content: 'Here is the project plan and the first implementation step.',
+      orchestration: {
+        version: 1,
+        mode: 'operator',
+        operation: 'create',
+        primaryTool: 'builder',
+        actions: [{ id: 'builder', status: 'handoff-opened' }],
+      },
+    },
+    { role: 'user', content: 'Continue from that and improve the plan.' },
+  ])
+  assert.equal(context.intent.mode, 'follow-up')
+  assert.equal(context.reference.referencesPrevious, true)
+  assert.equal(context.reference.artifactKind, 'plan')
+  assert.match(context.activeObjective, /Build a landing page/i)
+  assert.deepEqual(context.actionEvidence, [{ id: 'builder', status: 'handoff-opened' }])
+  const guidance = getOrchestratorGuidance(context)
+  assert.match(guidance, /handoff was opened; this does not confirm a Builder project was created/i)
+  assert.match(guidance, /what the conversation proves, what you infer/i)
+  assert.match(getChatSystemPrompt({ intent: context.intent, orchestration: context }), /Current operator-state note/i)
+})
+
+test('Chat orchestration metadata persists only safe evidence and keeps completed actions stable after reload', () => {
+  const base = createAssistantOrchestration({ intent: classifyChatRequest('Prepare this feature for GitHub.') })
+  const withHandoff = recordOrchestrationAction(base, { id: 'github', status: 'handoff-opened' })
+  const withTask = recordOrchestrationAction(withHandoff, { id: 'create-task', status: 'completed' })
+  assert.deepEqual(getCompletedOrchestrationActions(withTask), [
+    { id: 'github', status: 'handoff-opened' },
+    { id: 'create-task', status: 'completed' },
+  ])
+  assert.deepEqual(normalizeMessageOrchestration({
+    mode: 'operator', operation: 'handoff', primaryTool: 'github', actions: [
+      { id: 'github', status: 'handoff-opened', secret: 'never persist' },
+      { id: 'invalid', status: 'completed' },
+      { id: 'create-task', status: 'unverified' },
+    ],
+  }), {
+    version: 1,
+    mode: 'operator',
+    operation: 'handoff',
+    primaryTool: 'github',
+    actions: [{ id: 'github', status: 'handoff-opened' }],
+  })
+
+  const normalized = normalizeConversations([{
+    id: 'operator-chat', title: 'Operator', messages: [{
+      id: 'assistant', role: 'assistant', content: 'A safe handoff is ready.', orchestration: withTask,
+    }],
+  }])
+  assert.deepEqual(getCompletedOrchestrationActions(normalized[0].messages[0].orchestration), [
+    { id: 'github', status: 'handoff-opened' },
+    { id: 'create-task', status: 'completed' },
+  ])
 })
 
 test('Chat control center offers only explicit, real workspace actions and bounded handoffs', () => {
