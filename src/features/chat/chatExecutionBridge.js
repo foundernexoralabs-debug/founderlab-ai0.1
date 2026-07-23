@@ -19,6 +19,7 @@ const READINESS = new Set([
 ])
 const RISK_LEVELS = new Set(['none', 'low', 'medium', 'high'])
 const BRANCH_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
+const INSPECTION_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
 const APPROVAL_REQUIREMENTS = new Set(['not-required', 'required'])
 const HANDOFFS = new Set(['builder', 'code', 'github'])
 const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
@@ -79,6 +80,7 @@ export function normalizeExecutionBridgeEvidence(value) {
     readiness: value.readiness,
     risk: RISK_LEVELS.has(value.risk) ? value.risk : 'none',
     branch: BRANCH_REQUIREMENTS.has(value.branch) ? value.branch : 'not-needed',
+    inspection: INSPECTION_REQUIREMENTS.has(value.inspection) ? value.inspection : 'not-needed',
     approval: APPROVAL_REQUIREMENTS.has(value.approval) ? value.approval : 'not-required',
     ...(handoff ? { handoff } : {}),
   })
@@ -100,7 +102,7 @@ function targetSurface({ intent, request }) {
   if (intent?.primaryTool === 'builder') return 'builder'
   if (intent?.primaryTool === 'github') return 'github'
   if (intent?.wantsTask || intent?.wantsNote || intent?.operation === 'capture') return 'workspace'
-  const repoLanguage = hasRequestTerm(request, ['bug', 'crash', 'error', 'codebase', 'repository', 'repo', 'implementation', 'feature', 'test', 'tests', 'api', 'component', 'refactor', 'debug'])
+  const repoLanguage = hasRequestTerm(request, ['bug', 'crash', 'error', 'codebase', 'repository', 'repo', 'branch', 'pull request', 'commit', 'implementation', 'feature', 'test', 'tests', 'api', 'component', 'refactor', 'debug'])
     || (intent?.operation === 'inspect' && hasRequestTerm(request, ['project']))
   if (repoLanguage && ['inspect', 'change', 'create', 'continue', 'handoff'].includes(intent?.operation)) return 'repository'
   if (intent?.primaryTool === 'code') return 'code'
@@ -111,7 +113,7 @@ function targetSurface({ intent, request }) {
 function needsRepository(surface, intent, request) {
   if (['repository', 'code', 'github'].includes(surface)) return true
   if (surface === 'builder' || surface === 'workspace') return false
-  return hasRequestTerm(request, ['repository', 'repo', 'codebase', 'bug', 'debug', 'refactor', 'test', 'implementation', 'api'])
+  return hasRequestTerm(request, ['repository', 'repo', 'codebase', 'branch', 'pull request', 'commit', 'bug', 'debug', 'refactor', 'test', 'implementation', 'api'])
     && ['inspect', 'change', 'create', 'continue', 'handoff'].includes(intent?.operation)
 }
 
@@ -148,6 +150,12 @@ function riskFor({ surface, operation, repoAwareness }) {
   return 'none'
 }
 
+function inspectionRequirement({ repoAwareness, operation }) {
+  if (repoAwareness !== 'needed') return 'not-needed'
+  if (['inspect', 'change', 'create'].includes(operation)) return 'required'
+  return 'recommended'
+}
+
 /**
  * Derive a concrete, honest execution-preparation state from the request,
  * saved project metadata, model routing, and recorded Chat actions. This does
@@ -158,11 +166,12 @@ export function getChatExecutionBridge({ request = '', intent = null, projectAwa
   const surface = targetSurface({ intent: safeIntent, request })
   const repoAwareness = needsRepository(surface, safeIntent, request) ? 'needed' : 'not-needed'
   const branch = repoAwareness === 'needed'
-    ? ['change', 'create'].includes(safeIntent.operation) || surface === 'github'
+    ? ['change', 'create'].includes(safeIntent.operation) || (surface === 'github' && safeIntent.operation === 'handoff')
       ? 'required'
       : 'recommended'
     : 'not-needed'
   const approval = branch === 'required' ? 'required' : 'not-required'
+  const inspection = inspectionRequirement({ repoAwareness, operation: safeIntent.operation })
   const handoff = selectHandoff(surface, safeIntent)
   const project = normalizeProject(projectAwareness?.project)
   const task = normalizeTask(projectAwareness?.task)
@@ -187,6 +196,7 @@ export function getChatExecutionBridge({ request = '', intent = null, projectAwa
     readiness,
     risk: riskFor({ surface, operation: safeIntent.operation, repoAwareness }),
     branch,
+    inspection,
     approval,
     ...(handoff ? { handoff } : {}),
   })
@@ -224,6 +234,11 @@ export function getExecutionBridgeGuidance(bridge) {
   if (execution.repoAwareness === 'needed') {
     notes.push('Repository awareness is needed, but no repository contents, branch, tests, or external state have been inspected in this Chat turn. Prepare the safe inspection scope rather than claiming findings.')
   }
+  if (execution.inspection === 'required') {
+    notes.push('Inspection is required before any future execution: identify scope and verification first, then wait for the separate branch or approval boundary when applicable.')
+  } else if (execution.inspection === 'recommended') {
+    notes.push('A scoped inspection is recommended before a future execution handoff. No inspection result is currently recorded.')
+  }
   if (execution.branch === 'required') {
     notes.push('This change path should be branch-first and requires explicit approval before any future branch or repository mutation. State the intended scope, verification, and risk clearly; do not imply a branch exists.')
   } else if (execution.branch === 'recommended') {
@@ -252,11 +267,18 @@ export function getExecutionBridgePresentation(value) {
     : execution.branch === 'recommended'
       ? 'Branch-first change recommended'
       : ''
+  const inspection = execution.inspection === 'required'
+    ? 'Inspection required before execution'
+    : execution.inspection === 'recommended'
+      ? 'Inspection recommended before execution'
+      : ''
   return Object.freeze({
+    readiness: execution.readiness,
     label: `Execution bridge: ${READINESS_COPY[execution.readiness]}`,
     detail: detailByState[execution.readiness] || 'FounderLab has not started execution.',
     target: targetLabel(execution.target),
     ...(branch ? { branch } : {}),
+    ...(inspection ? { inspection } : {}),
   })
 }
 

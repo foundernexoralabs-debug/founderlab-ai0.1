@@ -6,6 +6,7 @@
  */
 
 import { getExecutionBridgePresentation } from './chatExecutionBridge.js'
+import { getCapabilityBridgePresentation } from './chatCapabilityBridge.js'
 
 const ACTION_COPY = Object.freeze({
   'save-note': 'Saved a note in FounderLab',
@@ -51,6 +52,57 @@ function getIntentLabel(mode, operation) {
   return `Understanding: an operator request · ${operation}`
 }
 
+const EXECUTION_STATE_COPY = Object.freeze({
+  'conversational-only': Object.freeze({ label: 'Conversational only', detail: 'No FounderLab action has been prepared or performed.' }),
+  'plan-prepared': Object.freeze({ label: 'Plan prepared', detail: 'FounderLab prepared guidance; no execution has started.' }),
+  'inspection-needed': Object.freeze({ label: 'Inspection needed', detail: 'FounderLab needs a scoped inspection before any execution claim.' }),
+  'ready-for-execution': Object.freeze({ label: 'Ready for execution', detail: 'A scoped path is prepared. The user still chooses the explicit next action.' }),
+  'handoff-opened': Object.freeze({ label: 'Handoff opened', detail: 'The destination was opened; no downstream result is confirmed.' }),
+  'external-integration-needed': Object.freeze({ label: 'External integration needed', detail: 'A connection is required before FounderLab can perform this external action.' }),
+  'waiting-for-approval': Object.freeze({ label: 'Waiting for approval', detail: 'The prepared change path requires explicit approval before any future repository mutation.' }),
+  'completed-locally': Object.freeze({ label: 'Completed locally', detail: 'A FounderLab-local workspace action is recorded.' }),
+  'externally-unverified': Object.freeze({ label: 'Externally unverified', detail: 'No external result is recorded or verified.' }),
+})
+
+/**
+ * A reusable status projection for future action logs. It deliberately keeps
+ * execution evidence and external integration availability separate.
+ */
+export function getChatExecutionState({ mode = 'conversation', actions = [], execution = null, capability = null } = {}) {
+  const externalRoute = capability?.state === 'external-integration-needed'
+    && ['email', 'calendar', 'external-app'].includes(capability.id)
+  if (externalRoute) return Object.freeze({ key: 'external-integration-needed', ...EXECUTION_STATE_COPY['external-integration-needed'] })
+
+  const completed = actions.find((action) => action.kind === 'completed')
+  if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
+
+  const handoff = actions.find((action) => action.kind === 'handoff')
+  if (handoff) return Object.freeze({ key: 'handoff-opened', ...EXECUTION_STATE_COPY['handoff-opened'] })
+
+  const executionState = {
+    'ready-to-inspect': 'inspection-needed',
+    'ready-to-handoff': 'ready-for-execution',
+    'execution-path-selected': 'ready-for-execution',
+    'waiting-for-approval': 'waiting-for-approval',
+    'externally-unverified': 'externally-unverified',
+  }[execution?.readiness]
+  if (executionState) return Object.freeze({ key: executionState, ...EXECUTION_STATE_COPY[executionState] })
+
+  if (mode === 'planning') return Object.freeze({ key: 'plan-prepared', ...EXECUTION_STATE_COPY['plan-prepared'] })
+  return Object.freeze({ key: 'conversational-only', ...EXECUTION_STATE_COPY['conversational-only'] })
+}
+
+function getExecutionNextStep({ state, completed, handoff }) {
+  if (state.key === 'external-integration-needed') return 'Connect the required integration before FounderLab attempts an external action; it can still prepare the draft or plan now.'
+  if (state.key === 'inspection-needed') return 'Start the scoped inspection before deciding on a branch or implementation change.'
+  if (state.key === 'waiting-for-approval') return 'Review the proposed scope, risk, and verification, then explicitly approve any future branch-first change.'
+  if (state.key === 'ready-for-execution') return 'Choose the explicit FounderLab handoff when you want to continue with this prepared path.'
+  if (state.key === 'externally-unverified') return 'Confirm the downstream result with evidence before reporting external completion.'
+  if (completed) return 'You can continue from the recorded FounderLab action.'
+  if (handoff) return 'Continue in the opened destination to perform the next scoped action.'
+  return 'Choose an explicit action when you want FounderLab to continue beyond this recommendation.'
+}
+
 export function getChatExecutionTransparency(orchestration) {
   if (!orchestration || typeof orchestration !== 'object') return null
   const mode = text(orchestration.mode) || 'conversation'
@@ -58,7 +110,8 @@ export function getChatExecutionTransparency(orchestration) {
   const actions = Array.isArray(orchestration.actions) ? orchestration.actions.map(getActionFact).filter(Boolean) : []
   const route = getRouteFact(orchestration.routing)
   const execution = getExecutionBridgePresentation(orchestration.execution)
-  const operational = mode !== 'conversation' || actions.length > 0 || execution
+  const capability = getCapabilityBridgePresentation(orchestration.capabilities)
+  const operational = mode !== 'conversation' || actions.length > 0 || execution || capability
   if (!operational) return null
 
   const completed = actions.find((action) => action.kind === 'completed')
@@ -73,6 +126,8 @@ export function getChatExecutionTransparency(orchestration) {
           detail: 'FounderLab has not performed a workspace or external action from this reply.',
         }
 
+  const state = getChatExecutionState({ mode, actions, execution, capability })
+
   return Object.freeze({
     mode,
     operation,
@@ -80,11 +135,9 @@ export function getChatExecutionTransparency(orchestration) {
     outcome,
     route,
     execution,
+    capability,
+    state,
     facts: Object.freeze(actions),
-    nextStep: completed
-      ? 'You can continue from the recorded FounderLab action.'
-      : handoff
-        ? 'Continue in the opened destination to perform the next scoped action.'
-        : 'Choose an explicit action when you want FounderLab to continue beyond this recommendation.',
+    nextStep: getExecutionNextStep({ state, completed, handoff }),
   })
 }

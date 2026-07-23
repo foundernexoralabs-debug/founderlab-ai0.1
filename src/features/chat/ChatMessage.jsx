@@ -101,6 +101,9 @@ export function ChatMessage({
   const hasContextualNoteAction = controlActions.some((action) => action.id === 'save-note')
   const hasContextualTaskAction = controlActions.some((action) => action.id === 'create-task')
   const operatorReport = assistant ? getChatExecutionTransparency(message.orchestration) : null
+  const executionTarget = operatorReport?.execution
+    ? [operatorReport.execution.target, operatorReport.execution.inspection, operatorReport.execution.branch].filter(Boolean).join(' · ')
+    : ''
 
   useEffect(() => {
     if (!voiceMenuOpen) return undefined
@@ -169,7 +172,7 @@ export function ChatMessage({
 
         {operatorReport && !streaming && (
           <details className="fl-chat-operator-report">
-            <summary><span>Operator report</span><strong>{operatorReport.outcome.label}</strong></summary>
+            <summary><span>Operator report</span><strong>{operatorReport.state.label}</strong></summary>
             <div className="fl-chat-operator-report-body">
               <p><b>{operatorReport.intentLabel}</b></p>
               <p>{operatorReport.outcome.detail}</p>
@@ -178,10 +181,11 @@ export function ChatMessage({
                   <b>{operatorReport.execution.label}</b><br />
                   {operatorReport.execution.detail}<br />
                   <span className="fl-chat-operator-report-next">
-                    Target: {operatorReport.execution.target}{operatorReport.execution.branch ? ` · ${operatorReport.execution.branch}` : ''}
+                    Target: {executionTarget}
                   </span>
                 </p>
               )}
+              {operatorReport.capability && <p><b>{operatorReport.capability.label}</b><br />{operatorReport.capability.detail}</p>}
               {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
               {operatorReport.facts.filter((fact) => fact.label !== operatorReport.outcome.label).map((fact) => <p key={`${fact.kind}-${fact.label}`}><b>{fact.label}</b><br />{fact.detail}</p>)}
               <p className="fl-chat-operator-report-next">{operatorReport.nextStep}</p>

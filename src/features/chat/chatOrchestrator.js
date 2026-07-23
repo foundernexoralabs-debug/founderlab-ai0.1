@@ -9,6 +9,7 @@
  */
 
 import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
+import { normalizeCapabilityBridge } from './chatCapabilityBridge.js'
 
 const MAX_ACTION_EVIDENCE = 12
 const MAX_OBJECTIVE_LENGTH = 220
@@ -337,6 +338,7 @@ export function createAssistantOrchestration(context) {
   const intent = context?.intent || classifyChatRequest('')
   const routing = normalizeRoutingEvidence(context?.modelRouting)
   const execution = normalizeExecutionBridgeEvidence(context?.executionBridge)
+  const capabilities = normalizeCapabilityBridge(context?.capabilityBridge)
   return Object.freeze({
     version: 1,
     mode: intent.mode,
@@ -345,6 +347,7 @@ export function createAssistantOrchestration(context) {
     ...(intent.requiresPlan ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
     ...(execution && execution.readiness !== 'not-started' ? { execution } : {}),
+    ...(capabilities ? { capabilities } : {}),
     actions: Object.freeze([]),
   })
 }
@@ -398,6 +401,7 @@ export function normalizeMessageOrchestration(value) {
   const operation = ['explain', 'plan', 'capture', 'create', 'change', 'inspect', 'handoff', 'continue'].includes(value.operation) ? value.operation : 'explain'
   const routing = normalizeRoutingEvidence(value.routing)
   const execution = normalizeExecutionBridgeEvidence(value.execution)
+  const capabilities = normalizeCapabilityBridge(value.capabilities)
   const actions = Array.isArray(value.actions)
     ? value.actions
       .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
@@ -415,6 +419,7 @@ export function normalizeMessageOrchestration(value) {
     ...(value.requiresPlan === true ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
     ...(execution ? { execution } : {}),
+    ...(capabilities ? { capabilities } : {}),
     actions: Object.freeze(actions),
   })
 }

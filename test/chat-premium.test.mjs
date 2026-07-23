@@ -75,13 +75,20 @@ import {
   normalizeMessageOrchestration,
   recordOrchestrationAction,
 } from '../src/features/chat/chatOrchestrator.js'
-import { getChatExecutionTransparency } from '../src/features/chat/chatExecutionTransparency.js'
+import { getChatExecutionState, getChatExecutionTransparency } from '../src/features/chat/chatExecutionTransparency.js'
 import {
   getChatExecutionBridge,
   getExecutionBridgeGuidance,
   getExecutionBridgePresentation,
   normalizeExecutionBridgeEvidence,
 } from '../src/features/chat/chatExecutionBridge.js'
+import {
+  getCapabilityBridgeGuidance,
+  getCapabilityBridgeHandoffAction,
+  getCapabilityBridgePresentation,
+  getChatCapabilityBridge,
+  normalizeCapabilityBridge,
+} from '../src/features/chat/chatCapabilityBridge.js'
 import {
   buildWorkspaceAwareness,
   getProjectAwareness,
@@ -624,6 +631,7 @@ test('Execution bridge prepares repo-aware, branch-first work without claiming r
     readiness: 'waiting-for-approval',
     risk: 'medium',
     branch: 'required',
+    inspection: 'required',
     approval: 'required',
     handoff: 'code',
   })
@@ -645,7 +653,19 @@ test('Execution bridge prepares repo-aware, branch-first work without claiming r
   })
   assert.equal(inspect.readiness, 'ready-to-inspect')
   assert.equal(inspect.branch, 'recommended')
+  assert.equal(inspect.inspection, 'required')
   assert.equal(inspect.approval, 'not-required')
+
+  const branchPreparation = getChatExecutionBridge({
+    request: 'Prepare branch work for the current project.',
+    intent: classifyChatRequest('Prepare branch work for the current project.'),
+    projectAwareness,
+    modelRouting,
+  })
+  assert.equal(branchPreparation.target.surface, 'repository')
+  assert.equal(branchPreparation.branch, 'recommended')
+  assert.equal(branchPreparation.inspection, 'recommended')
+  assert.equal(branchPreparation.readiness, 'ready-to-handoff')
 
   const builder = getChatExecutionBridge({
     request: 'Prepare Builder work for a premium FounderLab landing page.',
@@ -690,6 +710,7 @@ test('Execution bridge metadata is bounded and persists only safe target and rea
     readiness: 'waiting-for-approval',
     risk: 'medium',
     branch: 'required',
+    inspection: 'required',
     approval: 'required',
     handoff: 'code',
     request: 'never persist this raw prompt',
@@ -706,6 +727,7 @@ test('Execution bridge metadata is bounded and persists only safe target and rea
     readiness: 'waiting-for-approval',
     risk: 'medium',
     branch: 'required',
+    inspection: 'required',
     approval: 'required',
     handoff: 'code',
   })
@@ -718,6 +740,73 @@ test('Execution bridge metadata is bounded and persists only safe target and rea
   })
   assert.deepEqual(orchestration.execution, normalized)
   assert.deepEqual(normalizeMessageOrchestration({ ...orchestration, execution: { ...normalized, token: 'never persist' } }).execution, normalized)
+})
+
+test('Capability bridge prepares real FounderLab routes and external integrations without inventing a connector action', () => {
+  const emailIntent = classifyChatRequest('Email the launch update to our client and turn it into a task.')
+  const emailCapability = getChatCapabilityBridge({
+    request: 'Email the launch update to our client and turn it into a task.',
+    intent: emailIntent,
+  })
+  assert.deepEqual(emailCapability, {
+    version: 1,
+    primary: 'email',
+    routes: [
+      { id: 'tasks', kind: 'workspace', availability: 'available', action: 'create-task' },
+      { id: 'email', kind: 'integration', availability: 'not-connected' },
+    ],
+  })
+  assert.equal(getCapabilityBridgeHandoffAction(emailCapability), '')
+  assert.deepEqual(getCapabilityBridgePresentation(emailCapability), {
+    id: 'email',
+    state: 'external-integration-needed',
+    label: 'Capability route: Email connection needed',
+    detail: 'Email is not connected for this workspace. FounderLab did not attempt an external action.',
+  })
+  assert.match(getCapabilityBridgeGuidance(emailCapability), /not connected/i)
+  assert.match(getCapabilityBridgeGuidance(emailCapability), /Do not claim/i)
+  const emailContext = getChatRequestContext([{ role: 'user', content: 'Email the launch update to our client and turn it into a task.' }])
+  assert.equal(emailContext.capabilityBridge.primary, 'email')
+  assert.match(getChatSystemPrompt(emailContext), /Current capability-route note/i)
+  assert.equal(getChatCapabilityBridge({ request: 'How should I write a better email to a client?', intent: classifyChatRequest('How should I write a better email to a client?') }), null)
+
+  const repositoryIntent = classifyChatRequest('Audit this repository and prepare branch work.')
+  const repositoryExecution = getChatExecutionBridge({
+    request: 'Audit this repository and prepare branch work.',
+    intent: repositoryIntent,
+    modelRouting: { recommendation: { provider: 'groq', model: 'openai/gpt-oss-120b', path: 'cloud' } },
+  })
+  const githubCapability = getChatCapabilityBridge({
+    request: 'Audit this repository and prepare branch work.',
+    intent: repositoryIntent,
+    executionBridge: repositoryExecution,
+    integrations: { github: { connected: true, token: 'never persist' } },
+  })
+  assert.deepEqual(githubCapability, {
+    version: 1,
+    primary: 'github',
+    routes: [{ id: 'github', kind: 'integration', availability: 'connected', action: 'github' }],
+  })
+  assert.equal(getCapabilityBridgeHandoffAction(githubCapability), 'github')
+
+  const normalized = normalizeCapabilityBridge({
+    primary: 'email',
+    routes: [
+      { id: 'email', kind: 'integration', availability: 'not-connected', account: 'private@example.com' },
+      { id: 'invalid', kind: 'integration', availability: 'connected' },
+    ],
+    rawRequest: 'never persist',
+  })
+  assert.deepEqual(normalized, {
+    version: 1,
+    primary: 'email',
+    routes: [{ id: 'email', kind: 'integration', availability: 'not-connected' }],
+  })
+  assert.equal(JSON.stringify(normalized).includes('private'), false)
+
+  const orchestration = createAssistantOrchestration({ intent: emailIntent, capabilityBridge: emailCapability })
+  assert.deepEqual(orchestration.capabilities, emailCapability)
+  assert.deepEqual(normalizeMessageOrchestration({ ...orchestration, capabilities: { ...emailCapability, secret: 'never persist' } }).capabilities, emailCapability)
 })
 
 test('operator transparency labels a recommendation, handoff, and FounderLab-local completion without claiming external execution', () => {
@@ -746,6 +835,42 @@ test('operator transparency labels a recommendation, handoff, and FounderLab-loc
   assert.equal(completed.outcome.label, 'Created a task in FounderLab')
   assert.match(completed.nextStep, /recorded FounderLab action/i)
   assert.equal(getChatExecutionTransparency({ mode: 'conversation', operation: 'explain', actions: [] }), null)
+})
+
+test('Execution-state reporting distinguishes planning, inspection, approval, handoff, local completion, and external integration needs', () => {
+  const emailCapability = getChatCapabilityBridge({ request: 'Send an email update.', intent: classifyChatRequest('Send an email update.') })
+  const integration = getChatExecutionTransparency({
+    mode: 'operator', operation: 'handoff', actions: [], capabilities: emailCapability,
+  })
+  assert.equal(integration.state.key, 'external-integration-needed')
+
+  const inspection = getChatExecutionState({
+    mode: 'operator',
+    execution: { readiness: 'ready-to-inspect' },
+  })
+  assert.equal(inspection.key, 'inspection-needed')
+  const approval = getChatExecutionState({
+    mode: 'operator',
+    execution: { readiness: 'waiting-for-approval' },
+  })
+  assert.equal(approval.key, 'waiting-for-approval')
+  const ready = getChatExecutionState({
+    mode: 'operator',
+    execution: { readiness: 'execution-path-selected' },
+  })
+  assert.equal(ready.key, 'ready-for-execution')
+  const handoff = getChatExecutionState({
+    mode: 'operator',
+    actions: [{ kind: 'handoff' }],
+  })
+  assert.equal(handoff.key, 'handoff-opened')
+  const completed = getChatExecutionState({
+    mode: 'operator',
+    actions: [{ kind: 'completed' }],
+  })
+  assert.equal(completed.key, 'completed-locally')
+  assert.equal(getChatExecutionState({ mode: 'planning' }).key, 'plan-prepared')
+  assert.equal(getChatExecutionState().key, 'conversational-only')
 })
 
 test('Project-aware Chat memory persists bounded working context without copying note bodies, project files, or raw answers', () => {
@@ -857,7 +982,7 @@ test('Chat control center offers only explicit, real workspace actions and bound
       operation: 'change',
       execution: {
         target: { surface: 'repository', project: { id: 'founderlab', name: 'FounderLab', type: 'product' } },
-        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', approval: 'required', handoff: 'code',
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', inspection: 'required', approval: 'required', handoff: 'code',
       },
       actions: [],
     } },

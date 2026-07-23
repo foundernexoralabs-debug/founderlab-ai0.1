@@ -1,6 +1,7 @@
 import { classifyChatRequest } from './chatRequestIntent.js'
 import { getCompletedOrchestrationActions } from './chatOrchestrator.js'
 import { getExecutionBridgeHandoffAction } from './chatExecutionBridge.js'
+import { getCapabilityBridgeHandoffAction } from './chatCapabilityBridge.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -93,8 +94,10 @@ export function getAssistantControlActions(messages, assistantIndex) {
     .map((action) => [action.id, action.status]))
   const actions = getChatControlActions(request)
   const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)
-  if (executionHandoff && !actions.some((action) => action.id === executionHandoff) && CONTROL_ACTIONS[executionHandoff]) {
-    actions.push(CONTROL_ACTIONS[executionHandoff])
+  const capabilityHandoff = getCapabilityBridgeHandoffAction(assistant.orchestration?.capabilities)
+  const continuationAction = executionHandoff || capabilityHandoff
+  if (continuationAction && !actions.some((action) => action.id === continuationAction) && CONTROL_ACTIONS[continuationAction]) {
+    actions.push(CONTROL_ACTIONS[continuationAction])
   }
   return actions.slice(0, 2).map((action) => Object.freeze({
     ...action,

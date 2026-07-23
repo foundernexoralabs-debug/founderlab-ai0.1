@@ -7,6 +7,7 @@ import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
 import { useTextToSpeech } from '@/hooks/useTextToSpeech'
 import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
+import { getGithubToken } from '@/services/githubTokenSession'
 import {
   discoverLocalOllama,
   getAIProvider,
@@ -285,6 +286,9 @@ export function ChatWorkspace({ user }) {
         currentSelection: { provider: providerId, model: modelId },
         localModels,
         hasImage,
+      },
+      integrations: {
+        github: { connected: Boolean(getGithubToken()) },
       },
     }
   }

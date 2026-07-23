@@ -10,6 +10,7 @@ import {
 import { getProjectAwareness, getProjectAwarenessGuidance } from './chatMemory.js'
 import { getChatModelRouting, getChatModelRoutingGuidance } from './chatModelRouting.js'
 import { getChatExecutionBridge, getExecutionBridgeGuidance } from './chatExecutionBridge.js'
+import { getCapabilityBridgeGuidance, getChatCapabilityBridge } from './chatCapabilityBridge.js'
 import { LIVE_CALL_MAX_OUTPUT_TOKENS } from './liveCallUtils.js'
 
 // Keep model behavior consistent across cloud and local routes without
@@ -108,7 +109,7 @@ export function getConversationMemoryGuidance(messages = [], orchestrationContex
     : `The latest request refers to the immediately preceding assistant answer${orchestration.reference.artifactKind && orchestration.reference.artifactKind !== 'response' ? ` (${orchestration.reference.artifactKind})` : ''}. Use it as context: briefly orient the user, explain, refine, or apply the relevant part, and avoid rewriting the whole answer unless they clearly ask for it again.`
 }
 
-export function getChatRequestContext(messages, { memory = null, workspace = null, conversationId = '', routing = null } = {}) {
+export function getChatRequestContext(messages, { memory = null, workspace = null, conversationId = '', routing = null, integrations = null } = {}) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
@@ -122,7 +123,8 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     })
     const intent = orchestration.intent || classifyChatRequest('')
     const executionBridge = getChatExecutionBridge({ intent, projectAwareness, modelRouting })
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent, responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, projectAwareness, modelRouting, executionBridge }
+    const capabilityBridge = getChatCapabilityBridge({ intent, executionBridge, integrations })
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent, responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, projectAwareness, modelRouting, executionBridge, capabilityBridge }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
@@ -146,6 +148,12 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     projectAwareness,
     modelRouting,
   })
+  const capabilityBridge = getChatCapabilityBridge({
+    request: latestUser?.content,
+    intent,
+    executionBridge,
+    integrations,
+  })
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
     latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
@@ -157,10 +165,11 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     projectAwareness,
     modelRouting,
     executionBridge,
+    capabilityBridge,
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, projectAwareness = null, modelRouting = null, executionBridge = null } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, projectAwareness = null, modelRouting = null, executionBridge = null, capabilityBridge = null } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -196,6 +205,10 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   const executionGuidance = getExecutionBridgeGuidance(executionBridge)
   if (executionGuidance) {
     notes.push(`Current execution-bridge note: ${executionGuidance}`)
+  }
+  const capabilityGuidance = getCapabilityBridgeGuidance(capabilityBridge)
+  if (capabilityGuidance) {
+    notes.push(`Current capability-route note: ${capabilityGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt
