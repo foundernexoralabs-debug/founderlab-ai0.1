@@ -5,6 +5,8 @@
  * without implying an external repo, deployment, or Builder action occurred.
  */
 
+import { getExecutionBridgePresentation } from './chatExecutionBridge.js'
+
 const ACTION_COPY = Object.freeze({
   'save-note': 'Saved a note in FounderLab',
   'create-task': 'Created a task in FounderLab',
@@ -55,7 +57,8 @@ export function getChatExecutionTransparency(orchestration) {
   const operation = text(orchestration.operation) || 'explain'
   const actions = Array.isArray(orchestration.actions) ? orchestration.actions.map(getActionFact).filter(Boolean) : []
   const route = getRouteFact(orchestration.routing)
-  const operational = mode !== 'conversation' || actions.length > 0
+  const execution = getExecutionBridgePresentation(orchestration.execution)
+  const operational = mode !== 'conversation' || actions.length > 0 || execution
   if (!operational) return null
 
   const completed = actions.find((action) => action.kind === 'completed')
@@ -76,6 +79,7 @@ export function getChatExecutionTransparency(orchestration) {
     intentLabel: getIntentLabel(mode, operation),
     outcome,
     route,
+    execution,
     facts: Object.freeze(actions),
     nextStep: completed
       ? 'You can continue from the recorded FounderLab action.'

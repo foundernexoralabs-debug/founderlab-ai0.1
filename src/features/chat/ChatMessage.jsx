@@ -173,6 +173,15 @@ export function ChatMessage({
             <div className="fl-chat-operator-report-body">
               <p><b>{operatorReport.intentLabel}</b></p>
               <p>{operatorReport.outcome.detail}</p>
+              {operatorReport.execution && (
+                <p>
+                  <b>{operatorReport.execution.label}</b><br />
+                  {operatorReport.execution.detail}<br />
+                  <span className="fl-chat-operator-report-next">
+                    Target: {operatorReport.execution.target}{operatorReport.execution.branch ? ` · ${operatorReport.execution.branch}` : ''}
+                  </span>
+                </p>
+              )}
               {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
               {operatorReport.facts.filter((fact) => fact.label !== operatorReport.outcome.label).map((fact) => <p key={`${fact.kind}-${fact.label}`}><b>{fact.label}</b><br />{fact.detail}</p>)}
               <p className="fl-chat-operator-report-next">{operatorReport.nextStep}</p>

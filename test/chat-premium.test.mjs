@@ -77,6 +77,12 @@ import {
 } from '../src/features/chat/chatOrchestrator.js'
 import { getChatExecutionTransparency } from '../src/features/chat/chatExecutionTransparency.js'
 import {
+  getChatExecutionBridge,
+  getExecutionBridgeGuidance,
+  getExecutionBridgePresentation,
+  normalizeExecutionBridgeEvidence,
+} from '../src/features/chat/chatExecutionBridge.js'
+import {
   buildWorkspaceAwareness,
   getProjectAwareness,
   getProjectAwarenessGuidance,
@@ -591,6 +597,129 @@ test('Chat orchestration metadata persists only safe evidence and keeps complete
   ])
 })
 
+test('Execution bridge prepares repo-aware, branch-first work without claiming repository execution', () => {
+  const projectAwareness = {
+    project: { id: 'founderlab', name: 'FounderLab', type: 'product', updated_at: '' },
+    task: { id: 'task-bug', title: 'Repair onboarding crash', status: 'todo', updated_at: '' },
+    actions: [],
+  }
+  const modelRouting = {
+    recommendation: { provider: 'groq', model: 'openai/gpt-oss-120b', path: 'cloud' },
+  }
+  const fix = getChatExecutionBridge({
+    request: 'Fix this bug in the FounderLab codebase.',
+    intent: classifyChatRequest('Fix this bug in the FounderLab codebase.'),
+    projectAwareness,
+    modelRouting,
+  })
+  assert.deepEqual(fix, {
+    version: 1,
+    target: {
+      surface: 'repository',
+      project: { id: 'founderlab', name: 'FounderLab', type: 'product' },
+      task: { id: 'task-bug', title: 'Repair onboarding crash', status: 'todo' },
+    },
+    requestedOperation: 'change',
+    repoAwareness: 'needed',
+    readiness: 'waiting-for-approval',
+    risk: 'medium',
+    branch: 'required',
+    approval: 'required',
+    handoff: 'code',
+  })
+  const fixGuidance = getExecutionBridgeGuidance(fix)
+  assert.match(fixGuidance, /no repository contents, branch, tests, or external state have been inspected/i)
+  assert.match(fixGuidance, /requires explicit approval/i)
+  assert.match(fixGuidance, /not proof that a tool, repository, branch, or external system was changed/i)
+  const requestContext = getChatRequestContext([{ role: 'user', content: 'Fix this bug in the FounderLab codebase.' }])
+  assert.equal(requestContext.executionBridge.target.surface, 'repository')
+  assert.equal(requestContext.executionBridge.readiness, 'waiting-for-approval')
+  assert.match(getChatSystemPrompt(requestContext), /Current execution-bridge note/i)
+  assert.equal(createAssistantOrchestration(requestContext).execution.readiness, 'waiting-for-approval')
+
+  const inspect = getChatExecutionBridge({
+    request: 'Inspect this project for the onboarding crash.',
+    intent: classifyChatRequest('Inspect this project for the onboarding crash.'),
+    projectAwareness,
+    modelRouting,
+  })
+  assert.equal(inspect.readiness, 'ready-to-inspect')
+  assert.equal(inspect.branch, 'recommended')
+  assert.equal(inspect.approval, 'not-required')
+
+  const builder = getChatExecutionBridge({
+    request: 'Prepare Builder work for a premium FounderLab landing page.',
+    intent: classifyChatRequest('Prepare Builder work for a premium FounderLab landing page.'),
+    projectAwareness,
+    modelRouting,
+  })
+  assert.equal(builder.target.surface, 'builder')
+  assert.equal(builder.repoAwareness, 'not-needed')
+  assert.equal(builder.readiness, 'ready-to-handoff')
+  assert.equal(builder.handoff, 'builder')
+
+  const continueUpgrade = getChatExecutionBridge({
+    request: 'Continue the FounderLab upgrade work.',
+    intent: classifyChatRequest('Continue the FounderLab upgrade work.'),
+    projectAwareness,
+    modelRouting,
+  })
+  assert.equal(continueUpgrade.target.surface, 'project')
+  assert.equal(continueUpgrade.target.project.name, 'FounderLab')
+  assert.equal(continueUpgrade.readiness, 'execution-path-selected')
+
+  const externallyUnverified = getChatExecutionBridge({
+    request: 'Prepare Builder work for a premium FounderLab landing page.',
+    intent: classifyChatRequest('Prepare Builder work for a premium FounderLab landing page.'),
+    projectAwareness: { ...projectAwareness, actions: [{ id: 'builder', status: 'handoff-opened' }] },
+    modelRouting,
+  })
+  assert.equal(externallyUnverified.readiness, 'externally-unverified')
+  assert.match(getExecutionBridgePresentation(externallyUnverified).detail, /no downstream result is verified/i)
+})
+
+test('Execution bridge metadata is bounded and persists only safe target and readiness evidence', () => {
+  const normalized = normalizeExecutionBridgeEvidence({
+    target: {
+      surface: 'repository',
+      project: { id: 'founderlab', name: 'FounderLab', type: 'product', filePath: '/private/repo' },
+      task: { id: 'task-1', title: 'Fix chat', status: 'todo', secret: 'never persist' },
+    },
+    requestedOperation: 'change',
+    repoAwareness: 'needed',
+    readiness: 'waiting-for-approval',
+    risk: 'medium',
+    branch: 'required',
+    approval: 'required',
+    handoff: 'code',
+    request: 'never persist this raw prompt',
+  })
+  assert.deepEqual(normalized, {
+    version: 1,
+    target: {
+      surface: 'repository',
+      project: { id: 'founderlab', name: 'FounderLab', type: 'product' },
+      task: { id: 'task-1', title: 'Fix chat', status: 'todo' },
+    },
+    requestedOperation: 'change',
+    repoAwareness: 'needed',
+    readiness: 'waiting-for-approval',
+    risk: 'medium',
+    branch: 'required',
+    approval: 'required',
+    handoff: 'code',
+  })
+  assert.equal(JSON.stringify(normalized).includes('private'), false)
+  assert.equal(JSON.stringify(normalized).includes('raw prompt'), false)
+
+  const orchestration = createAssistantOrchestration({
+    intent: classifyChatRequest('Fix this bug in the FounderLab codebase.'),
+    executionBridge: normalized,
+  })
+  assert.deepEqual(orchestration.execution, normalized)
+  assert.deepEqual(normalizeMessageOrchestration({ ...orchestration, execution: { ...normalized, token: 'never persist' } }).execution, normalized)
+})
+
 test('operator transparency labels a recommendation, handoff, and FounderLab-local completion without claiming external execution', () => {
   const recommendation = getChatExecutionTransparency({
     mode: 'planning',
@@ -719,6 +848,22 @@ test('Chat control center offers only explicit, real workspace actions and bound
   ], 1)
   assert.deepEqual(actions.map((action) => action.id), ['create-task', 'github'])
   assert.match(actions[1].request, /GitHub/i)
+
+  const executionActions = getAssistantControlActions([
+    { role: 'user', content: 'Fix this bug in the FounderLab codebase.' },
+    { role: 'assistant', content: 'I prepared an inspection path.', orchestration: {
+      version: 1,
+      mode: 'operator',
+      operation: 'change',
+      execution: {
+        target: { surface: 'repository', project: { id: 'founderlab', name: 'FounderLab', type: 'product' } },
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', approval: 'required', handoff: 'code',
+      },
+      actions: [],
+    } },
+  ], 1)
+  assert.deepEqual(executionActions.map((action) => action.id), ['code'])
+  assert.equal(executionActions[0].label, 'Open Code AI')
 
   const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
   assert.match(builderPayload.desc, /FounderLab Chat brief/)

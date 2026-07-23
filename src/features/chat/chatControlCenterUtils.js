@@ -1,5 +1,6 @@
 import { classifyChatRequest } from './chatRequestIntent.js'
 import { getCompletedOrchestrationActions } from './chatOrchestrator.js'
+import { getExecutionBridgeHandoffAction } from './chatExecutionBridge.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -86,10 +87,16 @@ function getPreviousUserRequest(messages, assistantIndex) {
 /** Attach the triggering request in-memory so a clicked action transfers the right brief. */
 export function getAssistantControlActions(messages, assistantIndex) {
   if (messages?.[assistantIndex]?.role !== 'assistant') return []
+  const assistant = messages[assistantIndex]
   const request = getPreviousUserRequest(messages, assistantIndex)
-  const completed = new Map(getCompletedOrchestrationActions(messages[assistantIndex].orchestration)
+  const completed = new Map(getCompletedOrchestrationActions(assistant.orchestration)
     .map((action) => [action.id, action.status]))
-  return getChatControlActions(request).map((action) => Object.freeze({
+  const actions = getChatControlActions(request)
+  const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)
+  if (executionHandoff && !actions.some((action) => action.id === executionHandoff) && CONTROL_ACTIONS[executionHandoff]) {
+    actions.push(CONTROL_ACTIONS[executionHandoff])
+  }
+  return actions.slice(0, 2).map((action) => Object.freeze({
     ...action,
     request,
     ...(completed.has(action.id) ? { completed: true, completionStatus: completed.get(action.id) } : {}),

@@ -8,6 +8,8 @@
  * assistant from turning a helpful plan into an unverified claim.
  */
 
+import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
+
 const MAX_ACTION_EVIDENCE = 12
 const MAX_OBJECTIVE_LENGTH = 220
 
@@ -334,6 +336,7 @@ export function getOrchestratorGuidance(context) {
 export function createAssistantOrchestration(context) {
   const intent = context?.intent || classifyChatRequest('')
   const routing = normalizeRoutingEvidence(context?.modelRouting)
+  const execution = normalizeExecutionBridgeEvidence(context?.executionBridge)
   return Object.freeze({
     version: 1,
     mode: intent.mode,
@@ -341,6 +344,7 @@ export function createAssistantOrchestration(context) {
     ...(intent.primaryTool ? { primaryTool: intent.primaryTool } : {}),
     ...(intent.requiresPlan ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
+    ...(execution && execution.readiness !== 'not-started' ? { execution } : {}),
     actions: Object.freeze([]),
   })
 }
@@ -393,6 +397,7 @@ export function normalizeMessageOrchestration(value) {
   const mode = ['conversation', 'planning', 'operator', 'follow-up'].includes(value.mode) ? value.mode : 'conversation'
   const operation = ['explain', 'plan', 'capture', 'create', 'change', 'inspect', 'handoff', 'continue'].includes(value.operation) ? value.operation : 'explain'
   const routing = normalizeRoutingEvidence(value.routing)
+  const execution = normalizeExecutionBridgeEvidence(value.execution)
   const actions = Array.isArray(value.actions)
     ? value.actions
       .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
@@ -409,6 +414,7 @@ export function normalizeMessageOrchestration(value) {
     ...(typeof value.primaryTool === 'string' && TOOL_PRIORITY.includes(value.primaryTool) ? { primaryTool: value.primaryTool } : {}),
     ...(value.requiresPlan === true ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
+    ...(execution ? { execution } : {}),
     actions: Object.freeze(actions),
   })
 }
