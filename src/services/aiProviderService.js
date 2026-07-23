@@ -154,12 +154,14 @@ export async function requestAIResult({
   ollamaUrl,
   connectionTest = false,
   localOllamaAllowed = false,
+  stream = false,
 } = {}, {
   fetchImpl = globalThis.fetch,
   electronBridge,
   permissionQuery,
   accessToken,
   signal,
+  onStreamEvent,
 } = {}) {
   if (!provider) {
     return createAIErrorResult({ code: 'MISSING_CONFIGURATION' })
@@ -194,6 +196,7 @@ export async function requestAIResult({
     system,
     maxTokens,
     ollamaUrl: provider === 'ollama' ? ollamaUrl || getOllamaURL() : undefined,
+    stream,
   }, {
     fetchImpl,
     electronBridge,
@@ -201,6 +204,7 @@ export async function requestAIResult({
     diagnosticFlow: provider === 'ollama' ? (connectionTest ? 'connection-test' : 'chat') : undefined,
     accessToken: token,
     signal,
+    onStreamEvent,
   })
   let result = await request(activeAccessToken)
   if (provider !== 'ollama' && result.error?.code === 'AUTHENTICATION_INVALID' && accessToken === undefined) {

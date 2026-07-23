@@ -278,6 +278,7 @@ function cleanMessage(message) {
     ...(typeof message.provider === 'string' ? { provider: message.provider } : {}),
     ...(typeof message.model === 'string' ? { model: message.model } : {}),
     ...(message.role === 'user' && message.source === 'voice' ? { source: 'voice' } : {}),
+    ...(message.role === 'assistant' && message.incomplete === true ? { incomplete: true } : {}),
     ...(orchestration ? { orchestration } : {}),
     ...(typeof message.ts === 'string' ? { ts: message.ts } : {}),
   }

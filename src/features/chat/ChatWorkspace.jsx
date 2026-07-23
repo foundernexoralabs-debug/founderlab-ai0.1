@@ -59,6 +59,7 @@ export function ChatWorkspace({ user }) {
   const [input, setInput] = useState('')
   const [pendingImage, setPendingImage] = useState(null)
   const [sending, setSending] = useState(false)
+  const [streamingReply, setStreamingReply] = useState(null)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [historyOpen, setHistoryOpen] = useState(() => getChatUIPreferences().historyOpen)
@@ -88,6 +89,7 @@ export function ChatWorkspace({ user }) {
   const workspaceAwarenessRef = useRef(buildWorkspaceAwareness())
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
+  const streamingReplyRef = useRef(null)
   const voiceSessionRequestRef = useRef(0)
   const voiceSessionRef = useRef({ active: false, transcript: '' })
   const liveCallRef = useRef({ active: false, muted: false, phase: 'idle', transcript: '', turns: [], providerId: '', modelId: '', turnTimer: null, turn: 0, inFlight: false, monitoringInterrupt: false })
@@ -104,7 +106,7 @@ export function ChatWorkspace({ user }) {
   const messages = activeConversation?.messages || []
   const { scrollRef: conversationScrollRef, showJumpToLatest, scrollToLatest } = useConversationScroll({
     conversationId: activeId,
-    messageCount: messages.length,
+    messageCount: messages.length + (streamingReply?.conversationId === activeId ? 1 : 0),
     sending,
   })
   const selectedProvider = useMemo(() => {
@@ -248,6 +250,7 @@ export function ChatWorkspace({ user }) {
     clearLiveCallTurnTimer()
     liveCallRef.current.active = false
     requestAbortRef.current?.abort()
+    streamingReplyRef.current = null
   }, [])
 
   function synchronizePersistentMemory(next, activeConversationId = activeId) {
@@ -822,6 +825,37 @@ export function ChatWorkspace({ user }) {
     setErrorState(null)
 
     const requestContext = getChatRequestContext(conversationMessages, getPersistentChatContext(conversationId, { providerId, modelId }))
+    const orchestration = createAssistantOrchestration(requestContext)
+    const transientReply = {
+      id: `stream-${requestSequence}`,
+      requestSequence,
+      conversationId,
+      role: 'assistant',
+      content: '',
+      provider: providerId,
+      model: modelId,
+      orchestration,
+      streaming: true,
+    }
+    streamingReplyRef.current = transientReply
+    setStreamingReply(transientReply)
+    const updateStream = (event) => {
+      if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) return
+      if (event?.type === 'delta' && typeof event.text === 'string' && event.text) {
+        const current = streamingReplyRef.current
+        if (!current || current.requestSequence !== requestSequence) return
+        const next = { ...current, content: current.content + event.text, phase: 'responding' }
+        streamingReplyRef.current = next
+        setStreamingReply(next)
+      }
+      if (event?.type === 'started') {
+        const current = streamingReplyRef.current
+        if (!current || current.requestSequence !== requestSequence) return
+        const next = { ...current, provider: event.provider || current.provider, model: event.model || current.model, phase: 'responding' }
+        streamingReplyRef.current = next
+        setStreamingReply(next)
+      }
+    }
     const result = await requestAIResult({
       provider: providerId,
       model: modelId,
@@ -830,13 +864,40 @@ export function ChatWorkspace({ user }) {
       maxTokens: CHAT_RESPONSE_OPTIONS.maxTokens,
       temperature: CHAT_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
-    }, { signal: controller.signal })
+      stream: true,
+    }, { signal: controller.signal, onStreamEvent: updateStream })
 
-    if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) return { ok: false, cancelled: true }
+    if (requestSequence !== requestSequenceRef.current || controller.signal.aborted) {
+      if (streamingReplyRef.current?.requestSequence === requestSequence) {
+        streamingReplyRef.current = null
+        setStreamingReply(null)
+      }
+      return { ok: false, cancelled: true }
+    }
     requestAbortRef.current = null
     setSending(false)
+    const receivedText = (typeof result.partialText === 'string' ? result.partialText : streamingReplyRef.current?.content || '').trim()
+    streamingReplyRef.current = null
+    setStreamingReply(null)
 
     if (!result.ok) {
+      if (receivedText) {
+        const interruptedMessage = {
+          id: uniqueMessageId(),
+          role: 'assistant',
+          content: receivedText,
+          provider: result.provider || providerId,
+          model: result.model || modelId,
+          orchestration,
+          incomplete: true,
+          ts: ts(),
+        }
+        const latest = conversationsRef.current
+        const next = latest.map((conversation) => conversation.id === conversationId
+          ? { ...conversation, messages: [...conversation.messages, interruptedMessage], updated_at: ts() }
+          : conversation)
+        persist(next, conversationId)
+      }
       const presentation = {
         conversationId,
         ...getChatErrorPresentation({ ...result.error, provider: result.provider, model: result.model }, providerId),
@@ -851,7 +912,7 @@ export function ChatWorkspace({ user }) {
       content: result.text,
       provider: result.provider || providerId,
       model: result.model || modelId,
-      orchestration: createAssistantOrchestration(requestContext),
+      orchestration,
       ts: ts(),
     }
     const latest = conversationsRef.current
@@ -1065,6 +1126,8 @@ export function ChatWorkspace({ user }) {
     requestAbortRef.current?.abort()
     requestAbortRef.current = null
     requestSequenceRef.current += 1
+    streamingReplyRef.current = null
+    setStreamingReply(null)
     setSending(false)
     toast('Generation stopped. Your message is still saved.', 'success')
   }
@@ -1305,7 +1368,8 @@ export function ChatWorkspace({ user }) {
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
                 {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index)} onControlAction={continueFromChat} />)}
-                {sending && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
+                {streamingReply?.conversationId === activeId && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatMessage key={streamingReply.id} message={streamingReply} user={user} sending={sending} activeTTS={activeTTS} streaming onStopStreaming={stopGenerating} />}
+                {sending && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && !streamingReply && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}
                 {showJumpToLatest && <button type="button" className="fl-chat-jump-latest" onClick={() => scrollToLatest()}><span aria-hidden="true">↓</span> Latest</button>}
               </div>

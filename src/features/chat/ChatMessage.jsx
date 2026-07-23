@@ -5,6 +5,7 @@ import { renderMsg } from '@/components/content/MessageContent'
 import { getVoiceSpeedLabel, VOICE_SPEED_OPTIONS } from '@/lib/voicePreferencesUtils'
 import { getChatUserInitials, getProviderPresentation } from './chatUtils'
 import { ChatControlActions } from './ChatControlActions'
+import { getChatExecutionTransparency } from './chatExecutionTransparency'
 
 const ELEVENLABS_VOICE_PROVIDER = getVoiceProvider('elevenlabs')
 const VOICE_STYLE_OPTIONS = ['female', 'male'].map((voice) => ({
@@ -85,6 +86,8 @@ export function ChatMessage({
   elevenLabsAvailable,
   controlActions = [],
   onControlAction,
+  streaming = false,
+  onStopStreaming,
 }) {
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false)
   const [reaction, setReaction] = useState(null)
@@ -97,6 +100,7 @@ export function ChatMessage({
   const ttsActive = activeTTS === message.id
   const hasContextualNoteAction = controlActions.some((action) => action.id === 'save-note')
   const hasContextualTaskAction = controlActions.some((action) => action.id === 'create-task')
+  const operatorReport = assistant ? getChatExecutionTransparency(message.orchestration) : null
 
   useEffect(() => {
     if (!voiceMenuOpen) return undefined
@@ -130,7 +134,7 @@ export function ChatMessage({
   }
 
   return (
-    <article className={`fl-chat-message ${assistant ? 'is-assistant' : 'is-user'} ${ttsActive ? 'is-speaking' : ''}`} aria-label={assistant ? 'FounderLab response' : 'Your message'}>
+    <article className={`fl-chat-message ${assistant ? 'is-assistant' : 'is-user'} ${ttsActive ? 'is-speaking' : ''} ${streaming ? 'is-streaming' : ''}`} aria-label={assistant ? 'FounderLab response' : 'Your message'}>
       <div aria-hidden="true" className={`fl-chat-avatar ${assistant ? 'is-assistant' : 'is-user'}`} style={{
         color: '#fff', fontSize: assistant ? 14 : 11, fontWeight: assistant ? 500 : 750,
         background: assistant ? `linear-gradient(135deg, ${C.accent}, #a855f7)` : 'linear-gradient(135deg, #1f2937, #475569)',
@@ -149,14 +153,34 @@ export function ChatMessage({
           </div>
 
           {message.image && <img src={message.image} alt={assistant ? 'Referenced attachment' : 'Attached by you'} style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 11, display: 'block', objectFit: 'cover', border: `1px solid ${C.border}`, marginBottom: 10 }} />}
-          <div className="fl-chat-message-content">
-            {assistant ? renderMsg(message.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>}
+          <div className="fl-chat-message-content" aria-live={streaming ? 'polite' : undefined}>
+            {assistant && streaming && !message.content ? (
+              <div className="fl-chat-stream-pending">
+                <span aria-hidden="true" className="fl-chat-stream-pulse" />
+                <span>FounderLab is connecting to {provider?.local ? 'your local model' : 'the selected model'}.</span>
+                <button type="button" onClick={onStopStreaming}>Stop</button>
+              </div>
+            ) : assistant ? renderMsg(message.content) : <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>}
           </div>
+          {message.incomplete === true && <div className="fl-chat-message-interrupted" role="status">Response interrupted. The text above is everything FounderLab received.</div>}
         </div>
 
-        {assistant && <ChatControlActions actions={controlActions} onAction={(action) => onControlAction?.(action, message)} />}
+        {assistant && !streaming && <ChatControlActions actions={controlActions} onAction={(action) => onControlAction?.(action, message)} />}
 
-        <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 7, flexWrap: 'wrap' }}>
+        {operatorReport && !streaming && (
+          <details className="fl-chat-operator-report">
+            <summary><span>Operator report</span><strong>{operatorReport.outcome.label}</strong></summary>
+            <div className="fl-chat-operator-report-body">
+              <p><b>{operatorReport.intentLabel}</b></p>
+              <p>{operatorReport.outcome.detail}</p>
+              {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
+              {operatorReport.facts.filter((fact) => fact.label !== operatorReport.outcome.label).map((fact) => <p key={`${fact.kind}-${fact.label}`}><b>{fact.label}</b><br />{fact.detail}</p>)}
+              <p className="fl-chat-operator-report-next">{operatorReport.nextStep}</p>
+            </div>
+          </details>
+        )}
+
+        {!streaming && <div className={`fl-chat-message-actions ${ttsActive || voiceMenuOpen || reaction ? 'is-active' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 7, flexWrap: 'wrap' }}>
           <ActionButton label={copied ? 'Copied' : 'Copy'} icon={copied ? '✓' : '⧉'} active={copied} onClick={copyMessage} />
           {assistant ? <>
             <ActionButton label={ttsActive ? 'Stop reading' : 'Read aloud'} icon={ttsActive ? '■' : '◖'} active={ttsActive} onClick={() => onReadAloud(message)} />
@@ -172,6 +196,7 @@ export function ChatMessage({
           </> : <ActionButton label="Edit and resend" icon="✎" onClick={() => onEdit(message)} />}
           <ActionButton label="Delete message" icon="×" danger onClick={() => onDelete(message.id)} />
         </div>
+        }
 
       </div>
     </article>

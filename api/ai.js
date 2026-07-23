@@ -1,4 +1,5 @@
-const { runProvider } = require('./ai/providerRunner')
+const { runProvider, runProviderStream } = require('./ai/providerRunner')
+const { startSSE, writeSSE } = require('./ai/streamUtils')
 const {
   handleCors,
   requireAuthenticatedUser,
@@ -96,6 +97,57 @@ async function handler(req, res, dependencies = {}) {
     limiter: dependencies.rateLimiter,
   })
   if (!allowed) return
+
+  if (request.stream === true) {
+    // Auth, CORS, and durable rate limiting have already completed before we
+    // open the response. This keeps the streamed route as protected as the
+    // existing JSON route while allowing real provider deltas to flow through.
+    startSSE(res)
+    writeSSE(res, 'started', { type: 'started', provider: request.provider, model: request.model })
+    let receivedText = false
+    let completion = { usage: null, finishReason: null }
+    try {
+      for await (const event of runProviderStream(request, { env, fetchImpl })) {
+        if (event?.type === 'delta' && typeof event.text === 'string' && event.text) {
+          receivedText = true
+          writeSSE(res, 'delta', { type: 'delta', text: event.text })
+        }
+        if (event?.type === 'complete') {
+          completion = {
+            usage: event.usage || null,
+            finishReason: event.finishReason || null,
+          }
+        }
+      }
+      if (!receivedText) {
+        const empty = engine.createAIErrorResult({ provider: request.provider, model: request.model, code: 'EMPTY_RESPONSE' })
+        writeSSE(res, 'error', { type: 'error', error: empty.error })
+      } else {
+        writeSSE(res, 'complete', {
+          type: 'complete',
+          provider: request.provider,
+          model: request.model,
+          meta: completion,
+        })
+      }
+    } catch (error) {
+      const result = engine.createAIErrorResult({
+        provider: request.provider,
+        model: request.model,
+        status: error?.status,
+        code: error?.code,
+        message: error?.message,
+      })
+      console.error('[ai stream handler]', {
+        provider: request.provider,
+        code: result.error.code,
+        status: result.error.status,
+      })
+      writeSSE(res, 'error', { type: 'error', error: result.error })
+    }
+    res.end()
+    return
+  }
 
   try {
     const output = await runProvider(request, { env, fetchImpl })

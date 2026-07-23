@@ -34,6 +34,14 @@ function normalizeTemperature(value) {
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null
 }
 
+function normalizeStream(value) {
+  // Streaming is an explicit opt-in transport choice. Treating a truthy
+  // arbitrary value as streaming would make the API contract ambiguous and
+  // could accidentally change a request made by an older caller.
+  if (value === undefined || value === null) return false
+  return typeof value === 'boolean' ? value : null
+}
+
 function normalizeMessages(messages, enforceLimits, supportsImageInput) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return requestError('REQUEST_INVALID', 'At least one message is required.')
@@ -111,6 +119,10 @@ export function normalizeAIRequest(input = {}, {
   if (temperature === null) {
     return requestError('REQUEST_INVALID', 'Temperature must be a number between 0 and 1.')
   }
+  const stream = normalizeStream(input.stream)
+  if (stream === null) {
+    return requestError('REQUEST_INVALID', 'Streaming must be enabled with a boolean value.')
+  }
 
   const messages = normalizeMessages(input.messages, enforceLimits, getProvider(provider).capabilities.imageInput)
   if (!messages.ok) return messages
@@ -131,6 +143,7 @@ export function normalizeAIRequest(input = {}, {
       messages: messages.value,
       system: input.system || '',
       maxTokens: normalizeMaxTokens(provider, input.maxTokens),
+      stream,
       ...(temperature !== undefined ? { temperature } : {}),
       ...(ollamaUrl ? { ollamaUrl } : {}),
     },
@@ -146,5 +159,6 @@ export function normalizeServerAIRequest(payload = {}) {
     maxTokens: payload.max_tokens,
     temperature: payload.temperature,
     ollamaUrl: payload.ollamaUrl,
+    stream: payload.stream,
   }, { enforceLimits: true, restrictOllamaToLocal: true })
 }

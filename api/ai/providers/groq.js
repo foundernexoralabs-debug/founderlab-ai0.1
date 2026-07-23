@@ -3,6 +3,7 @@ const {
   readProviderJson,
   requireProviderKey,
 } = require('../providerUtils')
+const { iterateSSE } = require('../streamUtils')
 
 function extractGroqText(content) {
   if (typeof content === 'string') return content
@@ -13,25 +14,34 @@ function extractGroqText(content) {
   }).join('')
 }
 
-async function execute({ request, env, fetchImpl }) {
-  const apiKey = requireProviderKey(env, 'GROQ_API_KEY', 'groq')
+function createGroqBody(request, { stream = false } = {}) {
   const messages = request.system
     ? [{ role: 'system', content: request.system }, ...request.messages]
     : request.messages
-  const response = await fetchImpl('https://api.groq.com/openai/v1/chat/completions', {
+  return {
+    model: request.model,
+    messages: messages.map((message) => ({ role: message.role, content: message.content })),
+    max_tokens: request.maxTokens,
+    ...(request.temperature !== undefined && { temperature: request.temperature }),
+    ...(request.responseFormat && { response_format: request.responseFormat }),
+    ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+  }
+}
+
+async function callGroq({ request, env, fetchImpl, stream = false }) {
+  const apiKey = requireProviderKey(env, 'GROQ_API_KEY', 'groq')
+  return fetchImpl('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: 'Bearer ' + apiKey,
     },
-    body: JSON.stringify({
-      model: request.model,
-      messages: messages.map((message) => ({ role: message.role, content: message.content })),
-      max_tokens: request.maxTokens,
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
-      ...(request.responseFormat && { response_format: request.responseFormat }),
-    }),
+    body: JSON.stringify(createGroqBody(request, { stream })),
   })
+}
+
+async function execute({ request, env, fetchImpl }) {
+  const response = await callGroq({ request, env, fetchImpl })
   const data = await readProviderJson(response, 'groq')
   assertProviderResponse(response, data, 'groq')
   return {
@@ -41,4 +51,25 @@ async function execute({ request, env, fetchImpl }) {
   }
 }
 
-module.exports = { execute, extractGroqText }
+async function* stream({ request, env, fetchImpl }) {
+  const response = await callGroq({ request, env, fetchImpl, stream: true })
+  if (!response.ok) {
+    const data = await readProviderJson(response, 'groq')
+    assertProviderResponse(response, data, 'groq')
+  }
+  let usage = null
+  let finishReason = null
+  for await (const event of iterateSSE(response.body)) {
+    if (event.data === '[DONE]') break
+    let data
+    try { data = JSON.parse(event.data) } catch { continue }
+    const choice = data?.choices?.[0]
+    const text = extractGroqText(choice?.delta?.content)
+    if (text) yield { type: 'delta', text }
+    if (choice?.finish_reason) finishReason = choice.finish_reason
+    if (data?.usage) usage = data.usage
+  }
+  yield { type: 'complete', usage, finishReason }
+}
+
+module.exports = { execute, stream, extractGroqText, createGroqBody }

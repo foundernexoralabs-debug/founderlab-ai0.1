@@ -13,7 +13,7 @@ import {
 } from '../src/ai/providerRegistry.js'
 import { getVoiceCandidates, getVoiceProvider } from '../src/ai/voiceProviderRegistry.js'
 import { classifyAIError } from '../src/ai/errorClassifier.js'
-import { normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
+import { normalizeAIRequest, normalizeOllamaUrl, normalizeServerAIRequest } from '../src/ai/normalizeRequest.js'
 import { createAIResult, normalizeApiResult } from '../src/ai/normalizeResponse.js'
 import { routeAIRequest } from '../src/ai/providerRouter.js'
 import {
@@ -22,6 +22,7 @@ import {
   getOllamaDiagnostics,
   normalizeOllamaModels,
   recordOllamaDiagnostic,
+  requestOllama,
 } from '../src/ai/providers/ollama.js'
 import {
   getProviderConnectionState,
@@ -59,6 +60,8 @@ const aiHandler = require('../api/ai.js')
 const youtubeHandler = require('../api/youtube.js')
 const ttsHandler = require('../api/tts.js')
 const groqProvider = require('../api/ai/providers/groq.js')
+const geminiProvider = require('../api/ai/providers/gemini.js')
+const anthropicProvider = require('../api/ai/providers/anthropic.js')
 const { synthesizeVoice } = require('../api/voice/elevenlabs.js')
 const {
   authenticateRequest,
@@ -83,6 +86,7 @@ function createResponseRecorder() {
     headers: {},
     statusCode: null,
     body: null,
+    chunks: [],
     ended: false,
     setHeader(name, value) {
       this.headers[name] = value
@@ -99,11 +103,30 @@ function createResponseRecorder() {
       this.body = body
       return this
     },
+    write(chunk) {
+      this.chunks.push(String(chunk))
+      return true
+    },
     end() {
       this.ended = true
       return this
     },
   }
+}
+
+function eventStreamResponse(events) {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream({
+    start(controller) {
+      events.forEach((event) => controller.enqueue(encoder.encode(event)))
+      controller.close()
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+}
+
+function ndjsonResponse(lines) {
+  return new Response(lines.join('\n') + '\n', { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } })
 }
 
 function createRequest({ method = 'POST', url = '/api/ai', body = {}, headers = {} } = {}) {
@@ -336,6 +359,100 @@ test('browser provider router preserves the stable API contract and sends the su
   assert.equal(requestBody.max_tokens, 200)
   assert.equal(result.ok, true)
   assert.equal(result.text, 'Consistent result')
+})
+
+test('streaming is an explicit boolean request contract and cloud deltas are rendered only when the server sends them', async () => {
+  assert.equal(normalizeAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message()], stream: true }).value.stream, true)
+  assert.equal(normalizeAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message()], stream: false }).value.stream, false)
+  assert.equal(normalizeAIRequest({ provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message()], stream: 'yes' }).ok, false)
+
+  const events = []
+  let sentBody
+  const result = await routeAIRequest({
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    messages: [message('Stream a real response')],
+    stream: true,
+  }, {
+    accessToken: 'stream-token',
+    onStreamEvent: (event) => events.push(event),
+    fetchImpl: async (_, options) => {
+      sentBody = JSON.parse(options.body)
+      return eventStreamResponse([
+        'event: started\ndata: {"type":"started","provider":"groq","model":"openai/gpt-oss-120b"}\n\n',
+        'event: delta\ndata: {"type":"delta","text":"Founder"}\n\n',
+        'event: delta\ndata: {"type":"delta","text":"Lab"}\n\n',
+        'event: complete\ndata: {"type":"complete","provider":"groq","model":"openai/gpt-oss-120b","meta":{"usage":{"completion_tokens":2},"finishReason":"stop"}}\n\n',
+      ])
+    },
+  })
+  assert.equal(sentBody.stream, true)
+  assert.equal(result.ok, true)
+  assert.equal(result.text, 'FounderLab')
+  assert.deepEqual(events.map((event) => event.type), ['started', 'delta', 'delta', 'complete'])
+  assert.equal(events.at(-1).meta.finishReason, 'stop')
+})
+
+test('a non-streaming deployment response falls back honestly without synthetic client deltas', async () => {
+  const events = []
+  const result = await routeAIRequest({
+    provider: 'groq',
+    model: 'openai/gpt-oss-120b',
+    messages: [message('Fallback response')],
+    stream: true,
+  }, {
+    accessToken: 'stream-token',
+    onStreamEvent: (event) => events.push(event),
+    fetchImpl: async () => jsonResponse({ body: {
+      ok: true,
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      text: 'A complete JSON fallback.',
+    } }),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.text, 'A complete JSON fallback.')
+  assert.deepEqual(events, [])
+})
+
+test('an interrupted stream never masquerades as a complete answer and retains only received safe text', async () => {
+  const result = await routeAIRequest({
+    provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('Interrupt this stream')], stream: true,
+  }, {
+    accessToken: 'stream-token',
+    fetchImpl: async () => eventStreamResponse([
+      'event: started\ndata: {"type":"started","provider":"groq","model":"openai/gpt-oss-120b"}\n\n',
+      'event: delta\ndata: {"type":"delta","text":"Received before interruption."}\n\n',
+    ]),
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'MALFORMED_RESPONSE')
+  assert.equal(result.partialText, 'Received before interruption.')
+})
+
+test('Ollama forwards native NDJSON deltas directly without a cloud path or synthetic typewriter', async () => {
+  const events = []
+  const result = await requestOllama({
+    model: 'qwen2.5-coder:7b',
+    messages: [message('Write a small component')],
+    maxTokens: 120,
+    ollamaUrl: 'http://localhost:11434',
+    stream: true,
+  }, {
+    onStreamEvent: (event) => events.push(event),
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'http://localhost:11434/api/chat')
+      assert.equal(JSON.parse(options.body).stream, true)
+      return ndjsonResponse([
+        '{"message":{"content":"Local "},"done":false}',
+        '{"message":{"content":"answer"},"done":true,"done_reason":"stop","eval_count":2}',
+      ])
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.text, 'Local answer')
+  assert.deepEqual(events.map((event) => event.type), ['started', 'delta', 'delta', 'complete'])
+  assert.equal(events[2].text, 'answer')
 })
 
 test('an active workspace session is used by both Chat and provider-status requests', async () => {
@@ -1158,6 +1275,38 @@ test('AI endpoint returns normalized missing-auth, CORS, rate-limit, and accepte
   assert.equal(accepted.headers['Access-Control-Allow-Origin'], 'https://app.founderlab.test')
 })
 
+test('the protected AI endpoint proxies real provider SSE after auth and durable rate limiting', async () => {
+  const streamed = createResponseRecorder()
+  await aiHandler(createRequest({
+    headers: { authorization: 'Bearer verified-access-token', origin: 'https://app.founderlab.test' },
+    body: { provider: 'groq', model: 'openai/gpt-oss-120b', messages: [message('Stream safely')], stream: true },
+  }), streamed, {
+    env: { ...TEST_ENV, GROQ_API_KEY: 'server-only-key' },
+    fetchImpl: authenticatedFetch(async (url, options) => {
+      assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions')
+      const request = JSON.parse(options.body)
+      assert.equal(request.stream, true)
+      assert.equal(request.stream_options.include_usage, true)
+      return eventStreamResponse([
+        'data: {"choices":[{"delta":{"content":"Real "}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"stream"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}\n\n',
+        'data: [DONE]\n\n',
+      ])
+    }),
+    rateLimiter: allowRateLimit(),
+  })
+  assert.equal(streamed.statusCode, 200)
+  assert.equal(streamed.ended, true)
+  assert.match(streamed.headers['Content-Type'], /text\/event-stream/)
+  assert.equal(streamed.headers['Access-Control-Allow-Origin'], 'https://app.founderlab.test')
+  const responseText = streamed.chunks.join('')
+  assert.match(responseText, /"type":"started"/)
+  assert.match(responseText, /"text":"Real "/)
+  assert.match(responseText, /"text":"stream"/)
+  assert.match(responseText, /"type":"complete"/)
+  assert.equal(responseText.includes('server-only-key'), false)
+})
+
 test('Gemini uses the current GenerateContent contract and preserves a safe provider-specific 400', async () => {
   const accepted = createResponseRecorder()
   await aiHandler(createRequest({
@@ -1420,6 +1569,53 @@ test('Groq adapter preserves normalized options for structured internal AI reque
     groqProvider.execute({ request: { ...body }, env: {}, fetchImpl: async () => null }),
     { code: 'MISSING_CONFIGURATION' }
   )
+})
+
+test('Gemini and Anthropic provider streams preserve real text while Gemini avoids cumulative duplicate output', async () => {
+  const request = {
+    model: 'gemini-3.5-flash',
+    messages: [message('Stream a concise answer')],
+    maxTokens: 120,
+    system: '',
+  }
+  const geminiEvents = []
+  for await (const event of geminiProvider.stream({
+    request,
+    env: { GEMINI_API_KEY: 'server-only-key' },
+    fetchImpl: async (url, options) => {
+      assert.match(url, /:streamGenerateContent\?alt=sse$/)
+      assert.equal(JSON.parse(options.body).generationConfig.maxOutputTokens, 120)
+      return eventStreamResponse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}\n\n',
+        'data: {"candidates":[{"content":{"parts":[{"text":"Hello there"}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":2}}\n\n',
+      ])
+    },
+  })) geminiEvents.push(event)
+  assert.deepEqual(geminiEvents, [
+    { type: 'delta', text: 'Hello' },
+    { type: 'delta', text: ' there' },
+    { type: 'complete', usage: { candidatesTokenCount: 2 }, finishReason: 'STOP' },
+  ])
+
+  const anthropicEvents = []
+  for await (const event of anthropicProvider.stream({
+    request: { ...request, model: 'claude-sonnet-4-6' },
+    env: { ANTHROPIC_API_KEY: 'server-only-key' },
+    fetchImpl: async (_, options) => {
+      assert.equal(JSON.parse(options.body).stream, true)
+      return eventStreamResponse([
+        'event: content_block_delta\ndata: {"delta":{"text":"Warm "}}\n\n',
+        'event: content_block_delta\ndata: {"delta":{"text":"answer"}}\n\n',
+        'event: message_delta\ndata: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n',
+        'event: message_stop\ndata: {}\n\n',
+      ])
+    },
+  })) anthropicEvents.push(event)
+  assert.deepEqual(anthropicEvents, [
+    { type: 'delta', text: 'Warm ' },
+    { type: 'delta', text: 'answer' },
+    { type: 'complete', usage: { output_tokens: 2 }, finishReason: 'end_turn' },
+  ])
 })
 
 test('provider preferences self-heal invalid and malformed values while preserving dynamic Ollama names', () => {

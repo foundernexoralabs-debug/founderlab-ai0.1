@@ -227,6 +227,97 @@ function localRequestFailureCode(error, permissionState) {
   return 'OLLAMA_BROWSER_ACCESS_BLOCKED'
 }
 
+function emitStreamEvent(listener, event) {
+  try { listener?.(event) } catch { /* UI observers cannot interrupt a local model request. */ }
+}
+
+async function* readOllamaStreamChunks(body) {
+  if (!body) return
+  const decoder = new TextDecoder()
+  if (typeof body.getReader === 'function') {
+    const reader = body.getReader()
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        if (value) yield decoder.decode(value, { stream: true })
+      }
+      const tail = decoder.decode()
+      if (tail) yield tail
+    } finally {
+      reader.releaseLock?.()
+    }
+    return
+  }
+  if (typeof body[Symbol.asyncIterator] === 'function') {
+    for await (const value of body) {
+      if (value) yield typeof value === 'string' ? value : decoder.decode(value, { stream: true })
+    }
+    const tail = decoder.decode()
+    if (tail) yield tail
+  }
+}
+
+/**
+ * Ollama's native chat stream is newline-delimited JSON. We accumulate only
+ * text genuinely received from the local service and surface each delta to
+ * Chat immediately; there is no synthetic typewriter layer here.
+ */
+async function consumeOllamaChatStream(response, { provider, model, onStreamEvent } = {}) {
+  let pending = ''
+  let text = ''
+  let sawPayload = false
+  let finalPayload = null
+  emitStreamEvent(onStreamEvent, { type: 'started', provider, model })
+
+  const applyLine = (line) => {
+    if (!line.trim()) return
+    let payload
+    try {
+      payload = JSON.parse(line)
+    } catch {
+      const error = new Error('Ollama returned an invalid streaming response.')
+      error.partialText = text
+      throw error
+    }
+    sawPayload = true
+    const delta = typeof payload?.message?.content === 'string' ? payload.message.content : ''
+    if (delta) {
+      text += delta
+      emitStreamEvent(onStreamEvent, { type: 'delta', text: delta, totalText: text })
+    }
+    if (payload?.done === true) finalPayload = payload
+  }
+
+  try {
+    for await (const chunk of readOllamaStreamChunks(response?.body)) {
+      pending += chunk
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        applyLine(pending.slice(0, newline))
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf('\n')
+      }
+    }
+    if (pending.trim()) applyLine(pending)
+  } catch (error) {
+    error.partialText = error.partialText || text
+    throw error
+  }
+  if (!sawPayload || !text.trim() || !finalPayload) {
+    const error = new Error('Ollama returned an empty streaming response.')
+    error.partialText = text
+    throw error
+  }
+
+  const meta = {
+    usage: finalPayload?.eval_count ? { outputTokens: finalPayload.eval_count } : null,
+    finishReason: finalPayload?.done_reason || null,
+  }
+  emitStreamEvent(onStreamEvent, { type: 'complete', provider, model, meta })
+  return { text, ...meta }
+}
+
 export function isElectronOllamaAvailable(bridge) {
   return Boolean(resolveElectronBridge(bridge)?.isElectron)
 }
@@ -340,6 +431,7 @@ export async function requestOllama({
   maxTokens,
   temperature,
   ollamaUrl,
+  stream = false,
 }, {
   fetchImpl = globalThis.fetch,
   electronBridge,
@@ -347,6 +439,7 @@ export async function requestOllama({
   diagnosticFlow = 'chat',
   browserCompatibility,
   signal,
+  onStreamEvent,
 } = {}) {
   const base = normalizeOllamaUrl(ollamaUrl)
   const selectedModel = normalizeOllamaModelName(model)
@@ -427,7 +520,7 @@ export async function requestOllama({
       body: JSON.stringify({
         model: selectedModel,
         messages: fullMessages,
-        stream: false,
+        stream: Boolean(stream),
         options: { num_predict: maxTokens, ...(temperature !== undefined && { temperature }) },
       }),
       signal: combinedSignal(OLLAMA_CHAT_TIMEOUT_MS, signal),
@@ -440,6 +533,41 @@ export async function requestOllama({
       httpStatus: Number.isFinite(response?.status) ? response.status : null,
       permissionState: permissionState || 'not-supported',
     }
+    if (!response.ok) {
+      let data = null
+      try { data = await response.json() } catch { /* normalized below */ }
+      return completeRequest(createAIErrorResult({
+        provider: 'ollama',
+        model: selectedModel,
+        status: response.status,
+        code: response.status === 404 ? 'OLLAMA_MODEL_UNAVAILABLE' : response.status === 429 ? 'RATE_LIMITED' : 'OLLAMA_UNAVAILABLE',
+      }), diagnosticFlow, {
+        ...responseDiagnostic,
+        jsonParsed: Boolean(data),
+        failureStep: 'http-response',
+      })
+    }
+
+    if (stream) {
+      try {
+        const output = await consumeOllamaChatStream(response, { provider: 'ollama', model: selectedModel, onStreamEvent })
+        return completeRequest(createAIResult({
+          provider: 'ollama',
+          model: selectedModel,
+          text: output.text,
+          usage: output.usage,
+          finishReason: output.finishReason,
+        }), diagnosticFlow, { ...responseDiagnostic, jsonParsed: true })
+      } catch (error) {
+        const failure = createAIErrorResult({ provider: 'ollama', model: selectedModel, code: 'MALFORMED_RESPONSE' })
+        return completeRequest(error?.partialText ? { ...failure, partialText: error.partialText } : failure, diagnosticFlow, {
+          ...responseDiagnostic,
+          jsonParsed: false,
+          failureStep: 'stream-parse',
+        })
+      }
+    }
+
     let data
     try {
       data = await response.json()
@@ -448,18 +576,6 @@ export async function requestOllama({
         ...responseDiagnostic,
         jsonParsed: false,
         failureStep: 'json-parse',
-      })
-    }
-    if (!response.ok) {
-      return completeRequest(createAIErrorResult({
-        provider: 'ollama',
-        model: selectedModel,
-        status: response.status,
-        code: response.status === 404 ? 'OLLAMA_MODEL_UNAVAILABLE' : response.status === 429 ? 'RATE_LIMITED' : 'OLLAMA_UNAVAILABLE',
-      }), diagnosticFlow, {
-        ...responseDiagnostic,
-        jsonParsed: true,
-        failureStep: 'http-response',
       })
     }
     return completeRequest(createAIResult({

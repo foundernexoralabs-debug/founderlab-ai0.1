@@ -324,6 +324,9 @@ export function getOrchestratorGuidance(context) {
   }
   if (activeObjective) notes.push(`Current operational objective in this thread: “${activeObjective}”`)
   actionEvidence.map(evidenceLabel).filter(Boolean).forEach((label) => notes.push(`Verified thread evidence: ${label}`))
+  if (intent.isOperational) {
+    notes.push('For an operator-style reply, make the outcome concrete: label a recommendation or prepared handoff as such, and reserve “completed” or “verified” for explicit thread evidence. Do not present a plan as execution.')
+  }
   notes.push('If repository, project, deployment, task, or external workspace details are not present in this evidence, say they have not been inspected or are not confirmed. Offer the next safe inspection or handoff instead of implying completion.')
   return notes.join(' ')
 }

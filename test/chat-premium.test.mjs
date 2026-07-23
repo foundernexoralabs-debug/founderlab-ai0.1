@@ -75,6 +75,7 @@ import {
   normalizeMessageOrchestration,
   recordOrchestrationAction,
 } from '../src/features/chat/chatOrchestrator.js'
+import { getChatExecutionTransparency } from '../src/features/chat/chatExecutionTransparency.js'
 import {
   buildWorkspaceAwareness,
   getProjectAwareness,
@@ -590,6 +591,34 @@ test('Chat orchestration metadata persists only safe evidence and keeps complete
   ])
 })
 
+test('operator transparency labels a recommendation, handoff, and FounderLab-local completion without claiming external execution', () => {
+  const recommendation = getChatExecutionTransparency({
+    mode: 'planning',
+    operation: 'plan',
+    routing: { selected: { provider: 'gemini', model: 'gemini-3.5-flash', path: 'cloud' } },
+    actions: [],
+  })
+  assert.equal(recommendation.outcome.kind, 'recommendation')
+  assert.equal(recommendation.outcome.label, 'Plan prepared')
+  assert.match(recommendation.outcome.detail, /has not performed/i)
+  assert.equal(recommendation.intentLabel, 'Understanding: a planning request')
+  assert.equal(recommendation.route.label, 'Route: Cloud gemini · gemini-3.5-flash')
+
+  const handoff = getChatExecutionTransparency({
+    mode: 'operator', operation: 'handoff', actions: [{ id: 'builder', status: 'handoff-opened' }],
+  })
+  assert.equal(handoff.outcome.kind, 'handoff')
+  assert.match(handoff.outcome.detail, /no external work is confirmed/i)
+
+  const completed = getChatExecutionTransparency({
+    mode: 'operator', operation: 'capture', actions: [{ id: 'create-task', status: 'completed' }],
+  })
+  assert.equal(completed.outcome.kind, 'completed')
+  assert.equal(completed.outcome.label, 'Created a task in FounderLab')
+  assert.match(completed.nextStep, /recorded FounderLab action/i)
+  assert.equal(getChatExecutionTransparency({ mode: 'conversation', operation: 'explain', actions: [] }), null)
+})
+
 test('Project-aware Chat memory persists bounded working context without copying note bodies, project files, or raw answers', () => {
   const workspace = buildWorkspaceAwareness({
     projects: [{ id: 'builder-project', name: 'Coachly Landing', type: 'builder', files: [{ path: 'secret.tsx', content: 'never include' }], updated_at: '2026-07-23T10:00:00.000Z' }],
@@ -1027,6 +1056,10 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
+  assert.match(workspaceSource, /stream: true/)
+  assert.match(workspaceSource, /streamingReply/)
+  assert.match(workspaceSource, /partialText/)
+  assert.match(workspaceSource, /incomplete: true/)
   assert.match(workspaceSource, /finishRequested/)
   assert.match(workspaceSource, /startLiveCall/)
   assert.match(workspaceSource, /sendLiveCallTurn/)
@@ -1073,6 +1106,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(messageSource, /Best available browser voice/)
   assert.match(messageSource, /getChatUserInitials/)
   assert.match(messageSource, /ChatControlActions/)
+  assert.match(messageSource, /getChatExecutionTransparency/)
+  assert.match(messageSource, /Operator report/)
+  assert.match(messageSource, /Response interrupted/)
   assert.match(messageSource, /copyMessage/)
   assert.match(messageSource, /Copied/)
   assert.match(controlActionsSource, /Continue in FounderLab/)
