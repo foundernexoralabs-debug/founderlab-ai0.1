@@ -1,4 +1,5 @@
 import { getChatOrchestrationContext, getCompletedOrchestrationActions } from './chatOrchestrator.js'
+import { normalizeConnectorActionEvidence } from './chatConnectorFramework.js'
 
 export const CHAT_MEMORY_KEY = 'fl_chat_memory'
 
@@ -90,8 +91,9 @@ function cleanAction(action) {
   const status = safeText(action.status, 36)
   if (!id || !status) return null
   const resource = cleanResource(action.resource)
+  const connectorAction = normalizeConnectorActionEvidence(action.connectorAction)
   const at = typeof action.at === 'string' && !Number.isNaN(Date.parse(action.at)) ? action.at.slice(0, 40) : ''
-  return Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })
+  return Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(connectorAction ? { connectorAction } : {}), ...(at ? { at } : {}) })
 }
 
 function cleanThreadMemory(value) {

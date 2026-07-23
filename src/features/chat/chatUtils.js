@@ -11,6 +11,7 @@ import { getProjectAwareness, getProjectAwarenessGuidance } from './chatMemory.j
 import { getChatModelRouting, getChatModelRoutingGuidance } from './chatModelRouting.js'
 import { getChatExecutionBridge, getExecutionBridgeGuidance } from './chatExecutionBridge.js'
 import { getCapabilityBridgeGuidance, getChatCapabilityBridge } from './chatCapabilityBridge.js'
+import { getChatConnectorPlan, getConnectorPlanGuidance } from './chatConnectorFramework.js'
 import { getExecutionWorkflowGuidance } from './chatExecutionWorkflow.js'
 import { LIVE_CALL_MAX_OUTPUT_TOKENS } from './liveCallUtils.js'
 
@@ -124,8 +125,9 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     })
     const intent = orchestration.intent || classifyChatRequest('')
     const executionBridge = getChatExecutionBridge({ intent, projectAwareness, modelRouting })
-    const capabilityBridge = getChatCapabilityBridge({ intent, executionBridge, integrations })
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent, responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, executionWorkflow: orchestration.executionWorkflow, projectAwareness, modelRouting, executionBridge, capabilityBridge }
+    const connectorPlan = getChatConnectorPlan({ intent, executionBridge, executionWorkflow: orchestration.executionWorkflow, integrations })
+    const capabilityBridge = getChatCapabilityBridge({ intent, executionBridge, executionWorkflow: orchestration.executionWorkflow, integrations, connectorPlan })
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent, responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, executionWorkflow: orchestration.executionWorkflow, projectAwareness, modelRouting, executionBridge, connectorPlan, capabilityBridge }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
@@ -149,11 +151,20 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     projectAwareness,
     modelRouting,
   })
+  const connectorPlan = getChatConnectorPlan({
+    request: latestUser?.content,
+    intent,
+    executionBridge,
+    executionWorkflow: orchestration.executionWorkflow,
+    integrations,
+  })
   const capabilityBridge = getChatCapabilityBridge({
     request: latestUser?.content,
     intent,
     executionBridge,
+    executionWorkflow: orchestration.executionWorkflow,
     integrations,
+    connectorPlan,
   })
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
@@ -167,11 +178,12 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     projectAwareness,
     modelRouting,
     executionBridge,
+    connectorPlan,
     capabilityBridge,
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, executionWorkflow = null, projectAwareness = null, modelRouting = null, executionBridge = null, capabilityBridge = null } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, executionWorkflow = null, projectAwareness = null, modelRouting = null, executionBridge = null, connectorPlan = null, capabilityBridge = null } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -211,6 +223,10 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   const workflowGuidance = getExecutionWorkflowGuidance(executionWorkflow || orchestration?.workflow || orchestration?.executionWorkflow)
   if (workflowGuidance) {
     notes.push(`Current execution-workflow note: ${workflowGuidance}`)
+  }
+  const connectorGuidance = getConnectorPlanGuidance(connectorPlan)
+  if (connectorGuidance) {
+    notes.push(`Current connector-selection note: ${connectorGuidance}`)
   }
   const capabilityGuidance = getCapabilityBridgeGuidance(capabilityBridge)
   if (capabilityGuidance) {

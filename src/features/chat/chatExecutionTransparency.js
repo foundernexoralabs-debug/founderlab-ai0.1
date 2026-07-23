@@ -9,6 +9,7 @@ import { getExecutionBridgePresentation } from './chatExecutionBridge.js'
 import { getCapabilityBridgePresentation } from './chatCapabilityBridge.js'
 import { getExecutionWorkflowPresentation } from './chatExecutionWorkflow.js'
 import { getExecutionEvidenceTrail } from './chatExecutionTrail.js'
+import { getConnectorPlanPresentation } from './chatConnectorFramework.js'
 
 const ACTION_COPY = Object.freeze({
   'save-note': 'Saved a note in FounderLab',
@@ -91,6 +92,9 @@ const EXECUTION_STATE_COPY = Object.freeze({
   'ready-for-execution': Object.freeze({ label: 'Ready for execution', detail: 'A scoped path is prepared. The user still chooses the explicit next action.' }),
   'handoff-opened': Object.freeze({ label: 'Handoff opened', detail: 'The destination was opened; no downstream result is confirmed.' }),
   'external-integration-needed': Object.freeze({ label: 'External integration needed', detail: 'A connection is required before FounderLab can perform this external action.' }),
+  'connector-install-needed': Object.freeze({ label: 'Connector available to install', detail: 'This capability is available, but its connector is not installed. FounderLab did not attempt an external action.' }),
+  'connector-configuration-needed': Object.freeze({ label: 'Connector setup needed', detail: 'This connector is installed but not configured for this workspace. FounderLab did not attempt an external action.' }),
+  'connector-unavailable': Object.freeze({ label: 'Connector temporarily unavailable', detail: 'The connector is temporarily unavailable. FounderLab did not attempt an external action.' }),
   'authorization-needed': Object.freeze({ label: 'Authorization needed', detail: 'The connected integration is not authorized for this workflow.' }),
   'read-only-integration': Object.freeze({ label: 'Read-only boundary', detail: 'The integration can inspect state but cannot perform the requested mutation.' }),
   'waiting-for-approval': Object.freeze({ label: 'Waiting for approval', detail: 'The prepared change path requires explicit approval before any future repository mutation.' }),
@@ -102,12 +106,21 @@ const EXECUTION_STATE_COPY = Object.freeze({
  * A reusable status projection for future action logs. It deliberately keeps
  * execution evidence and external integration availability separate.
  */
-export function getChatExecutionState({ mode = 'conversation', actions = [], execution = null, capability = null, workflow = null } = {}) {
-  const externalRoute = capability?.state === 'external-integration-needed'
-    && ['email', 'calendar', 'external-app'].includes(capability.id)
-  if (externalRoute) return Object.freeze({ key: 'external-integration-needed', ...EXECUTION_STATE_COPY['external-integration-needed'] })
-  if (capability?.state === 'authorization-needed') return Object.freeze({ key: 'authorization-needed', ...EXECUTION_STATE_COPY['authorization-needed'] })
-  if (capability?.state === 'read-only-integration') return Object.freeze({ key: 'read-only-integration', ...EXECUTION_STATE_COPY['read-only-integration'] })
+export function getChatExecutionState({ mode = 'conversation', actions = [], execution = null, capability = null, connector = null, workflow = null } = {}) {
+  const connectorState = ['connector-install-needed', 'connector-configuration-needed', 'connector-unavailable', 'authorization-needed', 'read-only-integration', 'waiting-for-approval'].includes(connector?.state)
+    ? connector.state
+    : connector?.decision === 'integration-blocked'
+      ? 'external-integration-needed'
+      : connector?.decision === 'approval-required'
+        ? 'waiting-for-approval'
+        : ''
+  if (connectorState) return Object.freeze({ key: connectorState, ...EXECUTION_STATE_COPY[connectorState] })
+  const capabilityState = ['connector-install-needed', 'connector-configuration-needed', 'connector-unavailable', 'authorization-needed', 'read-only-integration'].includes(capability?.state)
+    ? capability.state
+    : capability?.state === 'external-integration-needed' && ['email', 'calendar', 'external-app'].includes(capability.id)
+      ? 'external-integration-needed'
+      : ''
+  if (capabilityState) return Object.freeze({ key: capabilityState, ...EXECUTION_STATE_COPY[capabilityState] })
 
   const completed = actions.find((action) => action.kind === 'completed')
   if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
@@ -147,6 +160,9 @@ export function getChatExecutionState({ mode = 'conversation', actions = [], exe
 }
 
 function getExecutionNextStep({ state, completed, handoff }) {
+  if (state.key === 'connector-install-needed') return 'Install or connect the required connector before FounderLab attempts this external action; it can still prepare guidance in Chat now.'
+  if (state.key === 'connector-configuration-needed') return 'Finish the connector setup before FounderLab attempts this external action; it can still prepare guidance in Chat now.'
+  if (state.key === 'connector-unavailable') return 'Retry when the connector is available, or use the recorded safe fallback. FounderLab did not attempt the external action.'
   if (state.key === 'external-integration-needed') return 'Connect the required integration before FounderLab attempts an external action; it can still prepare the draft or plan now.'
   if (state.key === 'authorization-needed') return 'Reconnect the integration with the required authorization before attempting the requested external action.'
   if (state.key === 'read-only-integration') return 'Use the available read-only inspection path, then obtain writable authorization before any branch or file mutation.'
@@ -173,9 +189,10 @@ export function getChatExecutionTransparency(orchestration) {
   const route = getRouteFact(orchestration.routing)
   const execution = getExecutionBridgePresentation(orchestration.execution)
   const capability = getCapabilityBridgePresentation(orchestration.capabilities)
+  const connector = getConnectorPlanPresentation(orchestration.connectorPlan)
   const workflow = getExecutionWorkflowPresentation(orchestration.workflow)
   const trail = getExecutionEvidenceTrail(orchestration)
-  const operational = mode !== 'conversation' || actions.length > 0 || execution || capability || workflow
+  const operational = mode !== 'conversation' || actions.length > 0 || execution || capability || connector || workflow
   if (!operational) return null
 
   const completed = actions.find((action) => action.kind === 'completed')
@@ -200,7 +217,7 @@ export function getChatExecutionTransparency(orchestration) {
   if (executionBlocked) outcome = { kind: 'execution-blocked', label: executionBlocked.label, detail: executionBlocked.detail }
   if (completed) outcome = { kind: 'completed', label: completed.label, detail: completed.detail }
 
-  const state = getChatExecutionState({ mode, actions, execution, capability, workflow })
+  const state = getChatExecutionState({ mode, actions, execution, capability, connector, workflow })
 
   return Object.freeze({
     mode,
@@ -210,6 +227,7 @@ export function getChatExecutionTransparency(orchestration) {
     route,
     execution,
     capability,
+    connector,
     workflow,
     trail,
     state,

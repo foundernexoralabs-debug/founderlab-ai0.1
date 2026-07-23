@@ -122,6 +122,15 @@ import {
   normalizeCapabilityBridge,
 } from '../src/features/chat/chatCapabilityBridge.js'
 import {
+  getChatConnectorPlan,
+  getConnectorActionEvidence,
+  getConnectorPlanGuidance,
+  getConnectorPlanPresentation,
+  getConnectorRegistryEntry,
+  normalizeConnectorActionEvidence,
+  normalizeConnectorPlan,
+} from '../src/features/chat/chatConnectorFramework.js'
+import {
   buildWorkspaceAwareness,
   getProjectAwareness,
   getProjectAwarenessGuidance,
@@ -609,7 +618,11 @@ test('Chat orchestration metadata persists only safe evidence and keeps complete
   const withTask = recordOrchestrationAction(withHandoff, { id: 'create-task', status: 'completed' })
   assert.deepEqual(getCompletedOrchestrationActions(withTask), [
     { id: 'github', status: 'handoff-opened' },
-    { id: 'create-task', status: 'completed' },
+    {
+      id: 'create-task',
+      status: 'completed',
+      connectorAction: { connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified' },
+    },
   ])
   assert.deepEqual(normalizeMessageOrchestration({
     mode: 'operator', operation: 'handoff', primaryTool: 'github', actions: [
@@ -632,7 +645,11 @@ test('Chat orchestration metadata persists only safe evidence and keeps complete
   }])
   assert.deepEqual(getCompletedOrchestrationActions(normalized[0].messages[0].orchestration), [
     { id: 'github', status: 'handoff-opened' },
-    { id: 'create-task', status: 'completed' },
+    {
+      id: 'create-task',
+      status: 'completed',
+      connectorAction: { connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified' },
+    },
   ])
 })
 
@@ -1050,17 +1067,17 @@ test('Capability bridge prepares real FounderLab routes and external integration
     primary: 'email',
     routes: [
       { id: 'tasks', kind: 'workspace', availability: 'available', action: 'create-task' },
-      { id: 'email', kind: 'integration', availability: 'not-connected' },
+      { id: 'email', kind: 'integration', availability: 'not-installed' },
     ],
   })
   assert.equal(getCapabilityBridgeHandoffAction(emailCapability), '')
   assert.deepEqual(getCapabilityBridgePresentation(emailCapability), {
     id: 'email',
-    state: 'external-integration-needed',
-    label: 'Capability route: Email connection needed',
-    detail: 'Email is not connected for this workspace. FounderLab did not attempt an external action.',
+    state: 'connector-install-needed',
+    label: 'Capability route: Email available to install',
+    detail: 'Email is not installed. FounderLab did not attempt an external action.',
   })
-  assert.match(getCapabilityBridgeGuidance(emailCapability), /not connected/i)
+  assert.match(getCapabilityBridgeGuidance(emailCapability), /not installed/i)
   assert.match(getCapabilityBridgeGuidance(emailCapability), /Do not claim/i)
   const emailContext = getChatRequestContext([{ role: 'user', content: 'Email the launch update to our client and turn it into a task.' }])
   assert.equal(emailContext.capabilityBridge.primary, 'email')
@@ -1082,14 +1099,15 @@ test('Capability bridge prepares real FounderLab routes and external integration
   assert.deepEqual(githubCapability, {
     version: 1,
     primary: 'github',
-    routes: [{ id: 'github', kind: 'integration', availability: 'connected', action: 'github' }],
+    routes: [{ id: 'github', kind: 'integration', availability: 'available', action: 'inspect-repo' }],
   })
-  assert.equal(getCapabilityBridgeHandoffAction(githubCapability), 'github')
+  assert.equal(getCapabilityBridgeHandoffAction(githubCapability), '')
 
   const readOnlyGithub = getChatCapabilityBridge({
     request: 'Audit this repository and prepare branch work.',
     intent: repositoryIntent,
     executionBridge: repositoryExecution,
+    executionWorkflow: { approval: 'approved', branch: { state: 'planned' } },
     integrations: { github: { connected: true, writable: false } },
   })
   assert.equal(getCapabilityBridgePresentation(readOnlyGithub).state, 'read-only-integration')
@@ -1100,6 +1118,7 @@ test('Capability bridge prepares real FounderLab routes and external integration
     request: 'Audit this repository and prepare branch work.',
     intent: repositoryIntent,
     executionBridge: repositoryExecution,
+    executionWorkflow: { approval: 'approved', branch: { state: 'planned' } },
     integrations: { github: { connected: true, authorization: 'denied' } },
   })
   assert.equal(getCapabilityBridgePresentation(unauthorizedGithub).state, 'authorization-needed')
@@ -1122,6 +1141,85 @@ test('Capability bridge prepares real FounderLab routes and external integration
   const orchestration = createAssistantOrchestration({ intent: emailIntent, capabilityBridge: emailCapability })
   assert.deepEqual(orchestration.capabilities, emailCapability)
   assert.deepEqual(normalizeMessageOrchestration({ ...orchestration, capabilities: { ...emailCapability, secret: 'never persist' } }).capabilities, emailCapability)
+})
+
+test('Connector framework unifies discovery, authorization, fallback, and safe action evidence without persisting credentials', () => {
+  assert.deepEqual(getConnectorRegistryEntry('github'), {
+    id: 'github', label: 'GitHub', kind: 'integration', scope: 'external',
+    actions: [
+      { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
+      { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
+    ],
+  })
+  assert.equal(getConnectorRegistryEntry('unknown'), null)
+
+  const request = 'Email the launch update to our client.'
+  const intent = classifyChatRequest(request)
+  const stateFor = (integrations, executionWorkflow = null) => getChatConnectorPlan({ request, intent, integrations, executionWorkflow })
+  const email = (plan) => plan.connectors.find((connector) => connector.id === 'email')
+
+  const notInstalled = stateFor()
+  assert.equal(notInstalled.decision, 'integration-blocked')
+  assert.equal(email(notInstalled).installation, 'not-installed')
+  assert.equal(email(notInstalled).actionReadiness, 'not-installed')
+  assert.deepEqual(notInstalled.fallback, { kind: 'manual', label: 'Continue in Chat with manual guidance' })
+  assert.match(getConnectorPlanGuidance(notInstalled), /available as a future connector|safe fallback/i)
+  assert.equal(getConnectorPlanPresentation(notInstalled).state, 'connector-install-needed')
+
+  const notConfigured = stateFor({ email: { installed: true, configured: false, token: 'never persist' } })
+  assert.equal(email(notConfigured).installation, 'installed')
+  assert.equal(email(notConfigured).configuration, 'not-configured')
+  assert.equal(email(notConfigured).actionReadiness, 'not-configured')
+
+  const unauthorized = stateFor({ email: { installed: true, configured: true, connected: false, authorization: 'not-authorized' } })
+  assert.equal(email(unauthorized).authorization, 'not-authorized')
+  assert.equal(email(unauthorized).actionReadiness, 'not-authorized')
+
+  const readOnly = stateFor({ email: { installed: true, configured: true, connected: true, writable: false } })
+  assert.equal(email(readOnly).access, 'read-only')
+  assert.equal(email(readOnly).actionReadiness, 'read-only')
+
+  const awaitingApproval = stateFor({ email: { installed: true, configured: true, connected: true, writable: true } })
+  assert.equal(awaitingApproval.decision, 'approval-required')
+  assert.equal(email(awaitingApproval).actionReadiness, 'approval-required')
+  const writable = stateFor(
+    { email: { installed: true, configured: true, connected: true, writable: true } },
+    { approval: 'approved', branch: { state: 'planned' } },
+  )
+  assert.equal(writable.decision, 'tool-required')
+  assert.equal(email(writable).access, 'writable')
+  assert.equal(email(writable).actionReadiness, 'available')
+
+  const unavailable = stateFor({ email: { installed: true, configured: true, connected: true, writable: true, temporarilyUnavailable: true } })
+  assert.equal(email(unavailable).health, 'temporarily-unavailable')
+  assert.equal(email(unavailable).actionReadiness, 'temporarily-unavailable')
+
+  const githubRequest = 'Audit this repository and prepare a fix branch.'
+  const githubIntent = classifyChatRequest(githubRequest)
+  const githubPlan = getChatConnectorPlan({
+    request: githubRequest,
+    intent: githubIntent,
+    executionBridge: { target: { surface: 'github', repository: { owner: 'acme', repo: 'founderlab' } }, branch: 'required' },
+    integrations: { github: { temporarilyUnavailable: true } },
+  })
+  assert.equal(githubPlan.primary, 'github')
+  assert.deepEqual(githubPlan.fallback, { kind: 'connector', id: 'code', label: 'Code AI is an acceptable fallback' })
+
+  const normalized = normalizeConnectorPlan({
+    ...writable,
+    secret: 'never persist',
+    connectors: [{ ...email(writable), account: 'private@example.com', token: 'never persist' }],
+  })
+  assert.equal(JSON.stringify(normalized).includes('private'), false)
+  assert.equal(JSON.stringify(normalized).includes('never persist'), false)
+  assert.deepEqual(getConnectorActionEvidence({ id: 'create-task', status: 'completed' }), {
+    connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified',
+  })
+  assert.equal(normalizeConnectorActionEvidence({ connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified', raw: 'never persist' }).raw, undefined)
+
+  const context = getChatRequestContext([{ role: 'user', content: request }])
+  assert.equal(context.connectorPlan.primary, 'email')
+  assert.match(getChatSystemPrompt(context), /Current connector-selection note/i)
 })
 
 test('operator transparency labels a recommendation, handoff, and FounderLab-local completion without claiming external execution', () => {
@@ -1157,7 +1255,7 @@ test('Execution-state reporting distinguishes planning, inspection, approval, ha
   const integration = getChatExecutionTransparency({
     mode: 'operator', operation: 'handoff', actions: [], capabilities: emailCapability,
   })
-  assert.equal(integration.state.key, 'external-integration-needed')
+  assert.equal(integration.state.key, 'connector-install-needed')
 
   const inspection = getChatExecutionState({
     mode: 'operator',
@@ -1235,7 +1333,10 @@ test('Project-aware Chat context carries a verified task and project forward wit
   }, [{
     id: 'thread-1', title: 'Onboarding', updated_at: '2026-07-23T10:00:00.000Z', messages: [{
       role: 'assistant', content: 'The onboarding task is ready.', orchestration: {
-        mode: 'operator', operation: 'capture', actions: [{ id: 'create-task', status: 'completed', resource: { type: 'task', id: 'task-1', title: 'Review onboarding flow' } }],
+        mode: 'operator', operation: 'capture', actions: [{
+          id: 'create-task', status: 'completed', resource: { type: 'task', id: 'task-1', title: 'Review onboarding flow' },
+          connectorAction: { connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified' },
+        }],
       },
     }],
   }], workspace, 'thread-1')
@@ -1248,6 +1349,9 @@ test('Project-aware Chat context carries a verified task and project forward wit
   })
   assert.equal(awareness.project.name, 'FounderLab')
   assert.equal(awareness.task.title, 'Review onboarding flow')
+  assert.deepEqual(awareness.actions[0].connectorAction, {
+    connector: 'tasks', action: 'create-task', state: 'completed', evidence: 'locally-verified',
+  })
   const guidance = getProjectAwarenessGuidance(awareness)
   assert.match(guidance, /does not confirm its files, repository, or deployment were inspected/i)
   assert.match(guidance, /not proof that work was verified/i)

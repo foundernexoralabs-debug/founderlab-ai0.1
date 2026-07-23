@@ -12,6 +12,11 @@ import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
 import { normalizeCapabilityBridge } from './chatCapabilityBridge.js'
 import { normalizeExecutionWorkflow } from './chatExecutionWorkflow.js'
 import {
+  getConnectorActionEvidence,
+  normalizeConnectorActionEvidence,
+  normalizeConnectorPlan,
+} from './chatConnectorFramework.js'
+import {
   isChatExecutionActionId,
   isChatExecutionActionStatus,
   isChatExecutionResourceType,
@@ -265,6 +270,14 @@ function getRecentExecutionWorkflow(messages) {
   return null
 }
 
+function getRecentConnectorPlan(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const plan = normalizeConnectorPlan(messages[index]?.orchestration?.connectorPlan)
+    if (plan) return plan
+  }
+  return null
+}
+
 function getActiveObjective(messages, latestUserIndex) {
   for (let index = latestUserIndex; index >= 0; index -= 1) {
     const message = messages[index]
@@ -290,7 +303,7 @@ export function getChatOrchestrationContext(messages = []) {
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
     const intent = classifyChatRequest('')
-    return Object.freeze({ intent, reference: Object.freeze({ referencesPrevious: false, explicitlyRequestsFullRepeat: false, artifactKind: '' }), activeObjective: '', actionEvidence: Object.freeze([]), executionWorkflow: null })
+    return Object.freeze({ intent, reference: Object.freeze({ referencesPrevious: false, explicitlyRequestsFullRepeat: false, artifactKind: '' }), activeObjective: '', actionEvidence: Object.freeze([]), executionWorkflow: null, connectorPlan: null })
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = getPreviousAssistant(items, latestUserIndex)
@@ -302,6 +315,7 @@ export function getChatOrchestrationContext(messages = []) {
     activeObjective: getActiveObjective(items, latestUserIndex),
     actionEvidence: getRecentActionEvidence(items),
     executionWorkflow: getRecentExecutionWorkflow(items),
+    connectorPlan: getRecentConnectorPlan(items),
   })
 }
 
@@ -362,6 +376,7 @@ export function createAssistantOrchestration(context) {
   const routing = normalizeRoutingEvidence(context?.modelRouting)
   const execution = normalizeExecutionBridgeEvidence(context?.executionBridge)
   const capabilities = normalizeCapabilityBridge(context?.capabilityBridge)
+  const connectorPlan = normalizeConnectorPlan(context?.connectorPlan)
   const workflow = normalizeExecutionWorkflow(context?.executionWorkflow)
   return Object.freeze({
     version: 1,
@@ -371,6 +386,7 @@ export function createAssistantOrchestration(context) {
     ...(intent.requiresPlan ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
     ...(execution && execution.readiness !== 'not-started' ? { execution } : {}),
+    ...(connectorPlan ? { connectorPlan } : {}),
     ...(capabilities ? { capabilities } : {}),
     ...(workflow ? { workflow } : {}),
     actions: Object.freeze([]),
@@ -429,6 +445,7 @@ export function normalizeMessageOrchestration(value) {
   const routing = normalizeRoutingEvidence(value.routing)
   const execution = normalizeExecutionBridgeEvidence(value.execution)
   const capabilities = normalizeCapabilityBridge(value.capabilities)
+  const connectorPlan = normalizeConnectorPlan(value.connectorPlan)
   const workflow = normalizeExecutionWorkflow(value.workflow)
   const actions = Array.isArray(value.actions)
     ? value.actions
@@ -437,7 +454,8 @@ export function normalizeMessageOrchestration(value) {
       .map((action) => {
         const resource = normalizeActionResource(action.resource)
         const at = normalizeActionTimestamp(action.at)
-        return Object.freeze({ id: action.id, status: action.status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })
+        const connectorAction = normalizeConnectorActionEvidence(action.connectorAction)
+        return Object.freeze({ id: action.id, status: action.status, ...(resource ? { resource } : {}), ...(connectorAction ? { connectorAction } : {}), ...(at ? { at } : {}) })
       })
     : []
   return Object.freeze({
@@ -448,22 +466,24 @@ export function normalizeMessageOrchestration(value) {
     ...(value.requiresPlan === true ? { requiresPlan: true } : {}),
     ...(routing ? { routing } : {}),
     ...(execution ? { execution } : {}),
+    ...(connectorPlan ? { connectorPlan } : {}),
     ...(capabilities ? { capabilities } : {}),
     ...(workflow ? { workflow } : {}),
     actions: Object.freeze(actions),
   })
 }
 
-export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource, workflow: actionWorkflow, at: actionAt } = {}) {
+export function recordOrchestrationAction(orchestration, { id, status, resource: actionResource, connectorAction: requestedConnectorAction, workflow: actionWorkflow, at: actionAt } = {}) {
   const current = normalizeMessageOrchestration(orchestration) || createAssistantOrchestration()
   if (!isChatExecutionActionId(id) || !isChatExecutionActionStatus(status)) return current
   const resource = normalizeActionResource(actionResource)
+  const connectorAction = normalizeConnectorActionEvidence(requestedConnectorAction) || getConnectorActionEvidence({ id, status })
   const at = normalizeActionTimestamp(actionAt)
   const workflow = normalizeExecutionWorkflow(actionWorkflow) || current.workflow
   const duplicate = current.actions.some((action) => action.id === id && action.status === status && action.resource?.id === resource?.id)
   const actions = duplicate
     ? current.actions
-    : [...current.actions, Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(at ? { at } : {}) })].slice(-MAX_ACTION_EVIDENCE)
+    : [...current.actions, Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(connectorAction ? { connectorAction } : {}), ...(at ? { at } : {}) })].slice(-MAX_ACTION_EVIDENCE)
   return Object.freeze({ ...current, ...(workflow ? { workflow } : {}), actions: Object.freeze(actions) })
 }
 

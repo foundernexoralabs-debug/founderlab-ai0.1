@@ -199,7 +199,18 @@ export function ChatMessage({
                   </span>
                 </p>
               )}
-              {operatorReport.capability && <p><b>{operatorReport.capability.label}</b><br />{operatorReport.capability.detail}</p>}
+              {operatorReport.connector ? (
+                <p>
+                  <b>{operatorReport.connector.label}</b><br />
+                  {operatorReport.connector.detail}<br />
+                  <span className="fl-chat-operator-report-next">
+                    Best tool: {operatorReport.connector.connector} · {operatorReport.connector.action} · {operatorReport.connector.readiness}<br />
+                    Fallback: {operatorReport.connector.fallback}
+                  </span>
+                </p>
+              ) : operatorReport.capability ? (
+                <p><b>{operatorReport.capability.label}</b><br />{operatorReport.capability.detail}</p>
+              ) : null}
               {operatorReport.route && <p><b>{operatorReport.route.label}</b><br />{operatorReport.route.detail}</p>}
               {operatorReport.trail?.entries?.length ? (
                 <p>

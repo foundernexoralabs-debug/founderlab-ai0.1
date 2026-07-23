@@ -313,7 +313,9 @@ export function ChatWorkspace({ user }) {
         hasImage,
       },
       integrations: {
-        github: { connected: Boolean(getGithubToken()) },
+        // Token presence is configuration evidence only. Write authorization
+        // is verified by GitHub at the explicit branch action, never assumed.
+        github: { configured: Boolean(getGithubToken()), connected: Boolean(getGithubToken()) },
       },
     }
   }
