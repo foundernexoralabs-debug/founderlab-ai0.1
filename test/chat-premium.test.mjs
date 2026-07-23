@@ -93,17 +93,23 @@ import {
 import {
   approveExecutionWorkflow,
   applyExecutionWorkflowEvidence,
+  canApplyApprovedFileChange,
   canCreateApprovedBranchAction,
   createExecutionWorkflow,
   formatExecutionApprovalReport,
   formatExecutionBlockedReport,
   formatExecutionBranchCreatedReport,
+  formatExecutionFileChangeReport,
+  formatExecutionReviewReadyReport,
+  formatExecutionValidationReport,
   formatExecutionWorkflowReport,
   getExecutionWorkflowGuidance,
   getExecutionWorkflowPresentation,
   normalizeExecutionWorkflow,
   recordExecutionWorkflowBlock,
   recordExecutionWorkflowBranchCreated,
+  recordExecutionWorkflowFileChange,
+  recordExecutionWorkflowMergeReadiness,
   recordExecutionWorkflowReviewReadiness,
   recordExecutionWorkflowValidation,
   retryExecutionWorkflow,
@@ -113,6 +119,15 @@ import {
   getGithubBranchExecutionCapability,
   getGithubBranchExecutionErrorPresentation,
 } from '../src/features/chat/githubBranchExecutor.js'
+import {
+  applyGithubFileChange,
+  getGithubFileExecutionErrorPresentation,
+  getGithubRepositoryFile,
+} from '../src/features/chat/githubFileExecutor.js'
+import {
+  getGithubCommitValidation,
+  getGithubValidationErrorPresentation,
+} from '../src/features/chat/githubValidationExecutor.js'
 import { getExecutionEvidenceTrail } from '../src/features/chat/chatExecutionTrail.js'
 import {
   getCapabilityBridgeGuidance,
@@ -129,6 +144,7 @@ import {
   getConnectorRegistryEntry,
   normalizeConnectorActionEvidence,
   normalizeConnectorPlan,
+  refreshConnectorPlanForExecution,
 } from '../src/features/chat/chatConnectorFramework.js'
 import {
   buildWorkspaceAwareness,
@@ -1005,15 +1021,31 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   assert.equal(branchCreated.execution, 'branch-created')
   assert.equal(branchCreated.capability.authorization, 'writable')
   assert.match(formatExecutionBranchCreatedReport(branchCreated), /GitHub confirmed branch creation/i)
+  assert.equal(canApplyApprovedFileChange(branchCreated), false)
+  assert.equal(canApplyApprovedFileChange(branchCreated, {
+    inspectionRecorded: true,
+    branchCreatedRecorded: true,
+    approvalRecorded: true,
+  }), true)
+  const changed = recordExecutionWorkflowFileChange(branchCreated, {
+    path: 'src/App.jsx', commitSha: 'abc123def4567', source: 'github-api',
+  })
+  assert.equal(changed.change.state, 'applied')
+  assert.deepEqual(changed.change.appliedFiles, ['src/App.jsx'])
+  assert.match(formatExecutionFileChangeReport(changed), /GitHub confirmed this one-file commit/i)
 
-  const validation = recordExecutionWorkflowValidation(branchCreated, {
+  const validation = recordExecutionWorkflowValidation(changed, {
     source: 'secure-executor', tests: 'passed', build: 'passed', report: 'passed',
   })
   const review = recordExecutionWorkflowReviewReadiness(validation)
-  assert.equal(review.review, 'ready-to-merge')
+  assert.equal(review.review, 'ready-for-review')
   assert.equal(review.execution, 'reported')
+  assert.match(formatExecutionValidationReport(validation), /ready for an explicit human review/i)
+  assert.match(formatExecutionReviewReadyReport(review), /No pull request or merge/i)
+  assert.equal(recordExecutionWorkflowMergeReadiness(review, { source: 'approved-review' }).review, 'ready-to-merge')
+  assert.equal(recordExecutionWorkflowMergeReadiness(review, { source: 'untrusted' }), null)
 
-  const failedValidation = recordExecutionWorkflowValidation(branchCreated, {
+  const failedValidation = recordExecutionWorkflowValidation(changed, {
     source: 'secure-executor', tests: 'passed', build: 'failed', report: 'passed',
   })
   assert.equal(failedValidation.execution, 'blocked')
@@ -1043,6 +1075,83 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   )
 })
 
+test('Approved GitHub file execution reads one bounded candidate, commits it, and preserves conflict evidence', async () => {
+  const repository = { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' }
+  const initial = 'export const answer = 1\n'
+  const requests = []
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, options })
+    if (options.method === 'PUT') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: { path: 'src/answer.js' }, commit: { sha: 'fedcba1234567' } }),
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ path: 'src/answer.js', sha: 'abcdef1234567', encoding: 'base64', content: Buffer.from(initial).toString('base64') }),
+    }
+  }
+  const loaded = await getGithubRepositoryFile({ token: 'session-token', repository, branch: 'founderlab/fix-chat', path: 'src/answer.js', fetchImpl })
+  assert.equal(loaded.content, initial)
+  assert.equal(loaded.sha, 'abcdef1234567')
+  const committed = await applyGithubFileChange({
+    token: 'session-token', repository, branch: 'founderlab/fix-chat', path: 'src/answer.js', content: 'export const answer = 2\n', expectedSha: loaded.sha, commitMessage: 'Fix answer', fetchImpl,
+  })
+  assert.equal(committed.commitSha, 'fedcba1234567')
+  assert.equal(JSON.stringify(committed).includes('session-token'), false)
+  assert.equal(requests.length, 2)
+  assert.match(requests[0].options.headers.Authorization, /^Bearer /)
+  const body = JSON.parse(requests[1].options.body)
+  assert.deepEqual({ message: body.message, sha: body.sha, branch: body.branch }, { message: 'Fix answer', sha: 'abcdef1234567', branch: 'founderlab/fix-chat' })
+  assert.equal(Buffer.from(body.content, 'base64').toString('utf8'), 'export const answer = 2\n')
+
+  let unsafeRequested = false
+  await assert.rejects(
+    () => getGithubRepositoryFile({ token: 'session-token', repository, branch: 'main', path: '../.env', fetchImpl: async () => { unsafeRequested = true; return { ok: true, json: async () => ({}) } } }),
+    (error) => error?.code === 'execution-unavailable',
+  )
+  assert.equal(unsafeRequested, false)
+  await assert.rejects(
+    () => applyGithubFileChange({ token: 'session-token', repository, branch: 'main', path: 'src/answer.js', content: 'next', expectedSha: 'abcdef1234567', commitMessage: 'Update', fetchImpl: async () => ({ ok: false, status: 422, json: async () => ({}) }) }),
+    (error) => error?.code === 'file-change-conflict',
+  )
+  await assert.rejects(
+    () => applyGithubFileChange({ token: 'session-token', repository, branch: 'main', path: 'src/answer.js', content: 'next', expectedSha: 'abcdef1234567', commitMessage: 'Update', fetchImpl: async () => { throw new Error('network lost') } }),
+    (error) => error?.code === 'partial-execution',
+  )
+  assert.match(getGithubFileExecutionErrorPresentation({ code: 'partial-execution' }), /may have changed/i)
+})
+
+test('GitHub validation records native check evidence without dispatching or inventing a test/build run', async () => {
+  const result = await getGithubCommitValidation({
+    token: 'session-token',
+    repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' },
+    commitSha: 'fedcba1234567',
+    fetchImpl: async (url, options) => {
+      assert.match(url, /check-runs\?per_page=24$/)
+      assert.match(options.headers.Authorization, /^Bearer /)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ check_runs: [
+          { name: 'unit tests', status: 'completed', conclusion: 'success' },
+          { name: 'production build', status: 'completed', conclusion: 'success' },
+        ] }),
+      }
+    },
+  })
+  assert.deepEqual(result.validation, { tests: 'passed', build: 'passed', report: 'passed' })
+  assert.equal(result.checks.length, 2)
+  await assert.rejects(
+    () => getGithubCommitValidation({ token: 'session-token', repository: result.repository, commitSha: result.commitSha, fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({}) }) }),
+    (error) => error?.code === 'github-permission-denied',
+  )
+  assert.match(getGithubValidationErrorPresentation({ code: 'execution-unavailable' }), /No validation result was recorded/i)
+})
+
 test('Execution evidence trail keeps inspected, planned, approved, blocked, and externally verified branch states distinct', () => {
   const trail = getExecutionEvidenceTrail({
     actions: [
@@ -1050,9 +1159,12 @@ test('Execution evidence trail keeps inspected, planned, approved, blocked, and 
       { id: 'prepare-branch', status: 'branch-prepared', at: '2026-07-23T14:01:00.000Z', resource: { title: 'founderlab/fix-chat' } },
       { id: 'approve-execution', status: 'approval-recorded', at: '2026-07-23T14:02:00.000Z' },
       { id: 'create-branch', status: 'branch-created', at: '2026-07-23T14:03:00.000Z', resource: { title: 'founderlab/fix-chat' } },
+      { id: 'apply-file-change', status: 'change-applied', at: '2026-07-23T14:04:00.000Z', resource: { title: 'src/App.jsx' } },
+      { id: 'validate', status: 'validation-passed', at: '2026-07-23T14:05:00.000Z', resource: { title: 'fedcba1234567' } },
+      { id: 'review', status: 'review-ready', at: '2026-07-23T14:06:00.000Z', resource: { title: 'founderlab/fix-chat' } },
     ],
   })
-  assert.deepEqual(trail.entries.map((entry) => entry.label), ['Repository inspected', 'Branch plan prepared', 'Execution approval recorded', 'Branch created'])
+  assert.deepEqual(trail.entries.map((entry) => entry.label), ['Repository inspected', 'Branch plan prepared', 'Execution approval recorded', 'Branch created', 'File change applied', 'Validation passed', 'Review ready'])
   assert.equal(trail.entries.at(-1).resource, 'founderlab/fix-chat')
 })
 
@@ -1149,6 +1261,8 @@ test('Connector framework unifies discovery, authorization, fallback, and safe a
     actions: [
       { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
       { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
+      { id: 'apply-file-change', label: 'Apply reviewed file change', access: 'write', approval: 'required' },
+      { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
     ],
   })
   assert.equal(getConnectorRegistryEntry('unknown'), null)
@@ -1204,6 +1318,23 @@ test('Connector framework unifies discovery, authorization, fallback, and safe a
   })
   assert.equal(githubPlan.primary, 'github')
   assert.deepEqual(githubPlan.fallback, { kind: 'connector', id: 'code', label: 'Code AI is an acceptable fallback' })
+
+  const approvedGithubPlan = getChatConnectorPlan({
+    request: githubRequest,
+    intent: githubIntent,
+    executionBridge: { target: { surface: 'github', repository: { owner: 'acme', repo: 'founderlab' } }, branch: 'required' },
+    executionWorkflow: { approval: 'approved', branch: { state: 'planned' }, capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' } },
+    integrations: { github: { configured: true, connected: true, authorization: 'authorized', writable: true } },
+  })
+  assert.equal(approvedGithubPlan.connectors.find((connector) => connector.id === 'github').action, 'create-branch')
+  const changeReadyPlan = refreshConnectorPlanForExecution(approvedGithubPlan, {
+    approval: 'approved', branch: { state: 'created' }, change: { state: 'prepared' }, capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' },
+  })
+  assert.equal(changeReadyPlan.connectors.find((connector) => connector.id === 'github').action, 'apply-file-change')
+  const validationReadyPlan = refreshConnectorPlanForExecution(changeReadyPlan, {
+    approval: 'approved', branch: { state: 'created' }, change: { state: 'applied' }, capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' },
+  })
+  assert.equal(validationReadyPlan.connectors.find((connector) => connector.id === 'github').action, 'validate')
 
   const normalized = normalizeConnectorPlan({
     ...writable,
@@ -1490,6 +1621,43 @@ test('Chat control center offers only explicit, real workspace actions and bound
   ]
   assert.deepEqual(getAssistantControlActions(approvedAssistant, 1).map((action) => action.id), ['connect-github'])
   assert.deepEqual(getAssistantControlActions(approvedAssistant, 1, { githubConnected: true }).map((action) => action.id), ['create-branch'])
+
+  const createdWorkflow = recordExecutionWorkflowBranchCreated(approvedWorkflow)
+  const createdAssistant = [approvedAssistant[0], {
+    ...approvedAssistant[1],
+    orchestration: {
+      ...approvedAssistant[1].orchestration,
+      workflow: createdWorkflow,
+      actions: [...approvedAssistant[1].orchestration.actions, { id: 'create-branch', status: 'branch-created' }],
+    },
+  }]
+  assert.deepEqual(getAssistantControlActions(createdAssistant, 1, { githubConnected: true }).map((action) => action.id), ['apply-file-change'])
+
+  const changedWorkflow = recordExecutionWorkflowFileChange(createdWorkflow, {
+    path: 'src/App.jsx', commitSha: 'abcdef1234567', source: 'github-api',
+  })
+  const changedAssistant = [approvedAssistant[0], {
+    ...approvedAssistant[1],
+    orchestration: {
+      ...approvedAssistant[1].orchestration,
+      workflow: changedWorkflow,
+      actions: [...createdAssistant[1].orchestration.actions, { id: 'apply-file-change', status: 'change-applied' }],
+    },
+  }]
+  assert.deepEqual(getAssistantControlActions(changedAssistant, 1, { githubConnected: true }).map((action) => action.id), ['validate'])
+
+  const validatedWorkflow = recordExecutionWorkflowValidation(changedWorkflow, {
+    tests: 'passed', build: 'passed', report: 'passed', source: 'github-api',
+  })
+  const validatedAssistant = [approvedAssistant[0], {
+    ...approvedAssistant[1],
+    orchestration: {
+      ...approvedAssistant[1].orchestration,
+      workflow: validatedWorkflow,
+      actions: [...changedAssistant[1].orchestration.actions, { id: 'validate', status: 'validation-passed' }],
+    },
+  }]
+  assert.deepEqual(getAssistantControlActions(validatedAssistant, 1, { githubConnected: true }).map((action) => action.id), ['review'])
 
   const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
   assert.match(builderPayload.desc, /FounderLab Chat brief/)
@@ -1806,6 +1974,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const voiceSessionSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatVoiceSession.jsx'), 'utf8')
   const controlActionsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatControlActions.jsx'), 'utf8')
   const controlUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/chatControlCenterUtils.js'), 'utf8')
+  const repositoryChangeSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatRepositoryChangeDialog.jsx'), 'utf8')
+  const fileExecutorSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/githubFileExecutor.js'), 'utf8')
+  const validationExecutorSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/githubValidationExecutor.js'), 'utf8')
   const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
   const liveCallSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatLiveCallSurface.jsx'), 'utf8')
   const liveCallUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/liveCallUtils.js'), 'utf8')
@@ -1828,6 +1999,9 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /approveRepositoryExecutionFromChat/)
   assert.match(workspaceSource, /createApprovedRepositoryBranchFromChat/)
   assert.match(workspaceSource, /createGithubBranch/)
+  assert.match(workspaceSource, /ChatRepositoryChangeDialog/)
+  assert.match(workspaceSource, /applyGithubFileChange/)
+  assert.match(workspaceSource, /getGithubCommitValidation/)
   assert.match(workspaceSource, /No branch or files changed/)
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
@@ -1895,7 +2069,13 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(controlUtilsSource, /Prepare execution workflow/)
   assert.match(controlUtilsSource, /Record execution approval/)
   assert.match(controlUtilsSource, /Create approved branch/)
+  assert.match(controlUtilsSource, /Apply reviewed file change/)
+  assert.match(controlUtilsSource, /Check GitHub validation/)
   assert.match(controlUtilsSource, /Connect GitHub/)
+  assert.match(repositoryChangeSource, /Review one file before committing/)
+  assert.match(repositoryChangeSource, /aria-modal="true"/)
+  assert.match(fileExecutorSource, /one existing, inspected text file/)
+  assert.match(validationExecutorSource, /not dispatch arbitrary workflows/)
   assert.match(appSource, /flConsumeHandoff\('youtube'\)/)
   assert.match(appSource, /Content brief ready from Chat/)
   assert.match(voiceSessionSource, /fl-chat-voice-dock/)

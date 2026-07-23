@@ -89,6 +89,34 @@ const CONTROL_ACTIONS = Object.freeze({
     icon: '⎇',
     completedLabel: 'Created',
   }),
+  'apply-file-change': Object.freeze({
+    id: 'apply-file-change',
+    label: 'Apply reviewed file change',
+    detail: 'Review and commit one inspected candidate file',
+    icon: '✦',
+    completedLabel: 'Applied',
+  }),
+  validate: Object.freeze({
+    id: 'validate',
+    label: 'Check GitHub validation',
+    detail: 'Read native checks for the committed change',
+    icon: '✓',
+    completedLabel: 'Checked',
+  }),
+  review: Object.freeze({
+    id: 'review',
+    label: 'Prepare review summary',
+    detail: 'Record a review-ready change only after validation',
+    icon: '◈',
+    completedLabel: 'Ready',
+  }),
+  'retry-execution': Object.freeze({
+    id: 'retry-execution',
+    label: 'Restore retry path',
+    detail: 'Clear a retryable execution block without repeating work',
+    icon: '↻',
+    completedLabel: 'Restored',
+  }),
   'connect-github': Object.freeze({
     id: 'connect-github',
     label: 'Connect GitHub',
@@ -148,9 +176,15 @@ export function getAssistantControlActions(messages, assistantIndex, { githubCon
   const branchPrepared = completed.get('prepare-branch') === 'branch-prepared'
   const executionPrepared = completed.get('prepare-execution') === 'execution-prepared'
   const approvalRecorded = completed.get('approve-execution') === 'approval-recorded'
-  const branchRequired = assistant.orchestration?.execution?.branch === 'required'
   const workflow = normalizeExecutionWorkflow(assistant.orchestration?.workflow)
-  if (inspectionCompleted) {
+  const fileChangeApplied = completed.get('apply-file-change') === 'change-applied'
+  const validationComplete = [workflow?.validation?.tests, workflow?.validation?.build, workflow?.validation?.report]
+    .every((state) => ['passed', 'not-needed'].includes(state))
+  const branchRequired = assistant.orchestration?.execution?.branch === 'required'
+  if (workflow?.block?.retryable) {
+    actions = [CONTROL_ACTIONS['retry-execution']]
+  }
+  if (!workflow?.block?.retryable && inspectionCompleted) {
     actions = actions.filter((action) => action.id !== 'inspect-repo')
     if (branchRequired && !branchPrepared) {
       actions.push(CONTROL_ACTIONS['prepare-branch'])
@@ -164,6 +198,12 @@ export function getAssistantControlActions(messages, assistantIndex, { githubCon
       } else if (!githubConnected && !workflow.block) {
         actions.push(CONTROL_ACTIONS['connect-github'])
       }
+    } else if (branchRequired && approvalRecorded && workflow?.branch?.state === 'created' && workflow.change.state === 'prepared' && !workflow.block) {
+      actions.push(githubConnected ? CONTROL_ACTIONS['apply-file-change'] : CONTROL_ACTIONS['connect-github'])
+    } else if (branchRequired && fileChangeApplied && workflow?.change?.state === 'applied' && !workflow.block && !validationComplete) {
+      actions.push(githubConnected ? CONTROL_ACTIONS.validate : CONTROL_ACTIONS['connect-github'])
+    } else if (branchRequired && fileChangeApplied && workflow?.change?.state === 'applied' && !workflow.block && validationComplete && workflow.review === 'awaiting-executor') {
+      actions.push(CONTROL_ACTIONS.review)
     }
   }
   const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)
@@ -172,10 +212,16 @@ export function getAssistantControlActions(messages, assistantIndex, { githubCon
   if (continuationAction && !actions.some((action) => action.id === continuationAction) && CONTROL_ACTIONS[continuationAction]) {
     actions.push(CONTROL_ACTIONS[continuationAction])
   }
+  const isCompleted = (action) => {
+    const status = completed.get(action.id)
+    if (action.id === 'validate') return ['validation-passed', 'validation-failed'].includes(status)
+    if (action.id === 'review') return status === 'review-ready'
+    return completed.has(action.id)
+  }
   return actions.slice(0, 2).map((action) => Object.freeze({
     ...action,
     request,
-    ...(completed.has(action.id) ? { completed: true, completionStatus: completed.get(action.id) } : {}),
+    ...(isCompleted(action) ? { completed: true, completionStatus: completed.get(action.id) } : {}),
   }))
 }
 

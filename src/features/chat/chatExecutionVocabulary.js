@@ -16,9 +16,11 @@ const ACTION_IDS = Object.freeze([
   'prepare-execution',
   'approve-execution',
   'create-branch',
+  'apply-file-change',
   'validate',
   'review',
   'merge',
+  'retry-execution',
   'connect-github',
 ])
 
@@ -30,8 +32,11 @@ const ACTION_STATUSES = Object.freeze([
   'execution-prepared',
   'approval-recorded',
   'branch-created',
+  'change-applied',
   'execution-blocked',
   'execution-cancelled',
+  'execution-retried',
+  'validation-recorded',
   'validation-passed',
   'validation-failed',
   'review-ready',
@@ -39,7 +44,7 @@ const ACTION_STATUSES = Object.freeze([
   'merge-not-ready',
 ])
 
-const RESOURCE_TYPES = Object.freeze(['task', 'note', 'project', 'repository', 'branch'])
+const RESOURCE_TYPES = Object.freeze(['task', 'note', 'project', 'repository', 'branch', 'file', 'commit'])
 
 // Shared connector/operator vocabulary. Connector implementations describe
 // their runtime through these terms instead of inventing per-app labels.

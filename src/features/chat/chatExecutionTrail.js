@@ -14,11 +14,16 @@ const EVENT_COPY = Object.freeze({
   'create-branch:branch-created': Object.freeze({ phase: 'Branch', label: 'Branch created', detail: 'GitHub confirmed branch creation; no files, commits, tests, or build are implied.' }),
   'create-branch:execution-blocked': Object.freeze({ phase: 'Branch', label: 'Branch action blocked', detail: 'The branch action did not complete. Review the scoped recovery state.' }),
   'create-branch:execution-cancelled': Object.freeze({ phase: 'Branch', label: 'Branch action cancelled', detail: 'No completed branch action is recorded.' }),
-  'validate:validation-passed': Object.freeze({ phase: 'Validate', label: 'Validation passed', detail: 'A future executor recorded validation evidence.' }),
-  'validate:validation-failed': Object.freeze({ phase: 'Validate', label: 'Validation failed', detail: 'A future executor recorded a failed validation result.' }),
-  'review:review-ready': Object.freeze({ phase: 'Review', label: 'Review ready', detail: 'A future executor recorded review-ready evidence.' }),
-  'merge:merge-ready': Object.freeze({ phase: 'Merge', label: 'Merge ready', detail: 'A future executor recorded merge-ready evidence; it does not mean a merge occurred.' }),
+  'apply-file-change:change-applied': Object.freeze({ phase: 'Change', label: 'File change applied', detail: 'GitHub confirmed a one-file commit on the approved branch.' }),
+  'apply-file-change:execution-blocked': Object.freeze({ phase: 'Change', label: 'File change blocked', detail: 'No successful file change is recorded. Review the scoped recovery state.' }),
+  'validate:validation-recorded': Object.freeze({ phase: 'Validate', label: 'Validation still pending', detail: 'GitHub validation was read, but required completed evidence is still missing.' }),
+  'validate:validation-passed': Object.freeze({ phase: 'Validate', label: 'Validation passed', detail: 'GitHub supplied all required completed validation evidence.' }),
+  'validate:validation-failed': Object.freeze({ phase: 'Validate', label: 'Validation failed', detail: 'GitHub supplied a failed validation result.' }),
+  'validate:execution-blocked': Object.freeze({ phase: 'Validate', label: 'Validation check blocked', detail: 'FounderLab could not read a complete GitHub validation result.' }),
+  'review:review-ready': Object.freeze({ phase: 'Review', label: 'Review ready', detail: 'The committed change and validation evidence are ready for human review; no merge is implied.' }),
+  'merge:merge-ready': Object.freeze({ phase: 'Merge', label: 'Merge ready', detail: 'An explicit future review record marked this merge-ready; it does not mean a merge occurred.' }),
   'merge:merge-not-ready': Object.freeze({ phase: 'Merge', label: 'Not ready to merge', detail: 'Review, validation, or approval requirements remain unresolved.' }),
+  'retry-execution:execution-retried': Object.freeze({ phase: 'Recovery', label: 'Retry path restored', detail: 'A retryable block was cleared. No new external action is claimed.' }),
 })
 
 function timestamp(value) {

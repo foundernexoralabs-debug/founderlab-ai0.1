@@ -24,6 +24,7 @@ import { ChatConfirmDialog } from './ChatConfirmDialog'
 import { ChatHistory } from './ChatHistory'
 import { ChatLiveCallSurface } from './ChatLiveCallSurface'
 import { ChatMessage, ChatTypingIndicator } from './ChatMessage'
+import { ChatRepositoryChangeDialog } from './ChatRepositoryChangeDialog'
 import { ChatProviderSwitcher } from './ChatProviderSwitcher'
 import { getChatUIPreferences, persistChatUIPreferences } from './chatPreferences'
 import { getChatProviderPresentation } from './chatProviderUtils'
@@ -52,21 +53,38 @@ import {
 } from './chatRepositoryInspection'
 import {
   approveExecutionWorkflow,
+  canApplyApprovedFileChange,
   canCreateApprovedBranchAction,
   createExecutionWorkflow,
   formatExecutionBlockedReport,
   formatExecutionBranchCreatedReport,
   formatExecutionApprovalReport,
+  formatExecutionFileChangeReport,
+  formatExecutionReviewReadyReport,
+  formatExecutionValidationReport,
   formatExecutionWorkflowReport,
   normalizeExecutionWorkflow,
   recordExecutionWorkflowBlock,
   recordExecutionWorkflowBranchCreated,
+  recordExecutionWorkflowFileChange,
+  recordExecutionWorkflowReviewReadiness,
+  recordExecutionWorkflowValidation,
+  retryExecutionWorkflow,
 } from './chatExecutionWorkflow'
 import {
   createGithubBranch,
   getGithubBranchExecutionCapability,
   getGithubBranchExecutionErrorPresentation,
 } from './githubBranchExecutor'
+import {
+  applyGithubFileChange,
+  getGithubFileExecutionErrorPresentation,
+  getGithubRepositoryFile,
+} from './githubFileExecutor'
+import {
+  getGithubCommitValidation,
+  getGithubValidationErrorPresentation,
+} from './githubValidationExecutor'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
@@ -92,6 +110,7 @@ export function ChatWorkspace({ user }) {
   const [renameValue, setRenameValue] = useState('')
   const [editingMessageId, setEditingMessageId] = useState(null)
   const [confirmation, setConfirmation] = useState(null)
+  const [repositoryChange, setRepositoryChange] = useState(null)
   const [errorState, setErrorState] = useState(null)
   const [voiceConfig, setVoiceConfig] = useState(getVoiceConfig())
   const [activeTTS, setActiveTTS] = useState(null)
@@ -1433,6 +1452,228 @@ export function ChatWorkspace({ user }) {
     }
   }
 
+  function executionResource(workflow, type = 'branch', title = '') {
+    if (!workflow?.repository?.slug || !workflow?.branch?.proposed) return null
+    const suffix = ['file', 'commit'].includes(type) && title ? `:${title}` : ''
+    return {
+      type,
+      id: `github:${workflow.repository.slug}#${workflow.branch.proposed}${suffix}`,
+      title: title || workflow.branch.proposed,
+    }
+  }
+
+  function getWorkflowAction(message, id, status) {
+    return message?.orchestration?.actions?.some((entry) => entry?.id === id && entry?.status === status) === true
+  }
+
+  function recordWorkflowBlock(message, workflow, actionId, code, phase, { retryable = false, resource = null } = {}) {
+    const blocked = recordExecutionWorkflowBlock(workflow, { code, phase, retryable })
+    if (!blocked) return null
+    recordActionEvidence(message.id, {
+      id: actionId,
+      status: 'execution-blocked',
+      resource: resource || executionResource(blocked),
+      workflow: blocked,
+    })
+    appendActionReport(message.id, formatExecutionBlockedReport(blocked))
+    return blocked
+  }
+
+  async function openApprovedFileChangeFromChat(action, message) {
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    const inspectionRecorded = getWorkflowAction(message, 'inspect-repo', 'inspection-completed')
+    const branchCreatedRecorded = getWorkflowAction(message, 'create-branch', 'branch-created')
+    const approvalRecorded = getWorkflowAction(message, 'approve-execution', 'approval-recorded')
+    if (!canApplyApprovedFileChange(workflow, { inspectionRecorded, branchCreatedRecorded, approvalRecorded })) {
+      toast('Create the approved branch and resolve any blocked state before applying a file change.', 'error')
+      return false
+    }
+    if (!getGithubToken()) {
+      recordWorkflowBlock(message, workflow, 'apply-file-change', 'github-connection-required', 'integration', { retryable: true })
+      toast('Connect GitHub in Settings before applying this approved file change.', 'error')
+      return false
+    }
+    setRepositoryChange({
+      messageId: message.id,
+      repository: workflow.repository,
+      branch: workflow.branch.proposed,
+      fileTargets: workflow.change.fileTargets,
+    })
+    return false
+  }
+
+  async function loadApprovedGithubFile(path) {
+    const change = repositoryChange
+    if (!change) throw new Error('This approved file-change session is no longer available.')
+    try {
+      return await getGithubRepositoryFile({
+        token: getGithubToken(),
+        repository: change.repository,
+        branch: change.branch,
+        path,
+      })
+    } catch (error) {
+      throw new Error(getGithubFileExecutionErrorPresentation(error))
+    }
+  }
+
+  async function applyApprovedGithubFileChange({ path, content, expectedSha, commitMessage }) {
+    const change = repositoryChange
+    const message = conversationsRef.current
+      .flatMap((conversation) => conversation.messages || [])
+      .find((entry) => entry.id === change?.messageId)
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    const inspectionRecorded = getWorkflowAction(message, 'inspect-repo', 'inspection-completed')
+    const branchCreatedRecorded = getWorkflowAction(message, 'create-branch', 'branch-created')
+    const approvalRecorded = getWorkflowAction(message, 'approve-execution', 'approval-recorded')
+    if (!change || !message || !canApplyApprovedFileChange(workflow, { inspectionRecorded, branchCreatedRecorded, approvalRecorded })) {
+      setRepositoryChange(null)
+      toast('This approved workflow changed before the file update could start. Review the recorded execution state.', 'error')
+      return false
+    }
+    const token = getGithubToken()
+    if (!token) {
+      recordWorkflowBlock(message, workflow, 'apply-file-change', 'github-connection-required', 'integration', { retryable: true, resource: executionResource(workflow, 'file', path) })
+      setRepositoryChange(null)
+      toast('Connect GitHub in Settings before applying this approved file change.', 'error')
+      return false
+    }
+    try {
+      const result = await applyGithubFileChange({
+        token,
+        repository: workflow.repository,
+        branch: workflow.branch.proposed,
+        path,
+        content,
+        expectedSha,
+        commitMessage,
+      })
+      const changed = recordExecutionWorkflowFileChange(workflow, {
+        path: result.path,
+        commitSha: result.commitSha,
+        source: 'github-api',
+      })
+      if (!changed) {
+        setRepositoryChange(null)
+        toast('GitHub confirmed a file change, but FounderLab could not safely persist its evidence. Re-inspect the branch before continuing.', 'error')
+        return false
+      }
+      const recorded = recordActionEvidence(message.id, {
+        id: 'apply-file-change',
+        status: 'change-applied',
+        resource: executionResource(changed, 'file', result.path),
+        workflow: changed,
+      })
+      if (!recorded) {
+        setRepositoryChange(null)
+        toast('GitHub confirmed a file change, but FounderLab could not save its execution record. Re-inspect the branch before continuing.', 'error')
+        return false
+      }
+      appendActionReport(message.id, formatExecutionFileChangeReport(changed))
+      setRepositoryChange(null)
+      toast(`GitHub committed the reviewed change to ${result.path}. Validation is next.`, 'success')
+      return true
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : 'execution-unavailable'
+      const retryable = ['github-auth-required', 'execution-unavailable', 'execution-conflict', 'file-change-conflict'].includes(code)
+      recordWorkflowBlock(message, workflow, 'apply-file-change', code, 'change', { retryable, resource: executionResource(workflow, 'file', path) })
+      setRepositoryChange(null)
+      toast(getGithubFileExecutionErrorPresentation(error), 'error')
+      return false
+    }
+  }
+
+  async function checkGithubValidationFromChat(action, message) {
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    if (!workflow || workflow.branch.state !== 'created' || workflow.change.state !== 'applied' || workflow.block) {
+      toast('Apply the reviewed file change before checking GitHub validation.', 'error')
+      return false
+    }
+    const token = getGithubToken()
+    if (!token) {
+      recordWorkflowBlock(message, workflow, 'validate', 'github-connection-required', 'integration', { retryable: true, resource: executionResource(workflow, 'commit', workflow.change.commitSha.slice(0, 12)) })
+      toast('Connect GitHub in Settings before checking validation.', 'error')
+      return false
+    }
+    try {
+      const result = await getGithubCommitValidation({ token, repository: workflow.repository, commitSha: workflow.change.commitSha })
+      const updated = recordExecutionWorkflowValidation(workflow, { ...result.validation, source: 'github-api' })
+      if (!updated) {
+        toast('FounderLab could not safely record this validation result.', 'error')
+        return false
+      }
+      const complete = [updated.validation.tests, updated.validation.build, updated.validation.report]
+        .every((state) => ['passed', 'not-needed'].includes(state))
+      const recorded = recordActionEvidence(message.id, {
+        id: 'validate',
+        status: updated.block ? 'validation-failed' : complete ? 'validation-passed' : 'validation-recorded',
+        resource: executionResource(updated, 'commit', updated.change.commitSha.slice(0, 12)),
+        workflow: updated,
+      })
+      if (!recorded) {
+        toast('GitHub validation was read, but FounderLab could not save its execution evidence.', 'error')
+        return false
+      }
+      appendActionReport(message.id, formatExecutionValidationReport(updated))
+      if (updated.block) {
+        toast('GitHub reported a failed validation result. Review the recorded block before continuing.', 'error')
+        return false
+      }
+      if (!complete) {
+        toast('GitHub has not supplied all required completed checks yet. FounderLab will keep review blocked.', 'success')
+        return false
+      }
+      toast('GitHub validation evidence is complete. Prepare the review summary next.', 'success')
+      return true
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : 'execution-unavailable'
+      const retryable = ['github-auth-required', 'execution-unavailable'].includes(code)
+      recordWorkflowBlock(message, workflow, 'validate', code, 'validation', { retryable, resource: executionResource(workflow, 'commit', workflow.change.commitSha.slice(0, 12)) })
+      toast(getGithubValidationErrorPresentation(error), 'error')
+      return false
+    }
+  }
+
+  function prepareExecutionReviewFromChat(action, message) {
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    const reviewed = recordExecutionWorkflowReviewReadiness(workflow, { source: 'github-api' })
+    if (!reviewed || reviewed.review !== 'ready-for-review') {
+      toast('Complete the required GitHub validation before preparing this change for review.', 'error')
+      return false
+    }
+    const recorded = recordActionEvidence(message.id, {
+      id: 'review',
+      status: 'review-ready',
+      resource: executionResource(reviewed, 'commit', reviewed.change.commitSha.slice(0, 12)),
+      workflow: reviewed,
+    })
+    if (!recorded) {
+      toast('FounderLab could not save the review-ready evidence.', 'error')
+      return false
+    }
+    appendActionReport(message.id, formatExecutionReviewReadyReport(reviewed))
+    toast('Change is ready for human review. No pull request or merge was created.', 'success')
+    return true
+  }
+
+  function retryRepositoryExecutionFromChat(action, message) {
+    const workflow = retryExecutionWorkflow(message?.orchestration?.workflow)
+    if (!workflow) {
+      toast('This execution block cannot be retried automatically. Review the recorded boundary first.', 'error')
+      return false
+    }
+    const recorded = recordActionEvidence(message.id, {
+      id: 'retry-execution',
+      status: 'execution-retried',
+      resource: executionResource(workflow),
+      workflow,
+    })
+    if (!recorded) return false
+    appendActionReport(message.id, '## Execution retry prepared\n\nFounderLab cleared a retryable recorded block. The same approval and branch-first boundaries still apply; no new external action has run yet.')
+    toast('Retry path restored. Review the next explicit action.', 'success')
+    return true
+  }
+
   function saveRename(conversationId) {
     const title = renameValue.trim()
     if (title) updateConversation(conversationId, { title })
@@ -1479,6 +1720,10 @@ export function ChatWorkspace({ user }) {
     if (action.id === 'prepare-execution') return prepareRepositoryExecutionFromChat(action, message)
     if (action.id === 'approve-execution') return approveRepositoryExecutionFromChat(action, message)
     if (action.id === 'create-branch') return createApprovedRepositoryBranchFromChat(action, message)
+    if (action.id === 'apply-file-change') return openApprovedFileChangeFromChat(action, message)
+    if (action.id === 'validate') return checkGithubValidationFromChat(action, message)
+    if (action.id === 'review') return prepareExecutionReviewFromChat(action, message)
+    if (action.id === 'retry-execution') return retryRepositoryExecutionFromChat(action, message)
     if (action.id === 'connect-github') {
       recordActionEvidence(message.id, { id: 'connect-github', status: 'handoff-opened' })
       flNavigate('settings')
@@ -1565,6 +1810,12 @@ export function ChatWorkspace({ user }) {
         }}
       />
       <ChatConfirmDialog action={confirmation} onCancel={() => setConfirmation(null)} onConfirm={confirmPendingAction} />
+      <ChatRepositoryChangeDialog
+        change={repositoryChange}
+        onLoadFile={loadApprovedGithubFile}
+        onApply={applyApprovedGithubFileChange}
+        onCancel={() => setRepositoryChange(null)}
+      />
 
       <main className="fl-chat-main" aria-label="FounderLab Chat">
         <header className="fl-chat-topbar">

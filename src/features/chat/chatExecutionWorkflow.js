@@ -1,21 +1,22 @@
 /**
  * A bounded, evidence-first execution workflow for Chat. It can record a
- * prepared change path and explicit approval, but it never performs a git
- * mutation, file edit, test run, build, or merge. Those operations require a
- * authenticated execution capability. It can also record a direct GitHub
- * branch result only when the user explicitly authorizes that browser action.
+ * prepared change path and explicit approval. Browser-session GitHub actions
+ * can create an approved branch, apply one reviewed file replacement, and
+ * inspect native GitHub validation evidence. It never runs arbitrary shell
+ * commands, force-pushes, creates pull requests, or merges.
  */
 
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
 
 const MAX_FILE_TARGETS = 6
+const MAX_APPLIED_FILES = 1
 const MAX_BRANCH_LENGTH = 96
 const MAX_TEXT_LENGTH = 180
 const BRANCH_STATES = new Set(['not-needed', 'planned', 'created'])
 const CHANGE_STATES = new Set(['not-started', 'prepared', 'applied'])
 const VALIDATION_STATES = new Set(['not-needed', 'required', 'not-run', 'passed', 'failed'])
 const APPROVAL_STATES = new Set(['not-required', 'required', 'approved', 'rejected'])
-const REVIEW_STATES = new Set(['not-required', 'awaiting-approval', 'awaiting-executor', 'awaiting-validation', 'ready-to-merge', 'not-ready'])
+const REVIEW_STATES = new Set(['not-required', 'awaiting-approval', 'awaiting-executor', 'awaiting-validation', 'ready-for-review', 'ready-to-merge', 'not-ready'])
 const EXECUTION_STATES = new Set(['not-started', 'prepared', 'awaiting-approval', 'awaiting-executor', 'branch-created', 'change-applied', 'validation-complete', 'reported', 'blocked', 'cancelled', 'externally-unverified'])
 const EXECUTOR_STATES = new Set(['not-available', 'available', 'started'])
 const CONNECTION_STATES = new Set(['not-connected', 'connected', 'unavailable'])
@@ -30,6 +31,8 @@ const BLOCK_CODES = new Set([
   'repository-read-only',
   'branch-conflict',
   'execution-conflict',
+  'file-change-conflict',
+  'file-content-unavailable',
   'execution-cancelled',
   'provider-unavailable',
   'validation-failed',
@@ -71,6 +74,11 @@ function normalizeFileTargets(value) {
   }, []))
 }
 
+function normalizeCommitSha(value) {
+  const sha = text(value, 80)
+  return /^[a-f0-9]{7,64}$/i.test(sha) ? sha : ''
+}
+
 function normalizeBranch(value, repository) {
   if (!isRecord(value) || !BRANCH_STATES.has(value.state)) return null
   const base = text(value.base, 100)
@@ -93,7 +101,12 @@ function normalizeChange(value) {
   if (!isRecord(value) || !CHANGE_STATES.has(value.state)) return null
   const risk = ['low', 'medium', 'high'].includes(value.risk) ? value.risk : ''
   if (!risk) return null
-  return Object.freeze({ state: value.state, risk, fileTargets: normalizeFileTargets(value.fileTargets) })
+  const fileTargets = normalizeFileTargets(value.fileTargets)
+  if (value.state !== 'applied') return Object.freeze({ state: value.state, risk, fileTargets })
+  const appliedFiles = normalizeFileTargets(value.appliedFiles).slice(0, MAX_APPLIED_FILES)
+  const commitSha = normalizeCommitSha(value.commitSha)
+  if (appliedFiles.length !== 1 || !fileTargets.includes(appliedFiles[0]) || !commitSha) return null
+  return Object.freeze({ state: value.state, risk, fileTargets, appliedFiles, commitSha })
 }
 
 function normalizeCapability(value) {
@@ -107,6 +120,10 @@ function normalizeCapability(value) {
 function normalizeBlock(value) {
   if (!isRecord(value) || !BLOCK_CODES.has(value.code) || !BLOCK_PHASES.has(value.phase)) return null
   return Object.freeze({ code: value.code, phase: value.phase, retryable: value.retryable === true })
+}
+
+function isTrustedExecutionSource(value) {
+  return value === 'secure-executor' || value === 'github-api'
 }
 
 /** Persist only compact execution evidence, never raw repository data or credentials. */
@@ -208,7 +225,7 @@ function capabilityForBlock(capability, code) {
   if (code === 'github-connection-required') return { connection: 'not-connected', authorization: 'not-authorized', execution: 'unavailable' }
   if (['github-auth-required', 'github-permission-denied'].includes(code)) return { connection: 'connected', authorization: 'denied', execution: 'blocked' }
   if (code === 'repository-read-only') return { ...capability, authorization: 'read-only', execution: 'read-only' }
-  if (['repository-inaccessible', 'executor-unavailable', 'execution-unavailable'].includes(code)) return { ...capability, execution: 'unavailable' }
+  if (['repository-inaccessible', 'executor-unavailable', 'execution-unavailable', 'file-content-unavailable'].includes(code)) return { ...capability, execution: 'unavailable' }
   return { ...capability, execution: 'blocked' }
 }
 
@@ -229,11 +246,12 @@ export function recordExecutionWorkflowBlock(value, { code = 'execution-unavaila
 export function retryExecutionWorkflow(value) {
   const workflow = normalizeExecutionWorkflow(value)
   if (!workflow?.block?.retryable || workflow.approval !== 'approved') return null
+  const resumesValidation = workflow.branch.state === 'created' && workflow.change.state === 'applied'
   return normalizeExecutionWorkflow({
     ...workflow,
     block: undefined,
-    execution: 'awaiting-executor',
-    review: 'awaiting-executor',
+    execution: resumesValidation ? 'change-applied' : 'awaiting-executor',
+    review: resumesValidation ? 'awaiting-validation' : 'awaiting-executor',
     capability: { ...workflow.capability, execution: workflow.capability.connection === 'connected' ? 'unverified' : 'unavailable' },
   })
 }
@@ -275,10 +293,52 @@ export function canCreateApprovedBranchAction(value, {
   )
 }
 
-/** Future authenticated executors use this to attach validation evidence without implying a merge. */
+/** Guard the narrow mutation boundary: one inspected candidate file, on the recorded branch, after approval. */
+export function canApplyApprovedFileChange(value, {
+  inspectionRecorded = false,
+  branchCreatedRecorded = false,
+  approvalRecorded = false,
+} = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  return Boolean(
+    workflow
+    && workflow.approval === 'approved'
+    && workflow.branch.state === 'created'
+    && workflow.change.state === 'prepared'
+    && workflow.change.fileTargets.length > 0
+    && !workflow.block
+    && inspectionRecorded === true
+    && branchCreatedRecorded === true
+    && approvalRecorded === true,
+  )
+}
+
+/** Record a GitHub-confirmed one-file commit. The caller must have completed the external API mutation. */
+export function recordExecutionWorkflowFileChange(value, { path, commitSha, source = '' } = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  const targetPath = safePath(path)
+  const verifiedCommit = normalizeCommitSha(commitSha)
+  if (!workflow || !isTrustedExecutionSource(source) || workflow.approval !== 'approved' || workflow.branch.state !== 'created' || workflow.change.state !== 'prepared' || !workflow.change.fileTargets.includes(targetPath) || !verifiedCommit) return null
+  return normalizeExecutionWorkflow({
+    ...workflow,
+    change: { ...workflow.change, state: 'applied', appliedFiles: [targetPath], commitSha: verifiedCommit },
+    validation: {
+      tests: workflow.validation.tests === 'not-needed' ? 'not-needed' : 'not-run',
+      build: workflow.validation.build === 'not-needed' ? 'not-needed' : 'not-run',
+      report: 'not-run',
+    },
+    capability: { connection: 'connected', authorization: 'writable', execution: 'write-ready' },
+    execution: 'change-applied',
+    review: 'awaiting-validation',
+    executor: 'started',
+    block: undefined,
+  })
+}
+
+/** Record actual validation evidence without implying a review, pull request, or merge. */
 export function recordExecutionWorkflowValidation(value, { tests, build, report, source = '' } = {}) {
   const workflow = normalizeExecutionWorkflow(value)
-  if (!workflow || source !== 'secure-executor' || workflow.branch.state !== 'created') return null
+  if (!workflow || !isTrustedExecutionSource(source) || workflow.branch.state !== 'created' || workflow.change.state !== 'applied') return null
   const validation = normalizeValidation({ tests, build, report })
   if (!validation) return null
   const failed = ['failed'].some((state) => Object.values(validation).includes(state))
@@ -297,15 +357,22 @@ export function recordExecutionWorkflowValidation(value, { tests, build, report,
   })
 }
 
-/** Prepare review/merge readiness only after verified validation; this never performs a merge. */
+/** Prepare review readiness only after verified validation; this never performs a merge. */
 export function recordExecutionWorkflowReviewReadiness(value, { source = 'secure-executor' } = {}) {
   const workflow = normalizeExecutionWorkflow(value)
-  if (!workflow || source !== 'secure-executor' || workflow.branch.state !== 'created') return null
+  if (!workflow || !isTrustedExecutionSource(source) || workflow.branch.state !== 'created' || workflow.change.state !== 'applied') return null
   if (workflow.block) return normalizeExecutionWorkflow({ ...workflow, review: 'not-ready' })
   const valid = [workflow.validation.tests, workflow.validation.build, workflow.validation.report]
     .every((state) => ['passed', 'not-needed'].includes(state))
   if (!valid) return normalizeExecutionWorkflow({ ...workflow, review: 'not-ready', execution: 'validation-complete' })
-  return normalizeExecutionWorkflow({ ...workflow, review: 'ready-to-merge', execution: 'reported', executor: 'started' })
+  return normalizeExecutionWorkflow({ ...workflow, review: 'ready-for-review', execution: 'reported', executor: 'started' })
+}
+
+/** Reserved for a later, explicitly evidenced human/PR review; this never performs a merge. */
+export function recordExecutionWorkflowMergeReadiness(value, { source = '' } = {}) {
+  const workflow = normalizeExecutionWorkflow(value)
+  if (!workflow || source !== 'approved-review' || workflow.review !== 'ready-for-review') return null
+  return normalizeExecutionWorkflow({ ...workflow, review: 'ready-to-merge', execution: 'reported' })
 }
 
 /**
@@ -315,7 +382,7 @@ export function recordExecutionWorkflowReviewReadiness(value, { source = 'secure
 export function applyExecutionWorkflowEvidence(value, evidence = {}) {
   const workflow = normalizeExecutionWorkflow(value)
   if (!workflow || !isRecord(evidence)) return workflow
-  const secureExecutorEvidence = evidence.source === 'secure-executor' && evidence.executor === 'started'
+  const secureExecutorEvidence = isTrustedExecutionSource(evidence.source) && evidence.executor === 'started'
   const requestedBranch = isRecord(evidence.branch) ? evidence.branch : {}
   const requestedChange = isRecord(evidence.change) ? evidence.change : {}
   const requestedValidation = isRecord(evidence.validation) ? evidence.validation : {}
@@ -353,6 +420,8 @@ const BLOCK_COPY = Object.freeze({
   'repository-read-only': 'This repository is available only as read-only for the requested workflow.',
   'branch-conflict': 'The proposed branch already exists or conflicts with repository state.',
   'execution-conflict': 'GitHub reported a conflict while preparing the branch.',
+  'file-change-conflict': 'The selected file changed after it was loaded. Refresh its current content before applying another reviewed replacement.',
+  'file-content-unavailable': 'The selected file could not be safely loaded as a bounded text file.',
   'execution-cancelled': 'The execution was cancelled before a completed result was recorded.',
   'provider-unavailable': 'The selected provider is unavailable for this execution step.',
   'validation-failed': 'Required validation failed; review the result before continuing.',
@@ -377,19 +446,32 @@ export function getExecutionWorkflowPresentation(value) {
   const workflow = normalizeExecutionWorkflow(value)
   if (!workflow) return null
   const branchCreated = workflow.branch.state === 'created'
+  const changeApplied = workflow.change.state === 'applied'
+  const reviewReady = workflow.review === 'ready-for-review'
+  const mergeReady = workflow.review === 'ready-to-merge'
+  const validationComplete = [workflow.validation.tests, workflow.validation.build, workflow.validation.report]
+    .every((state) => ['passed', 'not-needed'].includes(state))
   const blocked = workflow.block
   const approvalRecorded = workflow.approval === 'approved'
-  const state = blocked ? 'execution-blocked' : branchCreated ? 'branch-created' : approvalRecorded ? 'approval-recorded' : 'execution-prepared'
-  const label = blocked ? 'Execution blocked' : branchCreated ? 'Branch created' : approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
+  const state = blocked ? 'execution-blocked' : mergeReady ? 'merge-ready' : reviewReady ? 'review-ready' : validationComplete && changeApplied ? 'validation-complete' : changeApplied ? 'change-applied' : branchCreated ? 'branch-created' : approvalRecorded ? 'approval-recorded' : 'execution-prepared'
+  const label = blocked ? 'Execution blocked' : mergeReady ? 'Ready to merge' : reviewReady ? 'Ready for review' : validationComplete && changeApplied ? 'Validation complete' : changeApplied ? 'File change applied' : branchCreated ? 'Branch created' : approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
   const detail = blocked
     ? BLOCK_COPY[blocked.code]
-    : branchCreated
-      ? 'GitHub confirmed the branch creation. No files were changed, no tests or build were run, and review is not ready yet.'
-      : approvalRecorded
-        ? workflow.capability.connection === 'connected'
-          ? 'Approval is recorded. GitHub is connected, but write permission will be verified only when the user explicitly creates this branch.'
-          : 'Approval is recorded. Connect GitHub before the user can explicitly create this branch.'
-        : 'Candidate files and validation needs are prepared. No branch was created, no files were changed, and no validation ran.'
+    : mergeReady
+      ? 'Review approval and validation evidence are recorded. No merge has been performed.'
+      : reviewReady
+        ? 'The approved file change and required validation evidence are recorded. This is ready for human review, not a merge.'
+        : validationComplete && changeApplied
+          ? 'Required validation evidence is recorded. Review is the next explicit boundary; no merge is implied.'
+          : changeApplied
+            ? 'GitHub confirmed a single reviewed file change and commit on the approved branch. Validation and review remain outstanding.'
+            : branchCreated
+              ? 'GitHub confirmed the branch creation. One explicitly reviewed candidate file may now be changed; no file, test, build, review, or merge result is recorded yet.'
+              : approvalRecorded
+                ? workflow.capability.connection === 'connected'
+                  ? 'Approval is recorded. GitHub is connected, but write permission will be verified only when the user explicitly creates this branch.'
+                  : 'Approval is recorded. Connect GitHub before the user can explicitly create this branch.'
+                : 'Candidate files and validation needs are prepared. No branch was created, no files were changed, and no validation ran.'
   const validation = `Tests: ${VALIDATION_LABELS[workflow.validation.tests]} · Build: ${VALIDATION_LABELS[workflow.validation.build]} · Report: ${VALIDATION_LABELS[workflow.validation.report]}`
   return Object.freeze({
     state,
@@ -399,10 +481,11 @@ export function getExecutionWorkflowPresentation(value) {
     branch: `${workflow.branch.state === 'created' ? 'Created' : 'Planned'}: ${workflow.branch.proposed} ← ${workflow.branch.base}`,
     change: `${workflow.change.state === 'applied' ? 'Change applied' : 'Change prepared'} · ${workflow.change.risk} risk`,
     ...(workflow.change.fileTargets.length ? { fileTargets: workflow.change.fileTargets } : {}),
+    ...(workflow.change.appliedFiles?.length ? { appliedFiles: workflow.change.appliedFiles, commitSha: workflow.change.commitSha } : {}),
     validation,
     review: workflow.review === 'ready-to-merge' ? 'Ready to merge' : workflow.review.replace(/-/g, ' '),
     capability: capabilityLabel(workflow.capability),
-    executor: workflow.executor === 'not-available' ? 'Server-side executor not connected' : workflow.executor.replace(/-/g, ' '),
+    executor: workflow.executor === 'not-available' ? 'No GitHub mutation has started' : workflow.executor.replace(/-/g, ' '),
     ...(blocked ? { block: { code: blocked.code, phase: blocked.phase, retryable: blocked.retryable } } : {}),
   })
 }
@@ -420,8 +503,17 @@ export function getExecutionWorkflowGuidance(value) {
       : 'Resolve the stated connection, permission, repository, or review boundary before continuing.'
     return `The execution workflow for ${workflow.repository.slug} is blocked during ${workflow.block.phase}: ${BLOCK_COPY[workflow.block.code]} ${recovery} ${files} ${validation} Do not claim a branch, file change, test, build, or merge completed.`
   }
+  if (workflow.change.state === 'applied') {
+    const changed = `GitHub confirmed a reviewed replacement of ${workflow.change.appliedFiles.join(', ')} on ${workflow.branch.proposed} (commit ${workflow.change.commitSha.slice(0, 12)}).`
+    const review = workflow.review === 'ready-for-review'
+      ? 'Required validation is recorded and the change is ready for human review, not a merge.'
+      : workflow.review === 'ready-to-merge'
+        ? 'Review approval is recorded; no merge has been performed.'
+        : 'Validation and review evidence are still required before this can be reviewed or merged.'
+    return `${changed} ${review} ${validation}`
+  }
   if (workflow.branch.state === 'created') {
-    return `GitHub confirmed creation of ${workflow.branch.proposed} for ${workflow.repository.slug}. No files were changed, no tests or build ran, and merge review is not ready. ${files} ${validation}`
+    return `GitHub confirmed creation of ${workflow.branch.proposed} for ${workflow.repository.slug}. No file, test, build, review, or merge result is recorded yet. ${files} ${validation}`
   }
   if (workflow.approval === 'approved') {
     const next = workflow.capability.connection === 'connected'
@@ -470,7 +562,52 @@ export function formatExecutionBranchCreatedReport(workflow) {
     `**Repository:** \`${presentation.repository}\``,
     `**Branch:** \`${presentation.branch}\``,
     '',
-    'GitHub confirmed branch creation. No files were changed, no tests or build were run, and this work is not ready for review or merge yet.',
+    'GitHub confirmed branch creation. The next explicit action may replace one reviewed candidate text file on this approved branch. No file, test, build, review, or merge result is recorded yet.',
+  ].join('\n')
+}
+
+export function formatExecutionFileChangeReport(workflow) {
+  const presentation = getExecutionWorkflowPresentation(workflow)
+  if (!presentation || presentation.state !== 'change-applied') return ''
+  return [
+    '## File change applied',
+    `**Repository:** \`${presentation.repository}\``,
+    `**Branch:** \`${presentation.branch}\``,
+    `**Changed file:** \`${presentation.appliedFiles[0]}\``,
+    `**GitHub commit:** \`${presentation.commitSha}\``,
+    '',
+    'GitHub confirmed this one-file commit. Required validation and human review remain explicit next steps; no merge is implied.',
+  ].join('\n')
+}
+
+export function formatExecutionValidationReport(workflow) {
+  const presentation = getExecutionWorkflowPresentation(workflow)
+  if (!presentation || !['validation-complete', 'execution-blocked', 'change-applied'].includes(presentation.state)) return ''
+  return [
+    '## Validation status recorded',
+    `**Repository:** \`${presentation.repository}\``,
+    `**Branch:** \`${presentation.branch}\``,
+    `**Validation:** ${presentation.validation}`,
+    '',
+    presentation.state === 'validation-complete'
+      ? 'GitHub validation evidence is complete. The change is ready for an explicit human review, not a merge.'
+      : presentation.state === 'execution-blocked'
+        ? `${presentation.detail} No review or merge readiness is claimed.`
+        : 'GitHub has not yet supplied all required validation evidence. Review and merge are not ready.',
+  ].join('\n')
+}
+
+export function formatExecutionReviewReadyReport(workflow) {
+  const presentation = getExecutionWorkflowPresentation(workflow)
+  if (!presentation || presentation.state !== 'review-ready') return ''
+  return [
+    '## Ready for review',
+    `**Repository:** \`${presentation.repository}\``,
+    `**Branch:** \`${presentation.branch}\``,
+    `**Changed file:** \`${presentation.appliedFiles[0]}\``,
+    `**Validation:** ${presentation.validation}`,
+    '',
+    'The one-file change and validation evidence are ready for human review. No pull request or merge has been created.',
   ].join('\n')
 }
 

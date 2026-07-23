@@ -3,9 +3,10 @@
  * layer. It gives every model the same bounded view of what the user is
  * trying to do and what FounderLab can prove happened in this thread.
  *
- * It does not execute product work. Execution remains an explicit, scoped
- * user action owned by the destination workspace. That boundary prevents the
- * assistant from turning a helpful plan into an unverified claim.
+ * It never turns model output into an action. Explicit Chat controls may run
+ * a narrowly approved integration action, and this layer stores only the
+ * resulting evidence. That boundary prevents a helpful plan from becoming an
+ * unverified execution claim.
  */
 
 import { normalizeExecutionBridgeEvidence } from './chatExecutionBridge.js'
@@ -15,6 +16,7 @@ import {
   getConnectorActionEvidence,
   normalizeConnectorActionEvidence,
   normalizeConnectorPlan,
+  refreshConnectorPlanForExecution,
 } from './chatConnectorFramework.js'
 import {
   isChatExecutionActionId,
@@ -331,6 +333,12 @@ function evidenceLabel({ id, status }) {
     'prepare-branch': status === 'branch-prepared' ? 'A branch-first change plan was prepared; no branch was created.' : '',
     'prepare-execution': status === 'execution-prepared' ? 'A branch-first execution workflow was prepared; no branch or files were changed.' : '',
     'approve-execution': status === 'approval-recorded' ? 'Approval for a future branch-first workflow was recorded; no execution ran.' : '',
+    'create-branch': status === 'branch-created' ? 'GitHub confirmed branch creation; no file, validation, review, or merge is implied.' : '',
+    'apply-file-change': status === 'change-applied' ? 'GitHub confirmed one reviewed file commit on the approved branch; validation and human review remain separate.' : '',
+    validate: status === 'validation-passed' ? 'GitHub supplied completed validation evidence for the committed change; human review is still required.'
+      : status === 'validation-recorded' ? 'GitHub validation was read, but not all required completed evidence is available yet.'
+        : status === 'validation-failed' ? 'GitHub reported failed validation; no review or merge readiness is claimed.' : '',
+    review: status === 'review-ready' ? 'The committed file scope and validation evidence are ready for human review; no pull request or merge is confirmed.' : '',
   }
   return labels[id] || ''
 }
@@ -480,11 +488,17 @@ export function recordOrchestrationAction(orchestration, { id, status, resource:
   const connectorAction = normalizeConnectorActionEvidence(requestedConnectorAction) || getConnectorActionEvidence({ id, status })
   const at = normalizeActionTimestamp(actionAt)
   const workflow = normalizeExecutionWorkflow(actionWorkflow) || current.workflow
+  const connectorPlan = actionWorkflow ? refreshConnectorPlanForExecution(current.connectorPlan, workflow) : current.connectorPlan
   const duplicate = current.actions.some((action) => action.id === id && action.status === status && action.resource?.id === resource?.id)
   const actions = duplicate
     ? current.actions
     : [...current.actions, Object.freeze({ id, status, ...(resource ? { resource } : {}), ...(connectorAction ? { connectorAction } : {}), ...(at ? { at } : {}) })].slice(-MAX_ACTION_EVIDENCE)
-  return Object.freeze({ ...current, ...(workflow ? { workflow } : {}), actions: Object.freeze(actions) })
+  return Object.freeze({
+    ...current,
+    ...(workflow ? { workflow } : {}),
+    ...(connectorPlan ? { connectorPlan } : {}),
+    actions: Object.freeze(actions),
+  })
 }
 
 export function getCompletedOrchestrationActions(orchestration) {

@@ -196,6 +196,7 @@ export function ChatMessage({
                     Review: {operatorReport.workflow.review} · {operatorReport.workflow.capability}<br />
                     Execution access: {operatorReport.workflow.executor}
                     {operatorReport.workflow.fileTargets?.length ? <><br />Candidate files: {operatorReport.workflow.fileTargets.join(', ')}</> : null}
+                    {operatorReport.workflow.appliedFiles?.length ? <><br />Changed file: {operatorReport.workflow.appliedFiles.join(', ')} · Commit: {operatorReport.workflow.commitSha?.slice(0, 12)}</> : null}
                   </span>
                 </p>
               )}

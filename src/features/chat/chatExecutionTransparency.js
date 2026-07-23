@@ -23,6 +23,10 @@ const ACTION_COPY = Object.freeze({
   'prepare-execution': 'Prepared a branch-first execution workflow',
   'approve-execution': 'Recorded execution approval',
   'create-branch': 'Created an approved GitHub branch',
+  'apply-file-change': 'Applied a reviewed GitHub file change',
+  validate: 'Read GitHub validation',
+  review: 'Prepared a human review summary',
+  'retry-execution': 'Restored a retryable execution path',
   'connect-github': 'Opened GitHub connection settings',
 })
 
@@ -54,6 +58,27 @@ function getActionFact(action) {
   }
   if (action.id === 'create-branch' && action.status === 'branch-created') {
     return { kind: 'branch-created', label, detail: 'GitHub confirmed branch creation. No files, commits, tests, build, review, or merge are recorded.' }
+  }
+  if (action.id === 'apply-file-change' && action.status === 'change-applied') {
+    return { kind: 'change-applied', label, detail: 'GitHub confirmed one reviewed file commit on the approved branch. Validation and human review remain explicit next steps.' }
+  }
+  if (action.id === 'apply-file-change' && action.status === 'execution-blocked') {
+    return { kind: 'execution-blocked', label: 'File change blocked', detail: 'No successful file change is recorded. Review the scoped recovery state before retrying.' }
+  }
+  if (action.id === 'validate' && action.status === 'validation-passed') {
+    return { kind: 'validation-complete', label, detail: 'GitHub supplied all required completed validation evidence. Human review is still explicit and no merge is implied.' }
+  }
+  if (action.id === 'validate' && action.status === 'validation-recorded') {
+    return { kind: 'validation-pending', label, detail: 'GitHub validation was read, but required completed evidence is still missing. Review and merge remain blocked.' }
+  }
+  if (action.id === 'validate' && action.status === 'validation-failed') {
+    return { kind: 'execution-blocked', label: 'Validation failed', detail: 'GitHub supplied a failed validation result. No review or merge readiness is claimed.' }
+  }
+  if (action.id === 'review' && action.status === 'review-ready') {
+    return { kind: 'review-ready', label, detail: 'The committed change and validation evidence are ready for human review. No pull request or merge was created.' }
+  }
+  if (action.id === 'retry-execution' && action.status === 'execution-retried') {
+    return { kind: 'retry-restored', label, detail: 'A retryable block was cleared. No new external action is claimed.' }
   }
   if (action.id === 'create-branch' && action.status === 'execution-blocked') {
     return { kind: 'execution-blocked', label: 'Branch action blocked', detail: 'The branch action did not complete. The recorded recovery state explains the next boundary.' }
@@ -88,6 +113,10 @@ const EXECUTION_STATE_COPY = Object.freeze({
   'execution-prepared': Object.freeze({ label: 'Execution workflow prepared', detail: 'Candidate scope and validation are recorded. No repository mutation or validation ran.' }),
   'approval-recorded': Object.freeze({ label: 'Approval recorded', detail: 'Approval is recorded. GitHub branch creation remains a separate explicit action; no repository mutation has run.' }),
   'branch-created': Object.freeze({ label: 'Branch created', detail: 'GitHub confirmed branch creation. File changes, validation, review, and merge remain unverified.' }),
+  'change-applied': Object.freeze({ label: 'File change applied', detail: 'GitHub confirmed one reviewed file commit. Validation and human review remain explicit next steps.' }),
+  'validation-complete': Object.freeze({ label: 'Validation complete', detail: 'Required completed validation evidence is recorded. Human review is still required and no merge is implied.' }),
+  'review-ready': Object.freeze({ label: 'Ready for review', detail: 'The committed change and validation evidence are ready for human review. No pull request or merge is recorded.' }),
+  'merge-ready': Object.freeze({ label: 'Ready to merge', detail: 'A future review record marked this ready to merge. No merge has been performed.' }),
   'execution-blocked': Object.freeze({ label: 'Execution blocked', detail: 'The next action is blocked by a recorded capability, conflict, failure, or recovery boundary.' }),
   'ready-for-execution': Object.freeze({ label: 'Ready for execution', detail: 'A scoped path is prepared. The user still chooses the explicit next action.' }),
   'handoff-opened': Object.freeze({ label: 'Handoff opened', detail: 'The destination was opened; no downstream result is confirmed.' }),
@@ -122,14 +151,21 @@ export function getChatExecutionState({ mode = 'conversation', actions = [], exe
       : ''
   if (capabilityState) return Object.freeze({ key: capabilityState, ...EXECUTION_STATE_COPY[capabilityState] })
 
-  const completed = actions.find((action) => action.kind === 'completed')
-  if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
-
   const blocked = actions.find((action) => action.kind === 'execution-blocked')
   if (blocked || workflow?.state === 'execution-blocked') return Object.freeze({ key: 'execution-blocked', ...EXECUTION_STATE_COPY['execution-blocked'] })
 
+  const changeApplied = actions.find((action) => action.kind === 'change-applied')
+  const validationComplete = actions.find((action) => action.kind === 'validation-complete')
+  const reviewReady = actions.find((action) => action.kind === 'review-ready')
+  if (reviewReady || workflow?.state === 'review-ready') return Object.freeze({ key: 'review-ready', ...EXECUTION_STATE_COPY['review-ready'] })
+  if (workflow?.state === 'merge-ready') return Object.freeze({ key: 'merge-ready', ...EXECUTION_STATE_COPY['merge-ready'] })
+  if (validationComplete || workflow?.state === 'validation-complete') return Object.freeze({ key: 'validation-complete', ...EXECUTION_STATE_COPY['validation-complete'] })
+  if (changeApplied || workflow?.state === 'change-applied') return Object.freeze({ key: 'change-applied', ...EXECUTION_STATE_COPY['change-applied'] })
   const branchCreated = actions.find((action) => action.kind === 'branch-created')
   if (branchCreated || workflow?.state === 'branch-created') return Object.freeze({ key: 'branch-created', ...EXECUTION_STATE_COPY['branch-created'] })
+
+  const completed = actions.find((action) => action.kind === 'completed')
+  if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
 
   const approvalRecorded = actions.find((action) => action.kind === 'approval-recorded')
   if (approvalRecorded || workflow?.state === 'approval-recorded') return Object.freeze({ key: 'approval-recorded', ...EXECUTION_STATE_COPY['approval-recorded'] })
@@ -172,6 +208,10 @@ function getExecutionNextStep({ state, completed, handoff }) {
   if (state.key === 'execution-prepared') return 'Review the candidate file scope, risk, and validation needs, then explicitly approve the future branch-first workflow.'
   if (state.key === 'approval-recorded') return 'Approval is recorded. Connect GitHub if needed, then explicitly create the approved branch. File changes, validation, review, and merge require later explicit execution steps.'
   if (state.key === 'branch-created') return 'Inspect the selected file scope before an explicit file-change action. Tests, build, review, and merge are not ready yet.'
+  if (state.key === 'change-applied') return 'Read the native GitHub validation evidence for this commit before preparing it for human review.'
+  if (state.key === 'validation-complete') return 'Prepare the review summary. A human review remains required and no merge is implied.'
+  if (state.key === 'review-ready') return 'Review the recorded changed-file scope and validation evidence. A pull request or merge still requires a later explicit workflow.'
+  if (state.key === 'merge-ready') return 'A future review workflow may explicitly create or merge a pull request. No merge is recorded here.'
   if (state.key === 'execution-blocked') return 'Resolve the recorded recovery boundary before attempting another branch, change, validation, or review action.'
   if (state.key === 'waiting-for-approval') return 'Review the proposed scope, risk, and verification, then explicitly approve any future branch-first change.'
   if (state.key === 'ready-for-execution') return 'Choose the explicit FounderLab handoff when you want to continue with this prepared path.'
@@ -201,6 +241,9 @@ export function getChatExecutionTransparency(orchestration) {
   const executionPrepared = actions.find((action) => action.kind === 'execution-prepared')
   const approvalRecorded = actions.find((action) => action.kind === 'approval-recorded')
   const branchCreated = actions.find((action) => action.kind === 'branch-created')
+  const changeApplied = actions.find((action) => action.kind === 'change-applied')
+  const validationComplete = actions.find((action) => action.kind === 'validation-complete')
+  const reviewReady = actions.find((action) => action.kind === 'review-ready')
   const executionBlocked = actions.find((action) => action.kind === 'execution-blocked')
   const handoff = actions.find((action) => action.kind === 'handoff')
   let outcome = {
@@ -214,6 +257,9 @@ export function getChatExecutionTransparency(orchestration) {
   if (executionPrepared) outcome = { kind: 'execution-prepared', label: executionPrepared.label, detail: executionPrepared.detail }
   if (approvalRecorded) outcome = { kind: 'approval-recorded', label: approvalRecorded.label, detail: approvalRecorded.detail }
   if (branchCreated) outcome = { kind: 'branch-created', label: branchCreated.label, detail: branchCreated.detail }
+  if (changeApplied) outcome = { kind: 'change-applied', label: changeApplied.label, detail: changeApplied.detail }
+  if (validationComplete) outcome = { kind: 'validation-complete', label: validationComplete.label, detail: validationComplete.detail }
+  if (reviewReady) outcome = { kind: 'review-ready', label: reviewReady.label, detail: reviewReady.detail }
   if (executionBlocked) outcome = { kind: 'execution-blocked', label: executionBlocked.label, detail: executionBlocked.detail }
   if (completed) outcome = { kind: 'completed', label: completed.label, detail: completed.detail }
 

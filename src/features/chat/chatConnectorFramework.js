@@ -50,6 +50,8 @@ const CONNECTOR_REGISTRY = Object.freeze({
     actions: Object.freeze([
       { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
       { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
+      { id: 'apply-file-change', label: 'Apply reviewed file change', access: 'write', approval: 'required' },
+      { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
     ]),
     fallbacks: Object.freeze(['code']),
   }),
@@ -151,6 +153,12 @@ function actionFor(definition, id) {
 function intendedActionFor(definition, { executionBridge = null, executionWorkflow = null } = {}) {
   if (!definition) return null
   if (definition.id === 'github') {
+    if (executionWorkflow?.branch?.state === 'created' && executionWorkflow?.change?.state === 'prepared' && executionWorkflow?.approval === 'approved') {
+      return actionFor(definition, 'apply-file-change')
+    }
+    if (executionWorkflow?.branch?.state === 'created' && executionWorkflow?.change?.state === 'applied') {
+      return actionFor(definition, 'validate')
+    }
     if (executionWorkflow?.approval === 'approved' && executionWorkflow?.branch?.state === 'planned') return actionFor(definition, 'create-branch')
     return actionFor(definition, 'inspect-repo')
   }
@@ -185,6 +193,60 @@ function createResolvedConnector(id, { integrations = null, executionBridge = nu
     health: runtime.health,
     readiness,
     ...(action ? { action: action.id, actionLabel: action.label, actionReadiness: intendedReadiness, approval: action.approval } : {}),
+  })
+}
+
+function integrationSnapshotFromConnector(connector, executionWorkflow) {
+  const snapshot = {
+    ...(connector.installation === 'installed' ? { installed: true } : connector.installation === 'not-installed' ? { installed: false } : {}),
+    ...(connector.configuration === 'configured' ? { configured: true, connected: true } : connector.configuration === 'not-configured' ? { configured: false } : {}),
+    ...(connector.authorization === 'authorized' ? { authorization: 'authorized' } : connector.authorization === 'not-authorized' ? { authorization: 'not-authorized' } : {}),
+    ...(connector.access === 'writable' ? { writable: true } : connector.access === 'read-only' ? { writable: false } : {}),
+    ...(connector.health ? { health: connector.health } : {}),
+  }
+  if (connector.id !== 'github' || !executionWorkflow?.capability) return snapshot
+  const capability = executionWorkflow.capability
+  if (capability.connection === 'connected') {
+    snapshot.configured = true
+    snapshot.connected = true
+  }
+  if (capability.authorization === 'writable') {
+    snapshot.authorization = 'authorized'
+    snapshot.writable = true
+  } else if (capability.authorization === 'read-only') {
+    snapshot.authorization = 'authorized'
+    snapshot.writable = false
+  } else if (capability.authorization === 'denied') {
+    snapshot.authorization = 'denied'
+  }
+  return snapshot
+}
+
+/**
+ * Refresh a persisted connector projection after a recorded execution
+ * transition. This preserves only named capability state and ensures an
+ * operator report never shows an earlier GitHub action after a real branch
+ * creation, file commit, or validation readback.
+ */
+export function refreshConnectorPlanForExecution(value, executionWorkflow = null) {
+  const plan = normalizeConnectorPlan(value)
+  if (!plan || plan.decision === 'chat-only') return plan
+  const integrations = Object.fromEntries(plan.connectors
+    .filter((connector) => connector.kind === 'integration')
+    .map((connector) => [connector.id, integrationSnapshotFromConnector(connector, executionWorkflow)]))
+  const context = { integrations, executionWorkflow }
+  const connectors = plan.connectors
+    .map((connector) => createResolvedConnector(connector.id, context))
+    .filter(Boolean)
+  const primary = connectors.find((connector) => connector.id === plan.primary) || connectors[0] || null
+  if (!primary) return null
+  return normalizeConnectorPlan({
+    version: 1,
+    taskClass: plan.taskClass,
+    decision: decisionFor(primary),
+    primary: primary.id,
+    connectors,
+    fallback: fallbackFor(primary, context),
   })
 }
 
@@ -379,6 +441,12 @@ const ACTION_EVIDENCE = Object.freeze({
   'inspect-repo:inspection-completed': Object.freeze({ connector: 'github', action: 'inspect-repo', state: 'completed', evidence: 'externally-verified' }),
   'create-branch:branch-created': Object.freeze({ connector: 'github', action: 'create-branch', state: 'completed', evidence: 'externally-verified' }),
   'create-branch:execution-blocked': Object.freeze({ connector: 'github', action: 'create-branch', state: 'blocked', evidence: 'failure-recorded' }),
+  'apply-file-change:change-applied': Object.freeze({ connector: 'github', action: 'apply-file-change', state: 'completed', evidence: 'externally-verified' }),
+  'apply-file-change:execution-blocked': Object.freeze({ connector: 'github', action: 'apply-file-change', state: 'blocked', evidence: 'failure-recorded' }),
+  'validate:validation-recorded': Object.freeze({ connector: 'github', action: 'validate', state: 'planned', evidence: 'externally-unverified' }),
+  'validate:validation-passed': Object.freeze({ connector: 'github', action: 'validate', state: 'completed', evidence: 'externally-verified' }),
+  'validate:validation-failed': Object.freeze({ connector: 'github', action: 'validate', state: 'blocked', evidence: 'failure-recorded' }),
+  'review:review-ready': Object.freeze({ connector: 'github', action: 'validate', state: 'completed', evidence: 'externally-verified' }),
 })
 
 /** Standardize recorded action facts across future connectors without inferring a result. */
