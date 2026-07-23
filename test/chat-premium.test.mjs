@@ -14,6 +14,10 @@ import {
   getChatProviderPresentation,
 } from '../src/features/chat/chatProviderUtils.js'
 import {
+  getChatModelRouting,
+  getChatRoutingEvidence,
+} from '../src/features/chat/chatModelRouting.js'
+import {
   CONVERSATION_BOTTOM_THRESHOLD,
   distanceToConversationBottom,
   isNearConversationBottom,
@@ -194,6 +198,125 @@ test('Chat provider picker exposes configured cloud providers, Local Ollama, and
   assert.deepEqual(getChatProviderPresentation('gemini', 'gemini-3.5-flash'), {
     id: 'gemini', name: 'Google Gemini', model: 'Gemini 3.5 Flash (recommended)', local: false, icon: '✶',
   })
+})
+
+test('Chat routing recommends explainable local or cloud paths without silently changing the active model', () => {
+  const availability = {
+    anthropic: { configured: true },
+    groq: { configured: true },
+    gemini: { configured: true },
+  }
+  const localModels = [
+    { id: 'llama3.2:3b-instruct-q4_K_M' },
+    { id: 'qwen2.5-coder:7b-instruct-q4_K_M' },
+  ]
+  const localGeneral = { provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M' }
+  const code = getChatModelRouting({
+    request: 'Implement a secure signup component with tests.',
+    intent: classifyChatRequest('Implement a secure signup component with tests.'),
+    availability,
+    currentSelection: localGeneral,
+    localModels,
+  })
+  assert.equal(code.taskClass, 'code')
+  assert.equal(code.current.fit, 'limited')
+  assert.deepEqual(code.recommendation, {
+    provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M', path: 'local',
+  })
+  assert.equal(code.shouldOfferSwitch, true)
+  assert.match(code.reason, /local coding model/i)
+
+  const planning = getChatModelRouting({
+    request: 'Plan a multi-step FounderLab launch strategy and identify the main tradeoffs.',
+    intent: classifyChatRequest('Plan a multi-step FounderLab launch strategy and identify the main tradeoffs.'),
+    availability,
+    currentSelection: { provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M' },
+    localModels,
+  })
+  assert.equal(planning.taskClass, 'planning')
+  assert.equal(planning.reasoningLevel, 'high')
+  assert.deepEqual(planning.recommendation, {
+    provider: 'anthropic', model: 'claude-sonnet-4-6', path: 'cloud',
+  })
+  assert.equal(planning.shouldOfferSwitch, true)
+
+  const localOnlyPlanning = getChatModelRouting({
+    request: 'Plan a multi-step FounderLab launch strategy.',
+    intent: classifyChatRequest('Plan a multi-step FounderLab launch strategy.'),
+    availability: {},
+    currentSelection: { provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M' },
+    localModels,
+  })
+  assert.equal(localOnlyPlanning.current.fit, 'limited')
+  assert.deepEqual(localOnlyPlanning.recommendation, {
+    provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M', path: 'local',
+  })
+  assert.match(localOnlyPlanning.reason, /constrained fallback/i)
+
+  const explicitPrivateCode = getChatModelRouting({
+    request: 'Use local Ollama to refactor this component privately.',
+    intent: classifyChatRequest('Use local Ollama to refactor this component privately.'),
+    availability,
+    currentSelection: { provider: 'groq', model: 'openai/gpt-oss-120b' },
+    localModels,
+  })
+  assert.equal(explicitPrivateCode.preference, 'local')
+  assert.deepEqual(explicitPrivateCode.recommendation, {
+    provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M', path: 'local',
+  })
+  assert.equal(explicitPrivateCode.shouldOfferSwitch, true)
+
+  const imageRoute = getChatModelRouting({
+    request: 'Review the image I attached and suggest a clearer onboarding flow.',
+    intent: classifyChatRequest('Review the image I attached and suggest a clearer onboarding flow.'),
+    availability,
+    currentSelection: { provider: 'gemini', model: 'gemini-3.5-flash' },
+    localModels,
+    hasImage: true,
+  })
+  assert.deepEqual(imageRoute.recommendation, {
+    provider: 'anthropic', model: 'claude-sonnet-4-6', path: 'cloud',
+  })
+  assert.equal(imageRoute.current.fit, 'limited')
+  assert.equal(imageRoute.shouldOfferSwitch, true)
+
+  const evidence = getChatRoutingEvidence(code)
+  assert.deepEqual(evidence, {
+    version: 1,
+    taskClass: 'code',
+    reasoningLevel: 'focused',
+    selected: { provider: 'ollama', model: 'llama3.2:3b-instruct-q4_K_M', path: 'local' },
+    recommendation: { provider: 'ollama', model: 'qwen2.5-coder:7b-instruct-q4_K_M', path: 'local' },
+  })
+  assert.equal(JSON.stringify(evidence).includes('Implement a secure signup component'), false)
+})
+
+test('Chat routing is carried into prompt and persisted orchestration metadata as bounded route evidence', () => {
+  const messages = [{ role: 'user', content: 'Prepare this GitHub change for review and verification.' }]
+  const context = getChatRequestContext(messages, {
+    routing: {
+      availability: { gemini: { configured: true }, groq: { configured: true } },
+      currentSelection: { provider: 'groq', model: 'openai/gpt-oss-120b' },
+    },
+  })
+  assert.equal(context.modelRouting.taskClass, 'execution')
+  assert.deepEqual(context.modelRouting.recommendation, {
+    provider: 'groq', model: 'openai/gpt-oss-120b', path: 'cloud',
+  })
+  assert.equal(context.modelRouting.shouldOfferSwitch, false)
+  assert.match(getChatSystemPrompt(context), /Current model-routing note/i)
+
+  const orchestration = createAssistantOrchestration(context)
+  assert.deepEqual(orchestration.routing, {
+    version: 1,
+    taskClass: 'execution',
+    reasoningLevel: 'high',
+    selected: { provider: 'groq', model: 'openai/gpt-oss-120b', path: 'cloud' },
+    recommendation: { provider: 'groq', model: 'openai/gpt-oss-120b', path: 'cloud' },
+  })
+  assert.deepEqual(normalizeMessageOrchestration({
+    mode: 'operator', operation: 'handoff', routing: { ...orchestration.routing, secret: 'never persist' }, actions: [],
+  }).routing, orchestration.routing)
 })
 
 test('Local Qwen Coder models are detected as code-ready without misclassifying general local chat models', () => {

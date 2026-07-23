@@ -8,6 +8,7 @@ import {
   normalizeMessageOrchestration,
 } from './chatOrchestrator.js'
 import { getProjectAwareness, getProjectAwarenessGuidance } from './chatMemory.js'
+import { getChatModelRouting, getChatModelRoutingGuidance } from './chatModelRouting.js'
 import { LIVE_CALL_MAX_OUTPUT_TOKENS } from './liveCallUtils.js'
 
 // Keep model behavior consistent across cloud and local routes without
@@ -106,13 +107,19 @@ export function getConversationMemoryGuidance(messages = [], orchestrationContex
     : `The latest request refers to the immediately preceding assistant answer${orchestration.reference.artifactKind && orchestration.reference.artifactKind !== 'response' ? ` (${orchestration.reference.artifactKind})` : ''}. Use it as context: briefly orient the user, explain, refine, or apply the relevant part, and avoid rewriting the whole answer unless they clearly ask for it again.`
 }
 
-export function getChatRequestContext(messages, { memory = null, workspace = null, conversationId = '' } = {}) {
+export function getChatRequestContext(messages, { memory = null, workspace = null, conversationId = '', routing = null } = {}) {
   const items = Array.isArray(messages) ? messages : []
   const latestUserIndex = items.map((message) => message?.role).lastIndexOf('user')
   if (latestUserIndex < 0) {
     const orchestration = getChatOrchestrationContext(items)
     const projectAwareness = getProjectAwareness(memory, workspace || undefined, { conversationId, request: '', orchestration })
-    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: orchestration.intent || classifyChatRequest(''), responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, projectAwareness }
+    const modelRouting = getChatModelRouting({
+      ...(routing || {}),
+      request: '',
+      intent: orchestration.intent || classifyChatRequest(''),
+      projectAwareness,
+    })
+    return { latestMessageIsVoice: false, latestMessageHasCorrection: false, followsAssistantQuestion: false, intent: orchestration.intent || classifyChatRequest(''), responseGuidance: getChatResponseGuidance(''), memoryGuidance: '', orchestration, projectAwareness, modelRouting }
   }
   const latestUser = items[latestUserIndex]
   const previousAssistant = items.slice(0, latestUserIndex).reverse().find((message) => message?.role === 'assistant')
@@ -123,6 +130,13 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     request: latestUser?.content,
     orchestration,
   })
+  const modelRouting = getChatModelRouting({
+    ...(routing || {}),
+    request: latestUser?.content,
+    intent,
+    projectAwareness,
+    hasImage: Boolean(routing?.hasImage || latestUser?.image),
+  })
   return {
     latestMessageIsVoice: latestUser?.source === 'voice',
     latestMessageHasCorrection: hasExplicitSelfCorrection(latestUser?.content),
@@ -132,10 +146,11 @@ export function getChatRequestContext(messages, { memory = null, workspace = nul
     memoryGuidance: getConversationMemoryGuidance(items, orchestration),
     orchestration,
     projectAwareness,
+    modelRouting,
   }
 }
 
-export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, projectAwareness = null } = {}) {
+export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessageHasCorrection = false, followsAssistantQuestion = false, intent = null, responseGuidance = '', memoryGuidance = '', orchestration = null, projectAwareness = null, modelRouting = null } = {}) {
   const notes = []
   if (latestMessageIsVoice) {
     notes.push('The latest user message was dictated. Apply the conversation-intelligence rules carefully: use context and the latest self-correction before asking for clarification.')
@@ -163,6 +178,10 @@ export function getChatSystemPrompt({ latestMessageIsVoice = false, latestMessag
   const projectGuidance = getProjectAwarenessGuidance(projectAwareness)
   if (projectGuidance) {
     notes.push(`Current project-awareness note: ${projectGuidance}`)
+  }
+  const routingGuidance = getChatModelRoutingGuidance(modelRouting)
+  if (routingGuidance) {
+    notes.push(`Current model-routing note: ${routingGuidance}`)
   }
   const prompt = `${CHAT_SYSTEM_PROMPT}\n\n${CHAT_HARMLESS_SOCIAL_GUIDANCE}\n\n${CHAT_CONTROL_CENTER_PROMPT}`
   if (!notes.length) return prompt

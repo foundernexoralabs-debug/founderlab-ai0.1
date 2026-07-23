@@ -3,6 +3,7 @@ import { C } from '@/app/theme'
 import {
   getChatModelOptions,
   getChatProviderOptions,
+  getChatProviderPresentation,
 } from './chatProviderUtils'
 
 function ProviderOption({ option, active, onSelect }) {
@@ -29,8 +30,10 @@ export function ChatProviderSwitcher({
   availability = {},
   localModels = [],
   localState = 'idle',
+  routing = null,
   onSelectProvider,
   onSelectModel,
+  onApplyRouting,
   onDiscoverLocal,
   onOpenSettings,
 }) {
@@ -43,6 +46,16 @@ export function ChatProviderSwitcher({
   const hasLocalCodingModel = provider.local && modelOptions.some((model) => model.codeReady)
   const discovering = localState === 'discovering'
   const localFailure = localState === 'failed'
+  const routingRecommendation = routing?.recommendation || null
+  const routingPresentation = routingRecommendation
+    ? getChatProviderPresentation(routingRecommendation.provider, routingRecommendation.model)
+    : null
+  const showRouting = Boolean(routing?.hasRequest && (routingPresentation?.id || routing?.current?.fit === 'unavailable'))
+  const routingStatusLabel = !routingRecommendation
+    ? 'Choose a ready provider'
+    : routing.current?.fit === 'limited'
+      ? 'Best available fallback'
+      : 'Current route fits'
 
   useEffect(() => {
     if (!open) return undefined
@@ -67,6 +80,12 @@ export function ChatProviderSwitcher({
 
   function chooseModel(modelId) {
     onSelectModel(modelId)
+    setOpen(false)
+  }
+
+  function applyRecommendedRoute() {
+    if (!routingRecommendation || typeof onApplyRouting !== 'function') return
+    onApplyRouting(routingRecommendation)
     setOpen(false)
   }
 
@@ -97,6 +116,24 @@ export function ChatProviderSwitcher({
             </div>
             <button type="button" onClick={() => setOpen(false)} aria-label="Close provider menu">×</button>
           </header>
+
+          {showRouting && (
+            <section className="fl-chat-provider-routing" aria-label="FounderLab routing recommendation">
+              <div className="fl-chat-provider-routing-copy">
+                <span>FounderLab routing</span>
+                <strong>{routing.summary}</strong>
+                {routingPresentation && <small>{routingPresentation.local ? 'Local' : 'Cloud'} · {routingPresentation.name} · {routingPresentation.model}</small>}
+                <p>{routing.reason}</p>
+              </div>
+              {routing.shouldOfferSwitch ? (
+                <button type="button" className="fl-chat-provider-routing-action" onClick={applyRecommendedRoute}>
+                  Use {routingPresentation.local ? 'local' : 'cloud'} route
+                </button>
+              ) : (
+                <span className="fl-chat-provider-routing-current">{routingStatusLabel}</span>
+              )}
+            </section>
+          )}
 
           {cloudOptions.length > 0 && (
             <section className="fl-chat-provider-group" aria-label="Cloud providers">

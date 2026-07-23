@@ -1005,6 +1005,56 @@
 .fl-chat-provider-menu-header button:hover,
 .fl-chat-provider-menu-header button:focus-visible { background: rgba(255,255,255,.07); color: #fff; outline: none; }
 
+.fl-chat-provider-routing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 4px 7px;
+  padding: 9px 10px;
+  border: 1px solid rgba(129,140,248,.28);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(167,139,250,.16), transparent 46%),
+    rgba(99,102,241,.09);
+}
+.fl-chat-provider-routing-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.fl-chat-provider-routing-copy > span {
+  color: #a5b4fc;
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
+.fl-chat-provider-routing-copy strong { color: #f2f2ff; font-size: 11px; line-height: 1.25; }
+.fl-chat-provider-routing-copy small {
+  overflow: hidden;
+  color: #c4b5fd;
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-chat-provider-routing-copy p { margin: 1px 0 0; color: #aaaac0; font-size: 9.5px; line-height: 1.35; }
+.fl-chat-provider-routing-action {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 1px solid rgba(196,181,253,.42);
+  border-radius: 8px;
+  background: rgba(167,139,250,.16);
+  color: #ede9fe;
+  cursor: pointer;
+  padding: 5px 7px;
+  font: 720 9.5px inherit;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+.fl-chat-provider-routing-action:hover,
+.fl-chat-provider-routing-action:focus-visible {
+  border-color: rgba(221,214,254,.76);
+  background: rgba(167,139,250,.26);
+  outline: none;
+  transform: translateY(-1px);
+}
+.fl-chat-provider-routing-current { flex: 0 0 auto; color: #a7f3d0; font-size: 9.5px; font-weight: 700; }
+
 .fl-chat-provider-group { padding: 8px 4px; border-top: 1px solid rgba(255,255,255,.06); }
 .fl-chat-provider-group-label {
   display: block;
@@ -1700,4 +1750,7 @@
   .fl-chat-message.is-user .fl-chat-message-card { border-radius: 15px 4px 15px 15px; }
   .fl-chat-message.is-assistant .fl-chat-message-card { border-radius: 4px 15px 15px 15px; }
   .fl-chat-provider-model-copy small { font-size: 9px; }
+  .fl-chat-provider-routing { align-items: flex-start; flex-direction: column; }
+  .fl-chat-provider-routing-action,
+  .fl-chat-provider-routing-current { align-self: flex-start; }
 }

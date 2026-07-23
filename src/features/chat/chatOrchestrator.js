@@ -330,12 +330,14 @@ export function getOrchestratorGuidance(context) {
 
 export function createAssistantOrchestration(context) {
   const intent = context?.intent || classifyChatRequest('')
+  const routing = normalizeRoutingEvidence(context?.modelRouting)
   return Object.freeze({
     version: 1,
     mode: intent.mode,
     operation: intent.operation,
     ...(intent.primaryTool ? { primaryTool: intent.primaryTool } : {}),
     ...(intent.requiresPlan ? { requiresPlan: true } : {}),
+    ...(routing ? { routing } : {}),
     actions: Object.freeze([]),
   })
 }
@@ -343,6 +345,36 @@ export function createAssistantOrchestration(context) {
 const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
 const ACTION_STATUSES = new Set(['completed', 'handoff-opened'])
 const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project'])
+const ROUTING_TASK_CLASSES = new Set(['conversation', 'planning', 'code', 'execution'])
+const ROUTING_REASONING_LEVELS = new Set(['light', 'focused', 'high'])
+const ROUTING_PATHS = new Set(['cloud', 'local'])
+const ROUTING_PROVIDER_IDS = new Set(['anthropic', 'groq', 'gemini', 'ollama'])
+
+function normalizeRoutingSelection(value) {
+  if (!value || typeof value !== 'object' || !ROUTING_PROVIDER_IDS.has(value.provider) || !ROUTING_PATHS.has(value.path)) return null
+  const model = requestText(value.model).slice(0, 160)
+  if (!model) return null
+  return Object.freeze({ provider: value.provider, model, path: value.path })
+}
+
+/**
+ * Message-level routing evidence captures only the bounded model-path decision
+ * made for that reply. It deliberately excludes prompt content, credentials,
+ * availability internals, and any claim that the path executed product work.
+ */
+function normalizeRoutingEvidence(value) {
+  if (!value || typeof value !== 'object' || !ROUTING_TASK_CLASSES.has(value.taskClass)) return null
+  const selected = normalizeRoutingSelection(value.selected || value.current)
+  if (!selected) return null
+  const recommendation = normalizeRoutingSelection(value.recommendation)
+  return Object.freeze({
+    version: 1,
+    taskClass: value.taskClass,
+    reasoningLevel: ROUTING_REASONING_LEVELS.has(value.reasoningLevel) ? value.reasoningLevel : 'light',
+    selected,
+    ...(recommendation ? { recommendation } : {}),
+  })
+}
 
 function normalizeActionResource(value) {
   if (!value || typeof value !== 'object' || !ACTION_RESOURCE_TYPES.has(value.type)) return null
@@ -357,6 +389,7 @@ export function normalizeMessageOrchestration(value) {
   if (!value || typeof value !== 'object') return null
   const mode = ['conversation', 'planning', 'operator', 'follow-up'].includes(value.mode) ? value.mode : 'conversation'
   const operation = ['explain', 'plan', 'capture', 'create', 'change', 'inspect', 'handoff', 'continue'].includes(value.operation) ? value.operation : 'explain'
+  const routing = normalizeRoutingEvidence(value.routing)
   const actions = Array.isArray(value.actions)
     ? value.actions
       .filter((action) => action && ACTION_IDS.has(action.id) && ACTION_STATUSES.has(action.status))
@@ -372,6 +405,7 @@ export function normalizeMessageOrchestration(value) {
     operation,
     ...(typeof value.primaryTool === 'string' && TOOL_PRIORITY.includes(value.primaryTool) ? { primaryTool: value.primaryTool } : {}),
     ...(value.requiresPlan === true ? { requiresPlan: true } : {}),
+    ...(routing ? { routing } : {}),
     actions: Object.freeze(actions),
   })
 }

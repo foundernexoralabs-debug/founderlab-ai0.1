@@ -118,6 +118,20 @@ export function ChatWorkspace({ user }) {
   const voiceSessionLabel = activeVoiceProvider === 'elevenlabs'
     ? `ElevenLabs · ${ELEVENLABS_VOICE_PROVIDER?.voiceLabels[voiceConfig.gender] || 'Premium voice'}`
     : 'Best available browser voice'
+  const chatRoutingPreview = useMemo(() => {
+    const request = input.trim()
+    if (!request) return null
+    const draftMessage = {
+      role: 'user',
+      content: request,
+      ...(pendingImage?.base64 ? { image: pendingImage.base64 } : {}),
+    }
+    return getChatRequestContext([...messages, draftMessage], getPersistentChatContext(activeId, {
+      providerId: providerSelection.id,
+      modelId: providerSelection.model,
+      hasImage: Boolean(pendingImage?.base64),
+    })).modelRouting
+  }, [activeId, input, localModelState, localModels, messages, pendingImage, providerAvailability, providerSelection])
 
   useEffect(() => {
     let alive = true
@@ -254,11 +268,21 @@ export function ChatWorkspace({ user }) {
     synchronizePersistentMemory(conversationsRef.current)
   }
 
-  function getPersistentChatContext(conversationId) {
+  function getPersistentChatContext(conversationId, {
+    providerId = providerSelection.id,
+    modelId = providerSelection.model,
+    hasImage = false,
+  } = {}) {
     return {
       memory: chatMemoryRef.current,
       workspace: workspaceAwarenessRef.current,
       conversationId,
+      routing: {
+        availability: providerAvailability,
+        currentSelection: { provider: providerId, model: modelId },
+        localModels,
+        hasImage,
+      },
     }
   }
 
@@ -753,6 +777,19 @@ export function ChatWorkspace({ user }) {
     setErrorState(null)
   }
 
+  function applyChatRouting(recommendation) {
+    const providerId = recommendation?.provider
+    const modelId = recommendation?.model
+    if (!providerId || !modelId || !setProviderModel(providerId, modelId) || !setAIProvider(providerId)) {
+      toast('FounderLab could not apply that recommended route. Choose a provider and model directly.', 'error')
+      return
+    }
+    setProviderSelection({ id: providerId, model: modelId })
+    setErrorState(null)
+    const presentation = getChatProviderPresentation(providerId, modelId)
+    toast(`Using ${presentation.name} · ${presentation.model} for this request.`, 'success')
+  }
+
   async function discoverChatOllamaModels() {
     setLocalModelState('discovering')
     let result
@@ -784,7 +821,7 @@ export function ChatWorkspace({ user }) {
     setSending(true)
     setErrorState(null)
 
-    const requestContext = getChatRequestContext(conversationMessages, getPersistentChatContext(conversationId))
+    const requestContext = getChatRequestContext(conversationMessages, getPersistentChatContext(conversationId, { providerId, modelId }))
     const result = await requestAIResult({
       provider: providerId,
       model: modelId,
@@ -842,7 +879,7 @@ export function ChatWorkspace({ user }) {
       provider: providerId,
       model: modelId,
       messages: toChatRequestMessages(callMessages, providerId),
-      system: getLiveCallSystemPrompt(getChatRequestContext(callMessages, getPersistentChatContext(activeId))),
+      system: getLiveCallSystemPrompt(getChatRequestContext(callMessages, getPersistentChatContext(activeId, { providerId, modelId }))),
       maxTokens: LIVE_CALL_RESPONSE_OPTIONS.maxTokens,
       temperature: LIVE_CALL_RESPONSE_OPTIONS.temperature,
       localOllamaAllowed: true,
@@ -1304,8 +1341,10 @@ export function ChatWorkspace({ user }) {
               availability={providerAvailability}
               localModels={localModels}
               localState={localModelState}
+              routing={chatRoutingPreview}
               onSelectProvider={selectChatProvider}
               onSelectModel={selectChatModel}
+              onApplyRouting={applyChatRouting}
               onDiscoverLocal={discoverChatOllamaModels}
               onOpenSettings={() => flNavigate('settings')}
             />}
