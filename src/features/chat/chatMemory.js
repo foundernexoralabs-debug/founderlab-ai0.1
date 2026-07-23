@@ -77,7 +77,7 @@ const EMPTY_WORKSPACE_AWARENESS = Object.freeze({ projects: Object.freeze([]), t
 
 function cleanResource(resource) {
   if (!isRecord(resource)) return null
-  const type = ['task', 'note', 'project'].includes(resource.type) ? resource.type : ''
+  const type = ['task', 'note', 'project', 'repository', 'branch'].includes(resource.type) ? resource.type : ''
   const id = safeText(resource.id, 160)
   const title = safeText(resource.title)
   if (!type || !id || !title) return null
@@ -283,6 +283,12 @@ function actionEvidenceLabel(action) {
   if (action.id === 'save-note' && action.status === 'completed') return action.resource?.title ? `A note was saved: “${action.resource.title}”.` : 'A note was saved from Chat.'
   const names = { builder: 'Builder', code: 'Code AI', github: 'GitHub-preparation', youtube: 'YouTube AI' }
   if (action.status === 'handoff-opened' && names[action.id]) return `A ${names[action.id]} handoff was opened; that is not confirmation that downstream work was created or completed.`
+  if (action.id === 'inspect-repo' && action.status === 'inspection-completed') return action.resource?.title
+    ? `A bounded, read-only inspection was completed for ${action.resource.title}; it does not confirm every repository state or a code change.`
+    : 'A bounded, read-only repository inspection was completed; it does not confirm every repository state or a code change.'
+  if (action.id === 'prepare-branch' && action.status === 'branch-prepared') return action.resource?.title
+    ? `A branch-first plan was prepared for ${action.resource.title}; no branch was created and no files were changed.`
+    : 'A branch-first plan was prepared; no branch was created and no files were changed.'
   return ''
 }
 

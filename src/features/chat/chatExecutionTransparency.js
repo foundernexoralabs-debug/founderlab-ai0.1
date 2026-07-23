@@ -15,6 +15,8 @@ const ACTION_COPY = Object.freeze({
   code: 'Opened a Code AI handoff',
   github: 'Opened a GitHub-preparation handoff',
   youtube: 'Opened a YouTube AI handoff',
+  'inspect-repo': 'Completed a read-only repository inspection',
+  'prepare-branch': 'Prepared a branch-first change plan',
 })
 
 function text(value) {
@@ -30,6 +32,12 @@ function getActionFact(action) {
   }
   if (action.status === 'handoff-opened') {
     return { kind: 'handoff', label, detail: 'The destination was opened; no external work is confirmed.' }
+  }
+  if (action.id === 'inspect-repo' && action.status === 'inspection-completed') {
+    return { kind: 'inspection', label, detail: 'Public GitHub metadata and a bounded file tree were read. No branch or file was changed.' }
+  }
+  if (action.id === 'prepare-branch' && action.status === 'branch-prepared') {
+    return { kind: 'branch-prepared', label, detail: 'A proposed branch and scope were prepared. No Git branch was created and no files were changed.' }
   }
   return null
 }
@@ -56,6 +64,8 @@ const EXECUTION_STATE_COPY = Object.freeze({
   'conversational-only': Object.freeze({ label: 'Conversational only', detail: 'No FounderLab action has been prepared or performed.' }),
   'plan-prepared': Object.freeze({ label: 'Plan prepared', detail: 'FounderLab prepared guidance; no execution has started.' }),
   'inspection-needed': Object.freeze({ label: 'Inspection needed', detail: 'FounderLab needs a scoped inspection before any execution claim.' }),
+  'inspection-completed': Object.freeze({ label: 'Inspection completed', detail: 'A bounded, read-only inspection is recorded. No repository mutation is confirmed.' }),
+  'branch-prepared': Object.freeze({ label: 'Branch plan prepared', detail: 'A branch-first change plan is recorded. No Git branch was created.' }),
   'ready-for-execution': Object.freeze({ label: 'Ready for execution', detail: 'A scoped path is prepared. The user still chooses the explicit next action.' }),
   'handoff-opened': Object.freeze({ label: 'Handoff opened', detail: 'The destination was opened; no downstream result is confirmed.' }),
   'external-integration-needed': Object.freeze({ label: 'External integration needed', detail: 'A connection is required before FounderLab can perform this external action.' }),
@@ -76,6 +86,12 @@ export function getChatExecutionState({ mode = 'conversation', actions = [], exe
   const completed = actions.find((action) => action.kind === 'completed')
   if (completed || execution?.readiness === 'completed-locally') return Object.freeze({ key: 'completed-locally', ...EXECUTION_STATE_COPY['completed-locally'] })
 
+  const branchPrepared = actions.find((action) => action.kind === 'branch-prepared')
+  if (branchPrepared) return Object.freeze({ key: 'branch-prepared', ...EXECUTION_STATE_COPY['branch-prepared'] })
+
+  const inspection = actions.find((action) => action.kind === 'inspection')
+  if (inspection) return Object.freeze({ key: 'inspection-completed', ...EXECUTION_STATE_COPY['inspection-completed'] })
+
   const handoff = actions.find((action) => action.kind === 'handoff')
   if (handoff) return Object.freeze({ key: 'handoff-opened', ...EXECUTION_STATE_COPY['handoff-opened'] })
 
@@ -95,6 +111,8 @@ export function getChatExecutionState({ mode = 'conversation', actions = [], exe
 function getExecutionNextStep({ state, completed, handoff }) {
   if (state.key === 'external-integration-needed') return 'Connect the required integration before FounderLab attempts an external action; it can still prepare the draft or plan now.'
   if (state.key === 'inspection-needed') return 'Start the scoped inspection before deciding on a branch or implementation change.'
+  if (state.key === 'inspection-completed') return 'Review the recorded findings, then prepare a branch-first plan or explicit Code AI handoff when appropriate.'
+  if (state.key === 'branch-prepared') return 'Review the proposed branch scope and explicitly approve any future repository mutation.'
   if (state.key === 'waiting-for-approval') return 'Review the proposed scope, risk, and verification, then explicitly approve any future branch-first change.'
   if (state.key === 'ready-for-execution') return 'Choose the explicit FounderLab handoff when you want to continue with this prepared path.'
   if (state.key === 'externally-unverified') return 'Confirm the downstream result with evidence before reporting external completion.'
@@ -115,16 +133,22 @@ export function getChatExecutionTransparency(orchestration) {
   if (!operational) return null
 
   const completed = actions.find((action) => action.kind === 'completed')
+  const inspection = actions.find((action) => action.kind === 'inspection')
+  const branchPrepared = actions.find((action) => action.kind === 'branch-prepared')
   const handoff = actions.find((action) => action.kind === 'handoff')
   const outcome = completed
     ? { kind: 'completed', label: completed.label, detail: completed.detail }
-    : handoff
-      ? { kind: 'handoff', label: handoff.label, detail: handoff.detail }
-      : {
-          kind: 'recommendation',
-          label: mode === 'planning' ? 'Plan prepared' : 'Recommendation prepared',
-          detail: 'FounderLab has not performed a workspace or external action from this reply.',
-        }
+    : branchPrepared
+      ? { kind: 'branch-prepared', label: branchPrepared.label, detail: branchPrepared.detail }
+      : inspection
+        ? { kind: 'inspection', label: inspection.label, detail: inspection.detail }
+        : handoff
+          ? { kind: 'handoff', label: handoff.label, detail: handoff.detail }
+          : {
+              kind: 'recommendation',
+              label: mode === 'planning' ? 'Plan prepared' : 'Recommendation prepared',
+              detail: 'FounderLab has not performed a workspace or external action from this reply.',
+            }
 
   const state = getChatExecutionState({ mode, actions, execution, capability })
 

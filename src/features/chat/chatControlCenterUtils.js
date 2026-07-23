@@ -2,6 +2,7 @@ import { classifyChatRequest } from './chatRequestIntent.js'
 import { getCompletedOrchestrationActions } from './chatOrchestrator.js'
 import { getExecutionBridgeHandoffAction } from './chatExecutionBridge.js'
 import { getCapabilityBridgeHandoffAction } from './chatCapabilityBridge.js'
+import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -52,6 +53,20 @@ const CONTROL_ACTIONS = Object.freeze({
     target: 'youtube',
     completedLabel: 'Opened',
   }),
+  'inspect-repo': Object.freeze({
+    id: 'inspect-repo',
+    label: 'Inspect repository',
+    detail: 'Read public GitHub metadata and file paths',
+    icon: '⌕',
+    completedLabel: 'Inspected',
+  }),
+  'prepare-branch': Object.freeze({
+    id: 'prepare-branch',
+    label: 'Prepare branch plan',
+    detail: 'Propose a safe branch-first change',
+    icon: '⎇',
+    completedLabel: 'Prepared',
+  }),
 })
 
 function requestText(value) {
@@ -72,7 +87,13 @@ export function getChatControlActions(request) {
   if (intent.wantsTask) actions.push(CONTROL_ACTIONS['create-task'])
   if (intent.wantsNote) actions.push(CONTROL_ACTIONS['save-note'])
 
-  if (intent.primaryTool) actions.push(CONTROL_ACTIONS[intent.primaryTool])
+  const repository = parsePublicGithubRepositoryReference(text)
+  const repositoryWork = Boolean(repository) || /\b(?:repository|repo|codebase|branch|pull request|commit|bug|crash|debug|refactor)\b/i.test(text)
+  if (repository && intent.isOperational && ['inspect', 'change', 'create', 'continue', 'handoff'].includes(intent.operation)) {
+    actions.push(CONTROL_ACTIONS['inspect-repo'])
+  }
+
+  if (intent.primaryTool && !repositoryWork) actions.push(CONTROL_ACTIONS[intent.primaryTool])
 
   return actions.slice(0, 2)
 }
@@ -92,7 +113,14 @@ export function getAssistantControlActions(messages, assistantIndex) {
   const request = getPreviousUserRequest(messages, assistantIndex)
   const completed = new Map(getCompletedOrchestrationActions(assistant.orchestration)
     .map((action) => [action.id, action.status]))
-  const actions = getChatControlActions(request)
+  let actions = getChatControlActions(request)
+  const inspectionCompleted = completed.get('inspect-repo') === 'inspection-completed'
+  const branchPrepared = completed.get('prepare-branch') === 'branch-prepared'
+  const branchRequired = assistant.orchestration?.execution?.branch === 'required'
+  if (inspectionCompleted) {
+    actions = actions.filter((action) => action.id !== 'inspect-repo')
+    if (branchRequired && !branchPrepared) actions.push(CONTROL_ACTIONS['prepare-branch'])
+  }
   const executionHandoff = getExecutionBridgeHandoffAction(assistant.orchestration?.execution)
   const capabilityHandoff = getCapabilityBridgeHandoffAction(assistant.orchestration?.capabilities)
   const continuationAction = executionHandoff || capabilityHandoff

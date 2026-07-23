@@ -79,9 +79,17 @@ import { getChatExecutionState, getChatExecutionTransparency } from '../src/feat
 import {
   getChatExecutionBridge,
   getExecutionBridgeGuidance,
+  getExecutionBridgeHandoffAction,
   getExecutionBridgePresentation,
   normalizeExecutionBridgeEvidence,
 } from '../src/features/chat/chatExecutionBridge.js'
+import {
+  createRepositoryBranchPreparation,
+  formatRepositoryBranchPreparationReport,
+  formatRepositoryInspectionReport,
+  inspectPublicGithubRepository,
+  parsePublicGithubRepositoryReference,
+} from '../src/features/chat/chatRepositoryInspection.js'
 import {
   getCapabilityBridgeGuidance,
   getCapabilityBridgeHandoffAction,
@@ -628,7 +636,7 @@ test('Execution bridge prepares repo-aware, branch-first work without claiming r
     },
     requestedOperation: 'change',
     repoAwareness: 'needed',
-    readiness: 'waiting-for-approval',
+    readiness: 'ready-to-inspect',
     risk: 'medium',
     branch: 'required',
     inspection: 'required',
@@ -641,9 +649,9 @@ test('Execution bridge prepares repo-aware, branch-first work without claiming r
   assert.match(fixGuidance, /not proof that a tool, repository, branch, or external system was changed/i)
   const requestContext = getChatRequestContext([{ role: 'user', content: 'Fix this bug in the FounderLab codebase.' }])
   assert.equal(requestContext.executionBridge.target.surface, 'repository')
-  assert.equal(requestContext.executionBridge.readiness, 'waiting-for-approval')
+  assert.equal(requestContext.executionBridge.readiness, 'ready-to-inspect')
   assert.match(getChatSystemPrompt(requestContext), /Current execution-bridge note/i)
-  assert.equal(createAssistantOrchestration(requestContext).execution.readiness, 'waiting-for-approval')
+  assert.equal(createAssistantOrchestration(requestContext).execution.readiness, 'ready-to-inspect')
 
   const inspect = getChatExecutionBridge({
     request: 'Inspect this project for the onboarding crash.',
@@ -665,7 +673,7 @@ test('Execution bridge prepares repo-aware, branch-first work without claiming r
   assert.equal(branchPreparation.target.surface, 'repository')
   assert.equal(branchPreparation.branch, 'recommended')
   assert.equal(branchPreparation.inspection, 'recommended')
-  assert.equal(branchPreparation.readiness, 'ready-to-handoff')
+  assert.equal(branchPreparation.readiness, 'ready-to-inspect')
 
   const builder = getChatExecutionBridge({
     request: 'Prepare Builder work for a premium FounderLab landing page.',
@@ -740,6 +748,104 @@ test('Execution bridge metadata is bounded and persists only safe target and rea
   })
   assert.deepEqual(orchestration.execution, normalized)
   assert.deepEqual(normalizeMessageOrchestration({ ...orchestration, execution: { ...normalized, token: 'never persist' } }).execution, normalized)
+})
+
+test('Repository inspection reads only an explicit public GitHub reference and returns bounded metadata and paths', async () => {
+  assert.deepEqual(parsePublicGithubRepositoryReference('Please inspect https://github.com/acme/founderlab.git/issues'), {
+    provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab',
+  })
+  assert.deepEqual(parsePublicGithubRepositoryReference('Inspect acme/founderlab'), {
+    provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab',
+  })
+  assert.equal(parsePublicGithubRepositoryReference('https://gitlab.com/acme/founderlab'), null)
+  assert.equal(parsePublicGithubRepositoryReference('inspect this repository'), null)
+
+  const requests = []
+  const fetchImpl = async (url) => {
+    requests.push(url)
+    if (url.endsWith('/repos/acme/founderlab')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          name: 'founderlab', full_name: 'acme/founderlab', default_branch: 'main', language: 'JavaScript', private: false,
+          description: 'A public founder workspace.', updated_at: '2026-07-23T12:00:00Z',
+        }),
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        truncated: false,
+        tree: [
+          { type: 'blob', path: 'README.md', content: 'must not be retained' },
+          { type: 'blob', path: 'package.json' },
+          { type: 'blob', path: 'src/App.jsx' },
+          { type: 'blob', path: 'docs/architecture.md' },
+        ],
+      }),
+    }
+  }
+  const inspection = await inspectPublicGithubRepository('acme/founderlab', {
+    fetchImpl,
+    now: () => '2026-07-23T12:30:00Z',
+  })
+  assert.equal(requests.length, 2)
+  assert.equal(inspection.repository.defaultBranch, 'main')
+  assert.equal(inspection.tree.state, 'complete')
+  assert.deepEqual(inspection.tree.sampleFiles, ['package.json', 'README.md', 'src/App.jsx', 'docs/architecture.md'])
+  assert.equal(JSON.stringify(inspection).includes('must not be retained'), false)
+  assert.match(formatRepositoryInspectionReport(inspection), /No branch was created and no files were changed/i)
+
+  await assert.rejects(
+    () => inspectPublicGithubRepository('acme/private-repo', {
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ private: true }) }),
+    }),
+    /public GitHub repositories only/i,
+  )
+
+  const preparation = createRepositoryBranchPreparation({ inspection, request: 'Fix the onboarding crash in the chat composer.' })
+  assert.equal(preparation.proposedBranch, 'founderlab/fix-onboarding-crash-chat-composer')
+  assert.equal(preparation.baseBranch, 'main')
+  assert.match(formatRepositoryBranchPreparationReport(preparation), /No branch was created, no files were changed, and no tests were run/i)
+})
+
+test('Execution bridge promotes explicit public repository work through inspect then branch planning without a fake mutation', () => {
+  const request = 'Fix the onboarding crash in https://github.com/acme/founderlab.'
+  const intent = classifyChatRequest(request)
+  const initial = getChatExecutionBridge({ request, intent })
+  assert.deepEqual(initial.target.repository, { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' })
+  assert.equal(initial.readiness, 'ready-to-inspect')
+  assert.equal(initial.inspection, 'required')
+  assert.equal(getExecutionBridgeHandoffAction(initial), '')
+
+  const inspected = getChatExecutionBridge({
+    request,
+    intent,
+    projectAwareness: {
+      actions: [{
+        id: 'inspect-repo', status: 'inspection-completed',
+        resource: { type: 'repository', id: 'github:acme/founderlab@main', title: 'acme/founderlab' },
+      }],
+    },
+  })
+  assert.equal(inspected.inspection, 'completed')
+  assert.equal(inspected.readiness, 'waiting-for-approval')
+  assert.equal(getExecutionBridgeHandoffAction(inspected), '')
+  assert.match(getExecutionBridgeGuidance(inspected), /read-only repository inspection is recorded/i)
+
+  const transparency = getChatExecutionTransparency({
+    mode: 'operator', operation: 'change', execution: inspected,
+    actions: [{ id: 'inspect-repo', status: 'inspection-completed' }],
+  })
+  assert.equal(transparency.state.key, 'inspection-completed')
+  assert.equal(transparency.outcome.kind, 'inspection')
+  const branchTransparency = getChatExecutionTransparency({
+    mode: 'operator', operation: 'change', actions: [{ id: 'prepare-branch', status: 'branch-prepared' }],
+  })
+  assert.equal(branchTransparency.state.key, 'branch-prepared')
+  assert.equal(branchTransparency.outcome.kind, 'branch-prepared')
 })
 
 test('Capability bridge prepares real FounderLab routes and external integrations without inventing a connector action', () => {
@@ -963,6 +1069,7 @@ test('Chat control center offers only explicit, real workspace actions and bound
   assert.deepEqual(getChatControlActions('Save this in Notes and use this idea in Builder.').map((action) => action.id), ['save-note', 'builder'])
   assert.deepEqual(getChatControlActions('Help me create an app for investor onboarding.').map((action) => action.id), ['builder'])
   assert.deepEqual(getChatControlActions('Prepare this implementation for GitHub.').map((action) => action.id), ['github'])
+  assert.deepEqual(getChatControlActions('Inspect https://github.com/acme/founderlab and fix the onboarding crash.').map((action) => action.id), ['inspect-repo'])
   assert.deepEqual(getChatControlActions('Use this idea for YouTube content.').map((action) => action.id), ['youtube'])
   assert.deepEqual(getChatControlActions('What time is it in London?'), [])
   assert.deepEqual(getChatControlActions('What is GitHub and how does an API work?'), [])
@@ -987,8 +1094,22 @@ test('Chat control center offers only explicit, real workspace actions and bound
       actions: [],
     } },
   ], 1)
-  assert.deepEqual(executionActions.map((action) => action.id), ['code'])
-  assert.equal(executionActions[0].label, 'Open Code AI')
+  assert.deepEqual(executionActions.map((action) => action.id), [])
+
+  const branchActions = getAssistantControlActions([
+    { role: 'user', content: 'Fix the onboarding crash in https://github.com/acme/founderlab.' },
+    { role: 'assistant', content: 'I inspected the repository.', orchestration: {
+      version: 1,
+      mode: 'operator',
+      operation: 'change',
+      execution: {
+        target: { surface: 'repository', repository: { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' } },
+        requestedOperation: 'change', repoAwareness: 'needed', readiness: 'waiting-for-approval', risk: 'medium', branch: 'required', inspection: 'completed', approval: 'required', handoff: 'code',
+      },
+      actions: [{ id: 'inspect-repo', status: 'inspection-completed', resource: { type: 'repository', id: 'github:acme/founderlab@main', title: 'acme/founderlab' } }],
+    } },
+  ], 1)
+  assert.deepEqual(branchActions.map((action) => action.id), ['prepare-branch'])
 
   const builderPayload = buildChatHandoffPayload('builder', { request: 'Create an onboarding app', response: 'Plan the user flow first.' })
   assert.match(builderPayload.desc, /FounderLab Chat brief/)

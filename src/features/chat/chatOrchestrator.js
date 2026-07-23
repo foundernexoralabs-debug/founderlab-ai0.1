@@ -352,9 +352,9 @@ export function createAssistantOrchestration(context) {
   })
 }
 
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened'])
-const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project'])
+const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
+const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared'])
+const ACTION_RESOURCE_TYPES = new Set(['task', 'note', 'project', 'repository', 'branch'])
 const ROUTING_TASK_CLASSES = new Set(['conversation', 'planning', 'code', 'execution'])
 const ROUTING_REASONING_LEVELS = new Set(['light', 'focused', 'high'])
 const ROUTING_PATHS = new Set(['cloud', 'local'])

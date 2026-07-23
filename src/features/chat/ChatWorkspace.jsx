@@ -43,6 +43,13 @@ import {
 } from './chatUtils'
 import { buildChatHandoffPayload, getAssistantControlActions } from './chatControlCenterUtils'
 import { createAssistantOrchestration, recordOrchestrationAction } from './chatOrchestrator'
+import {
+  createRepositoryBranchPreparation,
+  formatRepositoryBranchPreparationReport,
+  formatRepositoryInspectionReport,
+  getRepositoryInspectionErrorPresentation,
+  inspectPublicGithubRepository,
+} from './chatRepositoryInspection'
 import { buildLiveCallRequestContext, canInterruptLiveCall, createLiveCallRecap, EMPTY_LIVE_CALL, getLiveCallProviderSupport, getLiveCallTurnDelay, shouldQueueLiveCallTurn } from './liveCallUtils'
 import { createLiveCallResponsePlan, createReadAloudPlan, createVoiceResponsePlan, normalizeLiveCallResponseText } from './voiceResponseUtils'
 import './chatPremium.css'
@@ -88,6 +95,7 @@ export function ChatWorkspace({ user }) {
   const chatMemoryRef = useRef(normalizeChatMemory(null).value)
   const workspaceRecordsRef = useRef({ projects: [], tasks: [], notes: [] })
   const workspaceAwarenessRef = useRef(buildWorkspaceAwareness())
+  const inspectionCacheRef = useRef(new Map())
   const requestAbortRef = useRef(null)
   const requestSequenceRef = useRef(0)
   const streamingReplyRef = useRef(null)
@@ -1198,6 +1206,74 @@ export function ChatWorkspace({ user }) {
     return true
   }
 
+  /** Append a concrete action report only after its bounded action evidence is recorded. */
+  function appendActionReport(messageId, content) {
+    const conversation = conversationsRef.current.find((entry) => entry.messages?.some((message) => message.id === messageId))
+    if (!conversation || !content) return false
+    const report = { id: uniqueMessageId(), role: 'assistant', content, created_at: ts() }
+    updateConversation(conversation.id, { messages: [...conversation.messages, report] })
+    return true
+  }
+
+  function getRecordedInspection(message) {
+    const action = [...(message?.orchestration?.actions || [])].reverse()
+      .find((entry) => entry?.id === 'inspect-repo' && entry?.status === 'inspection-completed')
+    const identifier = typeof action?.resource?.id === 'string' ? action.resource.id : ''
+    const match = identifier.match(/^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+)$/)
+    if (!match) return null
+    const cached = inspectionCacheRef.current.get(match[1])
+    if (cached?.repository?.defaultBranch === match[2]) return cached
+    const [owner, name] = match[1].split('/')
+    return {
+      reference: { provider: 'github', owner, name, slug: match[1] },
+      repository: { defaultBranch: match[2] },
+    }
+  }
+
+  async function inspectRepositoryFromChat(action, message) {
+    try {
+      const inspection = await inspectPublicGithubRepository(action.request)
+      inspectionCacheRef.current.set(inspection.reference.slug, inspection)
+      const resource = {
+        type: 'repository',
+        id: `github:${inspection.reference.slug}@${inspection.repository.defaultBranch}`,
+        title: inspection.reference.slug,
+      }
+      recordActionEvidence(message.id, { id: 'inspect-repo', status: 'inspection-completed', resource })
+      appendActionReport(message.id, formatRepositoryInspectionReport(inspection))
+      toast('Public repository inspection complete. No files were changed.', 'success')
+      return true
+    } catch (error) {
+      toast(getRepositoryInspectionErrorPresentation(error), 'error')
+      return false
+    }
+  }
+
+  function prepareRepositoryBranchFromChat(action, message) {
+    const inspection = getRecordedInspection(message)
+    if (!inspection) {
+      toast('Inspect this public repository before preparing a branch-first change.', 'error')
+      return false
+    }
+    const preparation = createRepositoryBranchPreparation({ inspection, request: action?.request || '' })
+    if (!preparation) {
+      toast('FounderLab could not prepare a branch plan from this inspection.', 'error')
+      return false
+    }
+    recordActionEvidence(message.id, {
+      id: 'prepare-branch',
+      status: 'branch-prepared',
+      resource: {
+        type: 'branch',
+        id: `github:${preparation.repository.slug}#${preparation.proposedBranch}`,
+        title: preparation.proposedBranch,
+      },
+    })
+    appendActionReport(message.id, formatRepositoryBranchPreparationReport(preparation))
+    toast('Branch-first plan prepared. No branch was created.', 'success')
+    return true
+  }
+
   function saveRename(conversationId) {
     const title = renameValue.trim()
     if (title) updateConversation(conversationId, { title })
@@ -1239,6 +1315,8 @@ export function ChatWorkspace({ user }) {
   async function continueFromChat(action, message) {
     if (action.id === 'save-note') return saveToNotes(message)
     if (action.id === 'create-task') return createTask(message)
+    if (action.id === 'inspect-repo') return inspectRepositoryFromChat(action, message)
+    if (action.id === 'prepare-branch') return prepareRepositoryBranchFromChat(action, message)
     const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
     if (!payload || !action.target) return false
     recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })

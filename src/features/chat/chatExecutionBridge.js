@@ -5,6 +5,8 @@
  * external tool was changed.
  */
 
+import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
+
 const SURFACES = new Set(['workspace', 'builder', 'code', 'repository', 'github', 'project'])
 const OPERATIONS = new Set(['explain', 'plan', 'capture', 'create', 'change', 'inspect', 'handoff', 'continue'])
 const REPO_AWARENESS = new Set(['not-needed', 'needed', 'not-yet-known'])
@@ -19,11 +21,11 @@ const READINESS = new Set([
 ])
 const RISK_LEVELS = new Set(['none', 'low', 'medium', 'high'])
 const BRANCH_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
-const INSPECTION_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required'])
+const INSPECTION_REQUIREMENTS = new Set(['not-needed', 'recommended', 'required', 'completed'])
 const APPROVAL_REQUIREMENTS = new Set(['not-required', 'required'])
 const HANDOFFS = new Set(['builder', 'code', 'github'])
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
-const ACTION_STATUSES = new Set(['completed', 'handoff-opened'])
+const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
+const ACTION_STATUSES = new Set(['completed', 'handoff-opened', 'inspection-completed', 'branch-prepared'])
 
 function text(value, limit = 160) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, limit) : ''
@@ -51,14 +53,22 @@ function normalizeTask(value) {
   return Object.freeze({ id, title, status })
 }
 
+function normalizeRepository(value) {
+  if (!isRecord(value) || value.provider !== 'github') return null
+  const parsed = parsePublicGithubRepositoryReference(value.slug || `${value.owner || ''}/${value.name || ''}`)
+  return parsed || null
+}
+
 function normalizeTarget(value) {
   if (!isRecord(value) || !SURFACES.has(value.surface)) return null
   const project = normalizeProject(value.project)
   const task = normalizeTask(value.task)
+  const repository = normalizeRepository(value.repository)
   return Object.freeze({
     surface: value.surface,
     ...(project ? { project } : {}),
     ...(task ? { task } : {}),
+    ...(repository ? { repository } : {}),
   })
 }
 
@@ -98,7 +108,20 @@ function hasRequestTerm(request, terms) {
   return terms.some((term) => padded.includes(` ${term} `))
 }
 
-function targetSurface({ intent, request }) {
+function repositoryFromInspectionAction(action) {
+  const identifier = typeof action?.resource?.id === 'string' ? action.resource.id : ''
+  const value = identifier.startsWith('github:') ? identifier.slice('github:'.length).split('@')[0] : action?.resource?.title
+  return parsePublicGithubRepositoryReference(value)
+}
+
+function latestInspectedRepository(actions) {
+  if (!Array.isArray(actions)) return null
+  const action = [...actions].reverse().find((entry) => entry?.id === 'inspect-repo' && entry?.status === 'inspection-completed')
+  return repositoryFromInspectionAction(action)
+}
+
+function targetSurface({ intent, request, knownRepository = null }) {
+  if ((parsePublicGithubRepositoryReference(request) || knownRepository) && ['inspect', 'change', 'create', 'continue', 'handoff'].includes(intent?.operation)) return 'repository'
   if (intent?.primaryTool === 'builder') return 'builder'
   if (intent?.primaryTool === 'github') return 'github'
   if (intent?.wantsTask || intent?.wantsNote || intent?.operation === 'capture') return 'workspace'
@@ -110,7 +133,8 @@ function targetSurface({ intent, request }) {
   return 'project'
 }
 
-function needsRepository(surface, intent, request) {
+function needsRepository(surface, intent, request, knownRepository = null) {
+  if (knownRepository) return true
   if (['repository', 'code', 'github'].includes(surface)) return true
   if (surface === 'builder' || surface === 'workspace') return false
   return hasRequestTerm(request, ['repository', 'repo', 'codebase', 'branch', 'pull request', 'commit', 'bug', 'debug', 'refactor', 'test', 'implementation', 'api'])
@@ -131,11 +155,16 @@ function latestMatchingAction(actions, handoff) {
     && (!handoff || action.id === handoff || (handoff === 'github' && action.id === 'code'))) || null
 }
 
-function determineReadiness({ intent, surface, repoAwareness, branch, handoff, actions, modelRouting }) {
+function latestAction(actions, id, status) {
+  if (!Array.isArray(actions)) return null
+  return [...actions].reverse().find((action) => action?.id === id && action?.status === status) || null
+}
+
+function determineReadiness({ intent, surface, repoAwareness, branch, inspection, handoff, actions, modelRouting }) {
   const action = latestMatchingAction(actions, handoff)
   if (action?.status === 'completed') return 'completed-locally'
   if (action?.status === 'handoff-opened') return 'externally-unverified'
-  if (repoAwareness === 'needed' && intent?.operation === 'inspect') return 'ready-to-inspect'
+  if (repoAwareness === 'needed' && inspection !== 'completed') return 'ready-to-inspect'
   if (branch === 'required') return 'waiting-for-approval'
   if (handoff) return 'ready-to-handoff'
   if (intent?.isOperational && modelRouting?.recommendation) return 'execution-path-selected'
@@ -143,16 +172,22 @@ function determineReadiness({ intent, surface, repoAwareness, branch, handoff, a
   return 'not-started'
 }
 
-function riskFor({ surface, operation, repoAwareness }) {
+function riskFor({ surface, operation, repoAwareness, mutatingRequest = false }) {
   if (surface === 'github') return 'high'
-  if (repoAwareness === 'needed' && ['change', 'create'].includes(operation)) return 'medium'
+  if (repoAwareness === 'needed' && (mutatingRequest || ['change', 'create'].includes(operation))) return 'medium'
   if (repoAwareness === 'needed' || surface === 'builder' || surface === 'code') return 'low'
   return 'none'
 }
 
-function inspectionRequirement({ repoAwareness, operation }) {
+function inspectionRequirement({ repoAwareness, operation, actions, request, repository }) {
+  const matchingInspection = Array.isArray(actions) && repository
+    ? [...actions].reverse().find((action) => action?.id === 'inspect-repo'
+      && action?.status === 'inspection-completed'
+      && repositoryFromInspectionAction(action)?.slug === repository.slug)
+    : null
+  if (repoAwareness === 'needed' && matchingInspection) return 'completed'
   if (repoAwareness !== 'needed') return 'not-needed'
-  if (['inspect', 'change', 'create'].includes(operation)) return 'required'
+  if (['inspect', 'change', 'create'].includes(operation) || hasRequestTerm(request, ['fix', 'debug', 'repair', 'refactor', 'improve', 'change', 'update', 'implement'])) return 'required'
   return 'recommended'
 }
 
@@ -163,15 +198,26 @@ function inspectionRequirement({ repoAwareness, operation }) {
  */
 export function getChatExecutionBridge({ request = '', intent = null, projectAwareness = null, modelRouting = null } = {}) {
   const safeIntent = intent || {}
-  const surface = targetSurface({ intent: safeIntent, request })
-  const repoAwareness = needsRepository(surface, safeIntent, request) ? 'needed' : 'not-needed'
+  const knownRepository = latestInspectedRepository(projectAwareness?.actions)
+  const surface = targetSurface({ intent: safeIntent, request, knownRepository })
+  const repoAwareness = needsRepository(surface, safeIntent, request, knownRepository) ? 'needed' : 'not-needed'
+  const mutatingRequest = ['change', 'create'].includes(safeIntent.operation)
+    || hasRequestTerm(request, ['fix', 'debug', 'repair', 'refactor', 'improve', 'change', 'update', 'implement'])
   const branch = repoAwareness === 'needed'
-    ? ['change', 'create'].includes(safeIntent.operation) || (surface === 'github' && safeIntent.operation === 'handoff')
+    ? mutatingRequest || (surface === 'github' && safeIntent.operation === 'handoff')
       ? 'required'
       : 'recommended'
     : 'not-needed'
   const approval = branch === 'required' ? 'required' : 'not-required'
-  const inspection = inspectionRequirement({ repoAwareness, operation: safeIntent.operation })
+  const requestedRepository = parsePublicGithubRepositoryReference(request)
+  const repository = repoAwareness === 'needed' ? requestedRepository || knownRepository : null
+  const inspection = inspectionRequirement({
+    repoAwareness,
+    operation: safeIntent.operation,
+    actions: projectAwareness?.actions,
+    request,
+    repository,
+  })
   const handoff = selectHandoff(surface, safeIntent)
   const project = normalizeProject(projectAwareness?.project)
   const task = normalizeTask(projectAwareness?.task)
@@ -179,12 +225,14 @@ export function getChatExecutionBridge({ request = '', intent = null, projectAwa
     surface,
     ...(project ? { project } : {}),
     ...(task ? { task } : {}),
+    ...(repository ? { repository } : {}),
   }
   const readiness = determineReadiness({
     intent: safeIntent,
     surface,
     repoAwareness,
     branch,
+    inspection,
     handoff,
     actions: projectAwareness?.actions,
     modelRouting,
@@ -194,7 +242,7 @@ export function getChatExecutionBridge({ request = '', intent = null, projectAwa
     requestedOperation: OPERATIONS.has(safeIntent.operation) ? safeIntent.operation : 'explain',
     repoAwareness,
     readiness,
-    risk: riskFor({ surface, operation: safeIntent.operation, repoAwareness }),
+    risk: riskFor({ surface, operation: safeIntent.operation, repoAwareness, mutatingRequest }),
     branch,
     inspection,
     approval,
@@ -221,7 +269,8 @@ function targetLabel(target) {
     github: 'GitHub preparation',
     project: 'project work',
   }[target?.surface] || 'project work'
-  return target?.project?.name ? `${target.project.name} · ${surface}` : surface
+  const scope = target?.repository?.slug || target?.project?.name || ''
+  return scope ? `${scope} · ${surface}` : surface
 }
 
 /** Prompt-ready transparency guidance. It explicitly prevents an execution plan from becoming a claim. */
@@ -232,12 +281,18 @@ export function getExecutionBridgeGuidance(bridge) {
     `Execution bridge: target ${targetLabel(execution.target)}; requested operation ${execution.requestedOperation}; state ${READINESS_COPY[execution.readiness].toLowerCase()}. This is preparation evidence, not proof that a tool, repository, branch, or external system was changed.`,
   ]
   if (execution.repoAwareness === 'needed') {
-    notes.push('Repository awareness is needed, but no repository contents, branch, tests, or external state have been inspected in this Chat turn. Prepare the safe inspection scope rather than claiming findings.')
+    notes.push(execution.target.repository
+      ? execution.inspection === 'completed'
+        ? `Requested repository reference: ${execution.target.repository.slug}. A bounded, read-only inspection is recorded; it does not confirm every file, test, branch, or external state.`
+        : `Requested repository reference: ${execution.target.repository.slug}. Its contents, branch, tests, and external state have not been inspected in this Chat turn.`
+      : 'Repository awareness is needed, but no repository reference is selected yet. No repository contents, branch, tests, or external state have been inspected. Ask for or offer a public GitHub URL or owner/repository reference before claiming inspection findings.')
   }
   if (execution.inspection === 'required') {
     notes.push('Inspection is required before any future execution: identify scope and verification first, then wait for the separate branch or approval boundary when applicable.')
   } else if (execution.inspection === 'recommended') {
     notes.push('A scoped inspection is recommended before a future execution handoff. No inspection result is currently recorded.')
+  } else if (execution.inspection === 'completed') {
+    notes.push('A bounded, read-only repository inspection is recorded in this thread. It does not prove that every file, test, branch, or external state was inspected; use the recorded findings before a future change.')
   }
   if (execution.branch === 'required') {
     notes.push('This change path should be branch-first and requires explicit approval before any future branch or repository mutation. State the intended scope, verification, and risk clearly; do not imply a branch exists.')
@@ -271,6 +326,8 @@ export function getExecutionBridgePresentation(value) {
     ? 'Inspection required before execution'
     : execution.inspection === 'recommended'
       ? 'Inspection recommended before execution'
+      : execution.inspection === 'completed'
+        ? 'Read-only inspection completed'
       : ''
   return Object.freeze({
     readiness: execution.readiness,
@@ -285,6 +342,7 @@ export function getExecutionBridgePresentation(value) {
 /** Return only a real, existing destination action; this never triggers execution itself. */
 export function getExecutionBridgeHandoffAction(value) {
   const execution = normalizeExecutionBridgeEvidence(value)
-  if (!execution || !execution.handoff || ['completed-locally', 'externally-unverified'].includes(execution.readiness)) return ''
+  if (!execution || !execution.handoff || ['completed-locally', 'externally-unverified', 'waiting-for-approval'].includes(execution.readiness)) return ''
+  if (execution.inspection === 'required') return ''
   return execution.handoff
 }

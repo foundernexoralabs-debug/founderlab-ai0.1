@@ -6,10 +6,10 @@
  */
 
 const MAX_ROUTES = 3
-const CAPABILITY_IDS = new Set(['notes', 'tasks', 'builder', 'code', 'github', 'youtube', 'email', 'calendar', 'external-app'])
+const CAPABILITY_IDS = new Set(['notes', 'tasks', 'builder', 'code', 'github', 'youtube', 'repo-inspection', 'email', 'calendar', 'external-app'])
 const CAPABILITY_KINDS = new Set(['workspace', 'tool', 'integration'])
 const AVAILABILITY = new Set(['available', 'connected', 'not-connected', 'not-implemented'])
-const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube'])
+const ACTION_IDS = new Set(['save-note', 'create-task', 'builder', 'code', 'github', 'youtube', 'inspect-repo', 'prepare-branch'])
 
 const CAPABILITY_COPY = Object.freeze({
   notes: Object.freeze({ label: 'Notes', kind: 'workspace', action: 'save-note' }),
@@ -18,6 +18,7 @@ const CAPABILITY_COPY = Object.freeze({
   code: Object.freeze({ label: 'Code AI', kind: 'tool', action: 'code' }),
   github: Object.freeze({ label: 'GitHub', kind: 'integration', action: 'github' }),
   youtube: Object.freeze({ label: 'YouTube AI', kind: 'tool', action: 'youtube' }),
+  'repo-inspection': Object.freeze({ label: 'Repository inspection', kind: 'tool', action: 'inspect-repo' }),
   email: Object.freeze({ label: 'Email', kind: 'integration' }),
   calendar: Object.freeze({ label: 'Calendar', kind: 'integration' }),
   'external-app': Object.freeze({ label: 'External app', kind: 'integration' }),
@@ -86,6 +87,7 @@ function routeIdForTool(primaryTool) {
 }
 
 function inferRepositoryRoute(request, executionBridge) {
+  if (executionBridge?.target?.repository?.slug) return 'repo-inspection'
   if (executionBridge?.target?.surface === 'repository' || executionBridge?.target?.surface === 'github') return 'github'
   return ''
 }
