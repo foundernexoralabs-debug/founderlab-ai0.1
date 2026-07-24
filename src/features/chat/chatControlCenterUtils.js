@@ -91,8 +91,8 @@ const CONTROL_ACTIONS = Object.freeze({
   }),
   'apply-file-change': Object.freeze({
     id: 'apply-file-change',
-    label: 'Apply reviewed file change',
-    detail: 'Review and commit one inspected candidate file',
+    label: 'Commit reviewed changes',
+    detail: 'Review and commit up to four text changes',
     icon: '✦',
     completedLabel: 'Applied',
   }),

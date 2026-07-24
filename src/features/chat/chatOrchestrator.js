@@ -334,7 +334,7 @@ function evidenceLabel({ id, status }) {
     'prepare-execution': status === 'execution-prepared' ? 'A branch-first execution workflow was prepared; no branch or files were changed.' : '',
     'approve-execution': status === 'approval-recorded' ? 'Approval for a future branch-first workflow was recorded; no execution ran.' : '',
     'create-branch': status === 'branch-created' ? 'GitHub confirmed branch creation; no file, validation, review, or merge is implied.' : '',
-    'apply-file-change': status === 'change-applied' ? 'GitHub confirmed one reviewed file commit on the approved branch; validation and human review remain separate.' : '',
+    'apply-file-change': status === 'change-applied' ? 'GitHub confirmed the reviewed multi-file commit on the approved branch; validation and human review remain separate.' : '',
     validate: status === 'validation-passed' ? 'GitHub supplied completed validation evidence for the committed change; human review is still required.'
       : status === 'validation-recorded' ? 'GitHub validation was read, but not all required completed evidence is available yet.'
         : status === 'validation-failed' ? 'GitHub reported failed validation; no review or merge readiness is claimed.' : '',

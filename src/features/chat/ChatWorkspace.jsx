@@ -66,7 +66,7 @@ import {
   normalizeExecutionWorkflow,
   recordExecutionWorkflowBlock,
   recordExecutionWorkflowBranchCreated,
-  recordExecutionWorkflowFileChange,
+  recordExecutionWorkflowFileChanges,
   recordExecutionWorkflowReviewReadiness,
   recordExecutionWorkflowValidation,
   retryExecutionWorkflow,
@@ -77,9 +77,10 @@ import {
   getGithubBranchExecutionErrorPresentation,
 } from './githubBranchExecutor'
 import {
-  applyGithubFileChange,
   getGithubFileExecutionErrorPresentation,
   getGithubRepositoryFile,
+  applyGithubMultiFileChange,
+  getGithubMultiFileExecutionErrorPresentation,
 } from './githubFileExecutor'
 import {
   getGithubCommitValidation,
@@ -1498,6 +1499,7 @@ export function ChatWorkspace({ user }) {
       repository: workflow.repository,
       branch: workflow.branch.proposed,
       fileTargets: workflow.change.fileTargets,
+      maxChanges: 4,
     })
     return false
   }
@@ -1517,7 +1519,7 @@ export function ChatWorkspace({ user }) {
     }
   }
 
-  async function applyApprovedGithubFileChange({ path, content, expectedSha, commitMessage }) {
+  async function applyApprovedGithubFileChange({ changes, commitMessage }) {
     const change = repositoryChange
     const message = conversationsRef.current
       .flatMap((conversation) => conversation.messages || [])
@@ -1533,52 +1535,53 @@ export function ChatWorkspace({ user }) {
     }
     const token = getGithubToken()
     if (!token) {
-      recordWorkflowBlock(message, workflow, 'apply-file-change', 'github-connection-required', 'integration', { retryable: true, resource: executionResource(workflow, 'file', path) })
+      recordWorkflowBlock(message, workflow, 'apply-file-change', 'github-connection-required', 'integration', { retryable: true, resource: executionResource(workflow, 'branch') })
       setRepositoryChange(null)
-      toast('Connect GitHub in Settings before applying this approved file change.', 'error')
+      toast('Connect GitHub in Settings before committing these approved changes.', 'error')
       return false
     }
     try {
-      const result = await applyGithubFileChange({
+      const result = await applyGithubMultiFileChange({
         token,
         repository: workflow.repository,
         branch: workflow.branch.proposed,
-        path,
-        content,
-        expectedSha,
+        changes,
         commitMessage,
       })
-      const changed = recordExecutionWorkflowFileChange(workflow, {
-        path: result.path,
+      const changed = recordExecutionWorkflowFileChanges(workflow, {
+        changes: result.changedFiles,
         commitSha: result.commitSha,
         source: 'github-api',
       })
       if (!changed) {
         setRepositoryChange(null)
-        toast('GitHub confirmed a file change, but FounderLab could not safely persist its evidence. Re-inspect the branch before continuing.', 'error')
+        toast('GitHub confirmed a commit, but FounderLab could not safely persist its evidence. Re-inspect the branch before continuing.', 'error')
         return false
       }
       const recorded = recordActionEvidence(message.id, {
         id: 'apply-file-change',
         status: 'change-applied',
-        resource: executionResource(changed, 'file', result.path),
+        resource: executionResource(changed, 'commit', result.commitSha.slice(0, 12)),
         workflow: changed,
       })
       if (!recorded) {
         setRepositoryChange(null)
-        toast('GitHub confirmed a file change, but FounderLab could not save its execution record. Re-inspect the branch before continuing.', 'error')
+        toast('GitHub confirmed a commit, but FounderLab could not save its execution record. Re-inspect the branch before continuing.', 'error')
         return false
       }
       appendActionReport(message.id, formatExecutionFileChangeReport(changed))
       setRepositoryChange(null)
-      toast(`GitHub committed the reviewed change to ${result.path}. Validation is next.`, 'success')
+      toast(`GitHub committed ${result.changedFiles.length} reviewed change${result.changedFiles.length === 1 ? '' : 's'}. Validation is next.`, 'success')
       return true
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'execution-unavailable'
-      const retryable = ['github-auth-required', 'execution-unavailable', 'execution-conflict', 'file-change-conflict'].includes(code)
-      recordWorkflowBlock(message, workflow, 'apply-file-change', code, 'change', { retryable, resource: executionResource(workflow, 'file', path) })
+      const retryable = ['github-auth-required', 'execution-unavailable', 'execution-conflict', 'file-change-conflict', 'file-already-exists', 'file-missing', 'tree-unavailable'].includes(code)
+      const resource = error?.commitSha
+        ? executionResource(workflow, 'commit', error.commitSha.slice(0, 12))
+        : executionResource(workflow, 'branch')
+      recordWorkflowBlock(message, workflow, 'apply-file-change', code, 'change', { retryable, resource })
       setRepositoryChange(null)
-      toast(getGithubFileExecutionErrorPresentation(error), 'error')
+      toast(getGithubMultiFileExecutionErrorPresentation(error), 'error')
       return false
     }
   }
@@ -1586,7 +1589,7 @@ export function ChatWorkspace({ user }) {
   async function checkGithubValidationFromChat(action, message) {
     const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
     if (!workflow || workflow.branch.state !== 'created' || workflow.change.state !== 'applied' || workflow.block) {
-      toast('Apply the reviewed file change before checking GitHub validation.', 'error')
+      toast('Commit the reviewed changes before checking GitHub validation.', 'error')
       return false
     }
     const token = getGithubToken()

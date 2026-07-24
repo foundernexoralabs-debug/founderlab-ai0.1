@@ -23,7 +23,7 @@ const ACTION_COPY = Object.freeze({
   'prepare-execution': 'Prepared a branch-first execution workflow',
   'approve-execution': 'Recorded execution approval',
   'create-branch': 'Created an approved GitHub branch',
-  'apply-file-change': 'Applied a reviewed GitHub file change',
+  'apply-file-change': 'Committed reviewed GitHub changes',
   validate: 'Read GitHub validation',
   review: 'Prepared a human review summary',
   'retry-execution': 'Restored a retryable execution path',
@@ -60,7 +60,7 @@ function getActionFact(action) {
     return { kind: 'branch-created', label, detail: 'GitHub confirmed branch creation. No files, commits, tests, build, review, or merge are recorded.' }
   }
   if (action.id === 'apply-file-change' && action.status === 'change-applied') {
-    return { kind: 'change-applied', label, detail: 'GitHub confirmed one reviewed file commit on the approved branch. Validation and human review remain explicit next steps.' }
+    return { kind: 'change-applied', label, detail: 'GitHub confirmed the reviewed multi-file commit on the approved branch. Validation and human review remain explicit next steps.' }
   }
   if (action.id === 'apply-file-change' && action.status === 'execution-blocked') {
     return { kind: 'execution-blocked', label: 'File change blocked', detail: 'No successful file change is recorded. Review the scoped recovery state before retrying.' }
@@ -113,7 +113,7 @@ const EXECUTION_STATE_COPY = Object.freeze({
   'execution-prepared': Object.freeze({ label: 'Execution workflow prepared', detail: 'Candidate scope and validation are recorded. No repository mutation or validation ran.' }),
   'approval-recorded': Object.freeze({ label: 'Approval recorded', detail: 'Approval is recorded. GitHub branch creation remains a separate explicit action; no repository mutation has run.' }),
   'branch-created': Object.freeze({ label: 'Branch created', detail: 'GitHub confirmed branch creation. File changes, validation, review, and merge remain unverified.' }),
-  'change-applied': Object.freeze({ label: 'File change applied', detail: 'GitHub confirmed one reviewed file commit. Validation and human review remain explicit next steps.' }),
+  'change-applied': Object.freeze({ label: 'Reviewed commit applied', detail: 'GitHub confirmed the reviewed multi-file commit. Validation and human review remain explicit next steps.' }),
   'validation-complete': Object.freeze({ label: 'Validation complete', detail: 'Required completed validation evidence is recorded. Human review is still required and no merge is implied.' }),
   'review-ready': Object.freeze({ label: 'Ready for review', detail: 'The committed change and validation evidence are ready for human review. No pull request or merge is recorded.' }),
   'merge-ready': Object.freeze({ label: 'Ready to merge', detail: 'A future review record marked this ready to merge. No merge has been performed.' }),

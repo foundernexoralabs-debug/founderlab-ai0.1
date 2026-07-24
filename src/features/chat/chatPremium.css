@@ -375,6 +375,7 @@
 .fl-chat-repo-change-dialog h2 { margin: 7px 0 6px; font-size: 19px; letter-spacing: -.02em; }
 .fl-chat-repo-change-dialog p { margin: 0; color: #b7b7cc; font-size: 12.5px; line-height: 1.55; }
 .fl-chat-repo-change-dialog form { display: grid; gap: 13px; margin-top: 20px; }
+.fl-chat-repo-change-builder { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 10px; }
 .fl-chat-repo-change-dialog label { display: grid; gap: 6px; color: #d5d5e8; font-size: 11px; font-weight: 720; }
 .fl-chat-repo-change-dialog input,
 .fl-chat-repo-change-dialog select,
@@ -394,6 +395,19 @@
 .fl-chat-repo-change-dialog select:focus-visible,
 .fl-chat-repo-change-dialog textarea:focus-visible { border-color: rgba(129,140,248,.78); box-shadow: 0 0 0 3px rgba(99,102,241,.18); }
 .fl-chat-repo-change-meta { color: #8f90a9; font-size: 11px; line-height: 1.45; }
+.fl-chat-repo-change-add { justify-self: start; border: 1px solid rgba(165,180,252,.35); border-radius: 9px; background: rgba(99,102,241,.12); color: #dce3ff; cursor: pointer; font: 700 11px inherit; padding: 8px 10px; }
+.fl-chat-repo-change-add:disabled { cursor: not-allowed; opacity: .48; }
+.fl-chat-repo-change-list { display: grid; gap: 7px; border: 1px solid rgba(164,164,205,.17); border-radius: 11px; background: rgba(7,8,21,.36); padding: 10px; }
+.fl-chat-repo-change-list-heading { display: flex; align-items: center; justify-content: space-between; color: #dddff2; font-size: 11px; }
+.fl-chat-repo-change-list-heading span { color: #9698b3; font-variant-numeric: tabular-nums; }
+.fl-chat-repo-change-list > p { color: #8587a0; font-size: 11px; }
+.fl-chat-repo-change-item { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center; gap: 8px; border-radius: 8px; background: rgba(255,255,255,.035); color: #cfd0e5; padding: 7px 8px; font-size: 11px; }
+.fl-chat-repo-change-item > span { border: 1px solid rgba(165,180,252,.22); border-radius: 999px; color: #bfc7ff; font-size: 9px; font-weight: 800; letter-spacing: .04em; padding: 2px 5px; text-transform: uppercase; }
+.fl-chat-repo-change-item.is-delete > span { border-color: rgba(251,146,60,.28); color: #fdba74; }
+.fl-chat-repo-change-item.is-create > span { border-color: rgba(74,222,128,.24); color: #86efac; }
+.fl-chat-repo-change-item code { min-width: 0; overflow: hidden; color: #eff0ff; text-overflow: ellipsis; white-space: nowrap; }
+.fl-chat-repo-change-item button { border: 0; background: transparent; color: #aeb4df; cursor: pointer; font: 700 10px inherit; padding: 3px; }
+.fl-chat-repo-change-add:not(:disabled):hover, .fl-chat-repo-change-item button:not(:disabled):hover { color: #fff; border-color: rgba(165,180,252,.65); }
 .fl-chat-repo-change-error { border: 1px solid rgba(248,113,113,.28); border-radius: 9px; background: rgba(239,68,68,.08); color: #fecaca !important; padding: 8px 10px; }
 .fl-chat-repo-change-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 3px; }
 .fl-chat-repo-change-dialog footer button { border: 1px solid rgba(164,164,205,.3); border-radius: 9px; background: rgba(255,255,255,.04); color: #d9d9eb; cursor: pointer; font: 700 12px inherit; padding: 8px 11px; }
@@ -406,6 +420,7 @@
   .fl-chat-repo-change-backdrop { align-items: end; padding: 10px; }
   .fl-chat-repo-change-dialog { max-height: 92vh; border-radius: 17px; padding: 18px; }
   .fl-chat-repo-change-dialog textarea { min-height: 210px; }
+  .fl-chat-repo-change-builder { grid-template-columns: 1fr; }
   .fl-chat-repo-change-dialog footer { justify-content: stretch; }
   .fl-chat-repo-change-dialog footer button { flex: 1; }
 }

@@ -14,7 +14,7 @@ const EVENT_COPY = Object.freeze({
   'create-branch:branch-created': Object.freeze({ phase: 'Branch', label: 'Branch created', detail: 'GitHub confirmed branch creation; no files, commits, tests, or build are implied.' }),
   'create-branch:execution-blocked': Object.freeze({ phase: 'Branch', label: 'Branch action blocked', detail: 'The branch action did not complete. Review the scoped recovery state.' }),
   'create-branch:execution-cancelled': Object.freeze({ phase: 'Branch', label: 'Branch action cancelled', detail: 'No completed branch action is recorded.' }),
-  'apply-file-change:change-applied': Object.freeze({ phase: 'Change', label: 'File change applied', detail: 'GitHub confirmed a one-file commit on the approved branch.' }),
+  'apply-file-change:change-applied': Object.freeze({ phase: 'Change', label: 'Reviewed commit applied', detail: 'GitHub confirmed the reviewed multi-file commit on the approved branch.' }),
   'apply-file-change:execution-blocked': Object.freeze({ phase: 'Change', label: 'File change blocked', detail: 'No successful file change is recorded. Review the scoped recovery state.' }),
   'validate:validation-recorded': Object.freeze({ phase: 'Validate', label: 'Validation still pending', detail: 'GitHub validation was read, but required completed evidence is still missing.' }),
   'validate:validation-passed': Object.freeze({ phase: 'Validate', label: 'Validation passed', detail: 'GitHub supplied all required completed validation evidence.' }),

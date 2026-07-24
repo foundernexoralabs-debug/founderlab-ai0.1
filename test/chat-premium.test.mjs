@@ -109,6 +109,7 @@ import {
   recordExecutionWorkflowBlock,
   recordExecutionWorkflowBranchCreated,
   recordExecutionWorkflowFileChange,
+  recordExecutionWorkflowFileChanges,
   recordExecutionWorkflowMergeReadiness,
   recordExecutionWorkflowReviewReadiness,
   recordExecutionWorkflowValidation,
@@ -120,8 +121,9 @@ import {
   getGithubBranchExecutionErrorPresentation,
 } from '../src/features/chat/githubBranchExecutor.js'
 import {
-  applyGithubFileChange,
+  applyGithubMultiFileChange,
   getGithubFileExecutionErrorPresentation,
+  getGithubMultiFileExecutionErrorPresentation,
   getGithubRepositoryFile,
 } from '../src/features/chat/githubFileExecutor.js'
 import {
@@ -1006,7 +1008,7 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   assert.equal(invalidBranchRequested, false)
 
   const workflow = approveExecutionWorkflow(createExecutionWorkflow({
-    inspection: { reference: created.repository, repository: { defaultBranch: 'main' }, tree: { importantFiles: ['src/App.jsx'], sampleFiles: [] } },
+    inspection: { reference: created.repository, repository: { defaultBranch: 'main' }, tree: { importantFiles: ['src/App.jsx', 'src/legacy.js'], sampleFiles: [] } },
     preparation: { repository: created.repository, baseBranch: 'main', proposedBranch: 'founderlab/fix-chat', risk: 'medium' },
     capability: getGithubBranchExecutionCapability('session-token'),
   }))
@@ -1032,9 +1034,26 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   })
   assert.equal(changed.change.state, 'applied')
   assert.deepEqual(changed.change.appliedFiles, ['src/App.jsx'])
-  assert.match(formatExecutionFileChangeReport(changed), /GitHub confirmed this one-file commit/i)
+  assert.deepEqual(changed.change.updatedFiles, ['src/App.jsx'])
+  assert.match(formatExecutionFileChangeReport(changed), /bounded multi-file commit/i)
 
-  const validation = recordExecutionWorkflowValidation(changed, {
+  const multiChanged = recordExecutionWorkflowFileChanges(branchCreated, {
+    changes: [
+      { path: 'src/App.jsx', operation: 'update' },
+      { path: 'src/new-feature.js', operation: 'create' },
+      { path: 'src/legacy.js', operation: 'delete' },
+    ],
+    commitSha: 'abc123def4567',
+    source: 'github-api',
+  })
+  assert.deepEqual(multiChanged.change.appliedFiles, ['src/App.jsx', 'src/new-feature.js', 'src/legacy.js'])
+  assert.deepEqual(multiChanged.change.updatedFiles, ['src/App.jsx'])
+  assert.deepEqual(multiChanged.change.createdFiles, ['src/new-feature.js'])
+  assert.deepEqual(multiChanged.change.deletedFiles, ['src/legacy.js'])
+  assert.match(formatExecutionFileChangeReport(multiChanged), /Created:.*new-feature/i)
+  assert.match(getExecutionWorkflowGuidance(multiChanged), /updated src\/App\.jsx; created src\/new-feature\.js; deleted src\/legacy\.js/i)
+
+  const validation = recordExecutionWorkflowValidation(multiChanged, {
     source: 'secure-executor', tests: 'passed', build: 'passed', report: 'passed',
   })
   const review = recordExecutionWorkflowReviewReadiness(validation)
@@ -1045,7 +1064,7 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   assert.equal(recordExecutionWorkflowMergeReadiness(review, { source: 'approved-review' }).review, 'ready-to-merge')
   assert.equal(recordExecutionWorkflowMergeReadiness(review, { source: 'untrusted' }), null)
 
-  const failedValidation = recordExecutionWorkflowValidation(changed, {
+  const failedValidation = recordExecutionWorkflowValidation(multiChanged, {
     source: 'secure-executor', tests: 'passed', build: 'failed', report: 'passed',
   })
   assert.equal(failedValidation.execution, 'blocked')
@@ -1075,19 +1094,12 @@ test('Explicit approved GitHub branch creation is bounded, evidenced, and classi
   )
 })
 
-test('Approved GitHub file execution reads one bounded candidate, commits it, and preserves conflict evidence', async () => {
+test('Approved GitHub file reader loads one bounded candidate revision for the reviewed multi-file commit', async () => {
   const repository = { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' }
   const initial = 'export const answer = 1\n'
   const requests = []
   const fetchImpl = async (url, options = {}) => {
     requests.push({ url, options })
-    if (options.method === 'PUT') {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ content: { path: 'src/answer.js' }, commit: { sha: 'fedcba1234567' } }),
-      }
-    }
     return {
       ok: true,
       status: 200,
@@ -1097,16 +1109,9 @@ test('Approved GitHub file execution reads one bounded candidate, commits it, an
   const loaded = await getGithubRepositoryFile({ token: 'session-token', repository, branch: 'founderlab/fix-chat', path: 'src/answer.js', fetchImpl })
   assert.equal(loaded.content, initial)
   assert.equal(loaded.sha, 'abcdef1234567')
-  const committed = await applyGithubFileChange({
-    token: 'session-token', repository, branch: 'founderlab/fix-chat', path: 'src/answer.js', content: 'export const answer = 2\n', expectedSha: loaded.sha, commitMessage: 'Fix answer', fetchImpl,
-  })
-  assert.equal(committed.commitSha, 'fedcba1234567')
-  assert.equal(JSON.stringify(committed).includes('session-token'), false)
-  assert.equal(requests.length, 2)
+  assert.equal(JSON.stringify(loaded).includes('session-token'), false)
+  assert.equal(requests.length, 1)
   assert.match(requests[0].options.headers.Authorization, /^Bearer /)
-  const body = JSON.parse(requests[1].options.body)
-  assert.deepEqual({ message: body.message, sha: body.sha, branch: body.branch }, { message: 'Fix answer', sha: 'abcdef1234567', branch: 'founderlab/fix-chat' })
-  assert.equal(Buffer.from(body.content, 'base64').toString('utf8'), 'export const answer = 2\n')
 
   let unsafeRequested = false
   await assert.rejects(
@@ -1114,15 +1119,126 @@ test('Approved GitHub file execution reads one bounded candidate, commits it, an
     (error) => error?.code === 'execution-unavailable',
   )
   assert.equal(unsafeRequested, false)
+  assert.match(getGithubFileExecutionErrorPresentation({ code: 'file-content-unavailable' }), /bounded text file/i)
+})
+
+test('Approved GitHub multi-file execution creates one atomic branch commit for updates, creates, and deletes', async () => {
+  const repository = { provider: 'github', owner: 'acme', name: 'founderlab', slug: 'acme/founderlab' }
+  const requests = []
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url, options })
+    if (url.endsWith('/git/refs/heads/founderlab%2Ffix-chat') && options.method === 'PATCH') {
+      return { ok: true, status: 200, json: async () => ({ object: { sha: '4444444' } }) }
+    }
+    if (url.endsWith('/git/ref/heads/founderlab%2Ffix-chat')) {
+      return { ok: true, status: 200, json: async () => ({ object: { sha: '1111111' } }) }
+    }
+    if (url.endsWith('/git/commits/1111111')) {
+      return { ok: true, status: 200, json: async () => ({ tree: { sha: '2222222' } }) }
+    }
+    if (url.endsWith('/git/trees/2222222?recursive=1')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ tree: [
+          { path: 'src/existing.js', mode: '100644', type: 'blob', sha: 'aaaaaaa' },
+          { path: 'src/legacy.js', mode: '100755', type: 'blob', sha: 'bbbbbbb' },
+        ] }),
+      }
+    }
+    if (url.endsWith('/git/trees') && options.method === 'POST') {
+      return { ok: true, status: 201, json: async () => ({ sha: '3333333' }) }
+    }
+    if (url.endsWith('/git/commits') && options.method === 'POST') {
+      return { ok: true, status: 201, json: async () => ({ sha: '4444444' }) }
+    }
+    throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`)
+  }
+  const committed = await applyGithubMultiFileChange({
+    token: 'session-token',
+    repository,
+    branch: 'founderlab/fix-chat',
+    commitMessage: 'Apply reviewed FounderLab changes',
+    changes: [
+      { operation: 'update', path: 'src/existing.js', expectedSha: 'aaaaaaa', content: 'export const updated = true\n' },
+      { operation: 'create', path: 'src/new-feature.js', content: 'export const created = true\n' },
+      { operation: 'delete', path: 'src/legacy.js', expectedSha: 'bbbbbbb' },
+    ],
+    now: () => '2026-07-24T09:00:00.000Z',
+    fetchImpl,
+  })
+  assert.equal(requests.length, 6)
+  assert.equal(requests.filter(({ options }) => options.method === 'POST').length, 2)
+  assert.match(requests[0].options.headers.Authorization, /^Bearer /)
+  const treeBody = JSON.parse(requests[3].options.body)
+  assert.deepEqual(treeBody, {
+    base_tree: '2222222',
+    tree: [
+      { path: 'src/existing.js', mode: '100644', type: 'blob', content: 'export const updated = true\n' },
+      { path: 'src/new-feature.js', mode: '100644', type: 'blob', content: 'export const created = true\n' },
+      { path: 'src/legacy.js', mode: '100755', type: 'blob', sha: null },
+    ],
+  })
+  assert.deepEqual(JSON.parse(requests[4].options.body), {
+    message: 'Apply reviewed FounderLab changes', tree: '3333333', parents: ['1111111'],
+  })
+  assert.deepEqual(JSON.parse(requests[5].options.body), { sha: '4444444', force: false })
+  assert.equal(committed.commitSha, '4444444')
+  assert.deepEqual(committed.updatedFiles, ['src/existing.js'])
+  assert.deepEqual(committed.createdFiles, ['src/new-feature.js'])
+  assert.deepEqual(committed.deletedFiles, ['src/legacy.js'])
+  assert.equal(JSON.stringify(committed).includes('session-token'), false)
+
+  let staleRequests = 0
   await assert.rejects(
-    () => applyGithubFileChange({ token: 'session-token', repository, branch: 'main', path: 'src/answer.js', content: 'next', expectedSha: 'abcdef1234567', commitMessage: 'Update', fetchImpl: async () => ({ ok: false, status: 422, json: async () => ({}) }) }),
+    () => applyGithubMultiFileChange({
+      token: 'session-token', repository, branch: 'main', commitMessage: 'Stale',
+      changes: [{ operation: 'update', path: 'src/existing.js', expectedSha: 'aaaaaaa', content: 'next\n' }],
+      fetchImpl: async (url) => {
+        staleRequests += 1
+        if (url.endsWith('/git/ref/heads/main')) return { ok: true, json: async () => ({ object: { sha: '1111111' } }) }
+        if (url.endsWith('/git/commits/1111111')) return { ok: true, json: async () => ({ tree: { sha: '2222222' } }) }
+        return { ok: true, json: async () => ({ tree: [{ path: 'src/existing.js', mode: '100644', type: 'blob', sha: 'ccccccc' }] }) }
+      },
+    }),
     (error) => error?.code === 'file-change-conflict',
   )
+  assert.equal(staleRequests, 3)
+
+  let unsafeRequested = false
   await assert.rejects(
-    () => applyGithubFileChange({ token: 'session-token', repository, branch: 'main', path: 'src/answer.js', content: 'next', expectedSha: 'abcdef1234567', commitMessage: 'Update', fetchImpl: async () => { throw new Error('network lost') } }),
-    (error) => error?.code === 'partial-execution',
+    () => applyGithubMultiFileChange({
+      token: 'session-token', repository, branch: 'main', commitMessage: 'Unsafe',
+      changes: [
+        { operation: 'create', path: 'src/new.js', content: 'one' },
+        { operation: 'delete', path: 'src/new.js', expectedSha: 'aaaaaaa' },
+      ],
+      fetchImpl: async () => { unsafeRequested = true; return { ok: true, json: async () => ({}) } },
+    }),
+    (error) => error?.code === 'execution-unavailable',
   )
-  assert.match(getGithubFileExecutionErrorPresentation({ code: 'partial-execution' }), /may have changed/i)
+  assert.equal(unsafeRequested, false)
+
+  const partialRequests = []
+  await assert.rejects(
+    () => applyGithubMultiFileChange({
+      token: 'session-token', repository, branch: 'main', commitMessage: 'Branch update uncertain',
+      changes: [{ operation: 'create', path: 'src/recovery-note.js', content: 'export const recovery = true\n' }],
+      fetchImpl: async (url, options = {}) => {
+        partialRequests.push({ url, options })
+        if (url.endsWith('/git/ref/heads/main')) return { ok: true, json: async () => ({ object: { sha: '1111111' } }) }
+        if (url.endsWith('/git/commits/1111111')) return { ok: true, json: async () => ({ tree: { sha: '2222222' } }) }
+        if (url.endsWith('/git/trees/2222222?recursive=1')) return { ok: true, json: async () => ({ tree: [] }) }
+        if (url.endsWith('/git/trees')) return { ok: true, json: async () => ({ sha: '3333333' }) }
+        if (url.endsWith('/git/commits')) return { ok: true, json: async () => ({ sha: '4444444' }) }
+        if (url.endsWith('/git/refs/heads/main')) return { ok: false, status: 422, json: async () => ({}) }
+        throw new Error(`Unexpected request: ${options.method || 'GET'} ${url}`)
+      },
+    }),
+    (error) => error?.code === 'partial-execution' && error?.commitSha === '4444444',
+  )
+  assert.equal(partialRequests.length, 6)
+  assert.match(getGithubMultiFileExecutionErrorPresentation({ code: 'partial-execution', commitSha: '4444444' }), /created a commit/i)
 })
 
 test('GitHub validation records native check evidence without dispatching or inventing a test/build run', async () => {
@@ -1164,7 +1280,7 @@ test('Execution evidence trail keeps inspected, planned, approved, blocked, and 
       { id: 'review', status: 'review-ready', at: '2026-07-23T14:06:00.000Z', resource: { title: 'founderlab/fix-chat' } },
     ],
   })
-  assert.deepEqual(trail.entries.map((entry) => entry.label), ['Repository inspected', 'Branch plan prepared', 'Execution approval recorded', 'Branch created', 'File change applied', 'Validation passed', 'Review ready'])
+  assert.deepEqual(trail.entries.map((entry) => entry.label), ['Repository inspected', 'Branch plan prepared', 'Execution approval recorded', 'Branch created', 'Reviewed commit applied', 'Validation passed', 'Review ready'])
   assert.equal(trail.entries.at(-1).resource, 'founderlab/fix-chat')
 })
 
@@ -1261,7 +1377,7 @@ test('Connector framework unifies discovery, authorization, fallback, and safe a
     actions: [
       { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
       { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
-      { id: 'apply-file-change', label: 'Apply reviewed file change', access: 'write', approval: 'required' },
+      { id: 'apply-file-change', label: 'Commit reviewed changes', access: 'write', approval: 'required' },
       { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
     ],
   })
@@ -2000,7 +2116,7 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /createApprovedRepositoryBranchFromChat/)
   assert.match(workspaceSource, /createGithubBranch/)
   assert.match(workspaceSource, /ChatRepositoryChangeDialog/)
-  assert.match(workspaceSource, /applyGithubFileChange/)
+  assert.match(workspaceSource, /applyGithubMultiFileChange/)
   assert.match(workspaceSource, /getGithubCommitValidation/)
   assert.match(workspaceSource, /No branch or files changed/)
   assert.match(workspaceSource, /getAssistantControlActions/)
@@ -2069,12 +2185,12 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(controlUtilsSource, /Prepare execution workflow/)
   assert.match(controlUtilsSource, /Record execution approval/)
   assert.match(controlUtilsSource, /Create approved branch/)
-  assert.match(controlUtilsSource, /Apply reviewed file change/)
+  assert.match(controlUtilsSource, /Commit reviewed changes/)
   assert.match(controlUtilsSource, /Check GitHub validation/)
   assert.match(controlUtilsSource, /Connect GitHub/)
-  assert.match(repositoryChangeSource, /Review one file before committing/)
+  assert.match(repositoryChangeSource, /Review a bounded branch commit/)
   assert.match(repositoryChangeSource, /aria-modal="true"/)
-  assert.match(fileExecutorSource, /one existing, inspected text file/)
+  assert.match(fileExecutorSource, /one reviewed multi-file Git commit/)
   assert.match(validationExecutorSource, /not dispatch arbitrary workflows/)
   assert.match(appSource, /flConsumeHandoff\('youtube'\)/)
   assert.match(appSource, /Content brief ready from Chat/)

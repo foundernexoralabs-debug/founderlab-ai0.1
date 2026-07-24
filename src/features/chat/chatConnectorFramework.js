@@ -50,7 +50,7 @@ const CONNECTOR_REGISTRY = Object.freeze({
     actions: Object.freeze([
       { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
       { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
-      { id: 'apply-file-change', label: 'Apply reviewed file change', access: 'write', approval: 'required' },
+      { id: 'apply-file-change', label: 'Commit reviewed changes', access: 'write', approval: 'required' },
       { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
     ]),
     fallbacks: Object.freeze(['code']),

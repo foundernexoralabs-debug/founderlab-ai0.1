@@ -1,7 +1,7 @@
 /**
  * A bounded, evidence-first execution workflow for Chat. It can record a
  * prepared change path and explicit approval. Browser-session GitHub actions
- * can create an approved branch, apply one reviewed file replacement, and
+ * can create an approved branch, apply a bounded reviewed multi-file commit, and
  * inspect native GitHub validation evidence. It never runs arbitrary shell
  * commands, force-pushes, creates pull requests, or merges.
  */
@@ -9,7 +9,7 @@
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
 
 const MAX_FILE_TARGETS = 6
-const MAX_APPLIED_FILES = 1
+const MAX_APPLIED_FILES = 4
 const MAX_BRANCH_LENGTH = 96
 const MAX_TEXT_LENGTH = 180
 const BRANCH_STATES = new Set(['not-needed', 'planned', 'created'])
@@ -32,7 +32,10 @@ const BLOCK_CODES = new Set([
   'branch-conflict',
   'execution-conflict',
   'file-change-conflict',
+  'file-already-exists',
+  'file-missing',
   'file-content-unavailable',
+  'tree-unavailable',
   'execution-cancelled',
   'provider-unavailable',
   'validation-failed',
@@ -97,16 +100,35 @@ function normalizeValidation(value) {
   return Object.freeze({ tests, build, report })
 }
 
+function normalizeAppliedFilePaths(value, { allowEmpty = false } = {}) {
+  if (!Array.isArray(value) || value.length > MAX_APPLIED_FILES) return null
+  const seen = new Set()
+  const paths = []
+  for (const entry of value) {
+    const path = safePath(entry)
+    if (!path || seen.has(path)) return null
+    seen.add(path)
+    paths.push(path)
+  }
+  return (allowEmpty || paths.length) ? Object.freeze(paths) : null
+}
+
 function normalizeChange(value) {
   if (!isRecord(value) || !CHANGE_STATES.has(value.state)) return null
   const risk = ['low', 'medium', 'high'].includes(value.risk) ? value.risk : ''
   if (!risk) return null
   const fileTargets = normalizeFileTargets(value.fileTargets)
   if (value.state !== 'applied') return Object.freeze({ state: value.state, risk, fileTargets })
-  const appliedFiles = normalizeFileTargets(value.appliedFiles).slice(0, MAX_APPLIED_FILES)
+  const appliedFiles = normalizeAppliedFilePaths(value.appliedFiles)
+  const updatedFiles = value.updatedFiles === undefined ? appliedFiles : normalizeAppliedFilePaths(value.updatedFiles, { allowEmpty: true })
+  const createdFiles = value.createdFiles === undefined ? Object.freeze([]) : normalizeAppliedFilePaths(value.createdFiles, { allowEmpty: true })
+  const deletedFiles = value.deletedFiles === undefined ? Object.freeze([]) : normalizeAppliedFilePaths(value.deletedFiles, { allowEmpty: true })
   const commitSha = normalizeCommitSha(value.commitSha)
-  if (appliedFiles.length !== 1 || !fileTargets.includes(appliedFiles[0]) || !commitSha) return null
-  return Object.freeze({ state: value.state, risk, fileTargets, appliedFiles, commitSha })
+  if (!appliedFiles || !updatedFiles || !createdFiles || !deletedFiles || !commitSha) return null
+  const categorized = [...updatedFiles, ...createdFiles, ...deletedFiles]
+  if (categorized.length !== appliedFiles.length || new Set(categorized).size !== categorized.length || categorized.some((path) => !appliedFiles.includes(path))) return null
+  if ([...updatedFiles, ...deletedFiles].some((path) => !fileTargets.includes(path))) return null
+  return Object.freeze({ state: value.state, risk, fileTargets, appliedFiles, updatedFiles, createdFiles, deletedFiles, commitSha })
 }
 
 function normalizeCapability(value) {
@@ -293,7 +315,7 @@ export function canCreateApprovedBranchAction(value, {
   )
 }
 
-/** Guard the narrow mutation boundary: one inspected candidate file, on the recorded branch, after approval. */
+/** Guard the reviewed mutation boundary on the recorded branch after approval. */
 export function canApplyApprovedFileChange(value, {
   inspectionRecorded = false,
   branchCreatedRecorded = false,
@@ -313,15 +335,27 @@ export function canApplyApprovedFileChange(value, {
   )
 }
 
-/** Record a GitHub-confirmed one-file commit. The caller must have completed the external API mutation. */
-export function recordExecutionWorkflowFileChange(value, { path, commitSha, source = '' } = {}) {
+/** Record a GitHub-confirmed bounded multi-file commit. The caller must have completed the external API mutation. */
+export function recordExecutionWorkflowFileChanges(value, { changes, commitSha, source = '' } = {}) {
   const workflow = normalizeExecutionWorkflow(value)
-  const targetPath = safePath(path)
   const verifiedCommit = normalizeCommitSha(commitSha)
-  if (!workflow || !isTrustedExecutionSource(source) || workflow.approval !== 'approved' || workflow.branch.state !== 'created' || workflow.change.state !== 'prepared' || !workflow.change.fileTargets.includes(targetPath) || !verifiedCommit) return null
+  if (!workflow || !isTrustedExecutionSource(source) || workflow.approval !== 'approved' || workflow.branch.state !== 'created' || workflow.change.state !== 'prepared' || !verifiedCommit || !Array.isArray(changes) || !changes.length || changes.length > MAX_APPLIED_FILES) return null
+  const seen = new Set()
+  const normalizedChanges = []
+  for (const change of changes) {
+    const path = safePath(change?.path)
+    const operation = ['update', 'create', 'delete'].includes(change?.operation) ? change.operation : ''
+    if (!path || !operation || seen.has(path) || (operation !== 'create' && !workflow.change.fileTargets.includes(path))) return null
+    seen.add(path)
+    normalizedChanges.push({ path, operation })
+  }
+  const appliedFiles = normalizedChanges.map((change) => change.path)
+  const updatedFiles = normalizedChanges.filter((change) => change.operation === 'update').map((change) => change.path)
+  const createdFiles = normalizedChanges.filter((change) => change.operation === 'create').map((change) => change.path)
+  const deletedFiles = normalizedChanges.filter((change) => change.operation === 'delete').map((change) => change.path)
   return normalizeExecutionWorkflow({
     ...workflow,
-    change: { ...workflow.change, state: 'applied', appliedFiles: [targetPath], commitSha: verifiedCommit },
+    change: { ...workflow.change, state: 'applied', appliedFiles, updatedFiles, createdFiles, deletedFiles, commitSha: verifiedCommit },
     validation: {
       tests: workflow.validation.tests === 'not-needed' ? 'not-needed' : 'not-run',
       build: workflow.validation.build === 'not-needed' ? 'not-needed' : 'not-run',
@@ -332,6 +366,15 @@ export function recordExecutionWorkflowFileChange(value, { path, commitSha, sour
     review: 'awaiting-validation',
     executor: 'started',
     block: undefined,
+  })
+}
+
+/** Backwards-compatible single-update wrapper for the original narrow control. */
+export function recordExecutionWorkflowFileChange(value, { path, commitSha, source = '' } = {}) {
+  return recordExecutionWorkflowFileChanges(value, {
+    changes: [{ path, operation: 'update' }],
+    commitSha,
+    source,
   })
 }
 
@@ -421,7 +464,10 @@ const BLOCK_COPY = Object.freeze({
   'branch-conflict': 'The proposed branch already exists or conflicts with repository state.',
   'execution-conflict': 'GitHub reported a conflict while preparing the branch.',
   'file-change-conflict': 'The selected file changed after it was loaded. Refresh its current content before applying another reviewed replacement.',
+  'file-already-exists': 'A requested new file already exists on the approved branch. Refresh the review and choose an update instead.',
+  'file-missing': 'A reviewed file is no longer available on the approved branch. Re-inspect before retrying.',
   'file-content-unavailable': 'The selected file could not be safely loaded as a bounded text file.',
+  'tree-unavailable': 'FounderLab could not safely read the complete branch tree for this multi-file change.',
   'execution-cancelled': 'The execution was cancelled before a completed result was recorded.',
   'provider-unavailable': 'The selected provider is unavailable for this execution step.',
   'validation-failed': 'Required validation failed; review the result before continuing.',
@@ -454,19 +500,19 @@ export function getExecutionWorkflowPresentation(value) {
   const blocked = workflow.block
   const approvalRecorded = workflow.approval === 'approved'
   const state = blocked ? 'execution-blocked' : mergeReady ? 'merge-ready' : reviewReady ? 'review-ready' : validationComplete && changeApplied ? 'validation-complete' : changeApplied ? 'change-applied' : branchCreated ? 'branch-created' : approvalRecorded ? 'approval-recorded' : 'execution-prepared'
-  const label = blocked ? 'Execution blocked' : mergeReady ? 'Ready to merge' : reviewReady ? 'Ready for review' : validationComplete && changeApplied ? 'Validation complete' : changeApplied ? 'File change applied' : branchCreated ? 'Branch created' : approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
+  const label = blocked ? 'Execution blocked' : mergeReady ? 'Ready to merge' : reviewReady ? 'Ready for review' : validationComplete && changeApplied ? 'Validation complete' : changeApplied ? 'Reviewed commit applied' : branchCreated ? 'Branch created' : approvalRecorded ? 'Execution approval recorded' : 'Execution workflow prepared'
   const detail = blocked
     ? BLOCK_COPY[blocked.code]
     : mergeReady
       ? 'Review approval and validation evidence are recorded. No merge has been performed.'
       : reviewReady
-        ? 'The approved file change and required validation evidence are recorded. This is ready for human review, not a merge.'
+        ? 'The approved multi-file commit and required validation evidence are recorded. This is ready for human review, not a merge.'
         : validationComplete && changeApplied
           ? 'Required validation evidence is recorded. Review is the next explicit boundary; no merge is implied.'
           : changeApplied
-            ? 'GitHub confirmed a single reviewed file change and commit on the approved branch. Validation and review remain outstanding.'
+            ? 'GitHub confirmed the reviewed multi-file commit on the approved branch. Validation and review remain outstanding.'
             : branchCreated
-              ? 'GitHub confirmed the branch creation. One explicitly reviewed candidate file may now be changed; no file, test, build, review, or merge result is recorded yet.'
+              ? 'GitHub confirmed the branch creation. Up to four explicitly reviewed text operations may now be committed; no file, test, build, review, or merge result is recorded yet.'
               : approvalRecorded
                 ? workflow.capability.connection === 'connected'
                   ? 'Approval is recorded. GitHub is connected, but write permission will be verified only when the user explicitly creates this branch.'
@@ -479,9 +525,15 @@ export function getExecutionWorkflowPresentation(value) {
     detail,
     repository: workflow.repository.slug,
     branch: `${workflow.branch.state === 'created' ? 'Created' : 'Planned'}: ${workflow.branch.proposed} ← ${workflow.branch.base}`,
-    change: `${workflow.change.state === 'applied' ? 'Change applied' : 'Change prepared'} · ${workflow.change.risk} risk`,
+    change: `${workflow.change.state === 'applied' ? `${workflow.change.appliedFiles.length}-file commit applied` : 'Change prepared'} · ${workflow.change.risk} risk`,
     ...(workflow.change.fileTargets.length ? { fileTargets: workflow.change.fileTargets } : {}),
-    ...(workflow.change.appliedFiles?.length ? { appliedFiles: workflow.change.appliedFiles, commitSha: workflow.change.commitSha } : {}),
+    ...(workflow.change.appliedFiles?.length ? {
+      appliedFiles: workflow.change.appliedFiles,
+      updatedFiles: workflow.change.updatedFiles,
+      createdFiles: workflow.change.createdFiles,
+      deletedFiles: workflow.change.deletedFiles,
+      commitSha: workflow.change.commitSha,
+    } : {}),
     validation,
     review: workflow.review === 'ready-to-merge' ? 'Ready to merge' : workflow.review.replace(/-/g, ' '),
     capability: capabilityLabel(workflow.capability),
@@ -504,7 +556,12 @@ export function getExecutionWorkflowGuidance(value) {
     return `The execution workflow for ${workflow.repository.slug} is blocked during ${workflow.block.phase}: ${BLOCK_COPY[workflow.block.code]} ${recovery} ${files} ${validation} Do not claim a branch, file change, test, build, or merge completed.`
   }
   if (workflow.change.state === 'applied') {
-    const changed = `GitHub confirmed a reviewed replacement of ${workflow.change.appliedFiles.join(', ')} on ${workflow.branch.proposed} (commit ${workflow.change.commitSha.slice(0, 12)}).`
+    const operations = [
+      workflow.change.updatedFiles.length ? `updated ${workflow.change.updatedFiles.join(', ')}` : '',
+      workflow.change.createdFiles.length ? `created ${workflow.change.createdFiles.join(', ')}` : '',
+      workflow.change.deletedFiles.length ? `deleted ${workflow.change.deletedFiles.join(', ')}` : '',
+    ].filter(Boolean).join('; ')
+    const changed = `GitHub confirmed a reviewed multi-file commit (${operations}) on ${workflow.branch.proposed} (commit ${workflow.change.commitSha.slice(0, 12)}).`
     const review = workflow.review === 'ready-for-review'
       ? 'Required validation is recorded and the change is ready for human review, not a merge.'
       : workflow.review === 'ready-to-merge'
@@ -562,7 +619,7 @@ export function formatExecutionBranchCreatedReport(workflow) {
     `**Repository:** \`${presentation.repository}\``,
     `**Branch:** \`${presentation.branch}\``,
     '',
-    'GitHub confirmed branch creation. The next explicit action may replace one reviewed candidate text file on this approved branch. No file, test, build, review, or merge result is recorded yet.',
+    'GitHub confirmed branch creation. The next explicit action may commit up to four reviewed text operations on this approved branch: update inspected files, create a new text file, or delete an inspected file. No file, test, build, review, or merge result is recorded yet.',
   ].join('\n')
 }
 
@@ -570,14 +627,17 @@ export function formatExecutionFileChangeReport(workflow) {
   const presentation = getExecutionWorkflowPresentation(workflow)
   if (!presentation || presentation.state !== 'change-applied') return ''
   return [
-    '## File change applied',
+    '## Multi-file commit applied',
     `**Repository:** \`${presentation.repository}\``,
     `**Branch:** \`${presentation.branch}\``,
-    `**Changed file:** \`${presentation.appliedFiles[0]}\``,
+    `**Changed files:** ${presentation.appliedFiles.map((path) => `\`${path}\``).join(', ')}`,
     `**GitHub commit:** \`${presentation.commitSha}\``,
     '',
-    'GitHub confirmed this one-file commit. Required validation and human review remain explicit next steps; no merge is implied.',
-  ].join('\n')
+    presentation.updatedFiles?.length ? `**Updated:** ${presentation.updatedFiles.map((path) => `\`${path}\``).join(', ')}` : '',
+    presentation.createdFiles?.length ? `**Created:** ${presentation.createdFiles.map((path) => `\`${path}\``).join(', ')}` : '',
+    presentation.deletedFiles?.length ? `**Deleted:** ${presentation.deletedFiles.map((path) => `\`${path}\``).join(', ')}` : '',
+    'GitHub confirmed this bounded multi-file commit. Required validation and human review remain explicit next steps; no merge is implied.',
+  ].filter(Boolean).join('\n')
 }
 
 export function formatExecutionValidationReport(workflow) {
@@ -604,10 +664,10 @@ export function formatExecutionReviewReadyReport(workflow) {
     '## Ready for review',
     `**Repository:** \`${presentation.repository}\``,
     `**Branch:** \`${presentation.branch}\``,
-    `**Changed file:** \`${presentation.appliedFiles[0]}\``,
+    `**Changed files:** ${presentation.appliedFiles.map((path) => `\`${path}\``).join(', ')}`,
     `**Validation:** ${presentation.validation}`,
     '',
-    'The one-file change and validation evidence are ready for human review. No pull request or merge has been created.',
+    'The committed file scope and validation evidence are ready for human review. No pull request or merge has been created.',
   ].join('\n')
 }
 
