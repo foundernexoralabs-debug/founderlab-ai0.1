@@ -23,8 +23,10 @@ import { Dashboard } from '@/features/dashboard/Dashboard'
 import { ChatWorkspace } from '@/features/chat/ChatWorkspace'
 import { FeedbackModal } from '@/features/feedback/FeedbackModal'
 import { OllamaProviderPanel } from '@/features/settings/OllamaProviderPanel'
+import { IntegrationsControlCenter } from '@/features/integrations/IntegrationsControlCenter'
+import { verifyGithubConnectorSession } from '@/features/integrations/githubConnectorAdapter'
 import { copyText, flConsumeHandoff, flNavigate, fmtDate, ts, uid } from '@/lib/appUtils'
-import { clearGithubToken, getGithubToken, setGithubToken } from '@/services/githubTokenSession'
+import { clearGithubToken, getGithubConnectorRuntime, getGithubToken, setGithubConnectorRuntime, setGithubToken } from '@/services/githubTokenSession'
 import { authenticatedFetch } from '@/services/authenticatedFetch'
 import { getProviderConfigurationState } from '@/ai/providerAvailability'
 import {
@@ -2169,7 +2171,6 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
   const [ghPatSettings, setGhPatSettings] = useState(getGithubToken)
   const [ghUserSettings, setGhUserSettings] = useState(null)
   const [ghChecking, setGhChecking] = useState(false)
-  const [ghInputVal, setGhInputVal] = useState('')
 
   useEffect(() => {
     if (ghPatSettings) checkGithubConnection(ghPatSettings)
@@ -2177,26 +2178,41 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
 
   async function checkGithubConnection(pat) {
     setGhChecking(true)
-    try {
-      const r = await fetch('https://api.github.com/user', { headers: { Authorization: `token ${pat}` } })
-      if (r.ok) setGhUserSettings(await r.json())
-      else { setGhUserSettings(null); toast('GitHub token is invalid or expired', 'error') }
-    } catch { setGhUserSettings(null) }
+    const result = await verifyGithubConnectorSession(pat)
+    setGithubConnectorRuntime(result.runtime)
+    if (result.ok) {
+      setGhUserSettings(result.identity)
+    } else if (result.reason === 'not-authorized' || result.reason === 'not-configured') {
+      clearGithubToken()
+      setGhPatSettings('')
+      setGhUserSettings(null)
+      toast('GitHub token is invalid or expired', 'error')
+    } else {
+      setGhUserSettings(null)
+    }
     setGhChecking(false)
   }
 
-  function connectGithub() {
-    if (!ghInputVal.trim()) return toast('Paste a GitHub token first', 'error')
-    setGithubToken(ghInputVal)
-    setGhPatSettings(ghInputVal.trim())
-    checkGithubConnection(ghInputVal.trim())
-    setGhInputVal('')
+  function connectGithub(token) {
+    const nextToken = typeof token === 'string' ? token.trim() : ''
+    if (!nextToken) return toast('Paste a GitHub token first', 'error')
+    setGithubToken(nextToken)
+    setGhPatSettings(nextToken)
+    checkGithubConnection(nextToken)
   }
 
   function disconnectGithub() {
     clearGithubToken()
     setGhPatSettings(''); setGhUserSettings(null)
     toast('GitHub disconnected', 'success')
+  }
+
+  function retryGithubConnection() {
+    if (!ghPatSettings) {
+      toast('Paste a GitHub token before retrying', 'error')
+      return
+    }
+    checkGithubConnection(ghPatSettings)
   }
 
 
@@ -2345,84 +2361,13 @@ function SettingsPage({ user, profile, onProfileUpdate, onSignOut }) {
       )}
 
       {tab==='integrations' && (
-        <div style={{ maxWidth:600, display:'flex', flexDirection:'column', gap:14 }}>
-          <p style={{ margin:'0 0 4px', fontSize:13, color:C.t2, lineHeight:1.6 }}>
-            Connect the services Builder and Code AI use to push code and deploy. Connections are saved in this browser and reused automatically — you won't be asked again.
-          </p>
-
-          {/* GitHub */}
-          <Card style={{ padding:20 }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
-              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <span style={{ fontSize:20 }}>🐙</span>
-                <div>
-                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>GitHub</p>
-                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Push generated code and websites to a repository</p>
-                </div>
-              </div>
-              {ghChecking ? <Spinner size={16} />
-                : ghUserSettings ? <Badge color="green">● Connected as {ghUserSettings.login}</Badge>
-                : <Badge color="gray">○ Not connected</Badge>}
-            </div>
-            {ghUserSettings ? (
-              <Button onClick={disconnectGithub} variant="secondary" size="sm">Disconnect</Button>
-            ) : (
-              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                <input type="password" value={ghInputVal} onChange={e=>setGhInputVal(e.target.value)}
-                  placeholder="Personal access token (this session only)"
-                  autoComplete="off"
-                  style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, color:C.t1, fontSize:13, padding:'9px 12px', fontFamily:'inherit', outline:'none' }} />
-                <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-                  <Button onClick={connectGithub} size="sm">Connect</Button>
-                  <a href="https://github.com/settings/tokens/new?scopes=repo&description=FounderLab%20AI" target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.accent }}>Create a token →</a>
-                </div>
-                <p style={{ margin:0, color:C.t3, fontSize:11, lineHeight:1.5 }}>The token is kept in memory for this browser session only and is never saved to local storage.</p>
-              </div>
-            )}
-          </Card>
-
-          {/* Vercel */}
-          <Card style={{ padding:20 }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <span style={{ fontSize:20 }}>▲</span>
-                <div>
-                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Vercel</p>
-                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Deploy is one click — opens Vercel's own import flow, you log in there directly. No token needed.</p>
-                </div>
-              </div>
-              <Badge color="green">● Ready</Badge>
-            </div>
-          </Card>
-
-          {/* Supabase */}
-          <Card style={{ padding:20 }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <span style={{ fontSize:20 }}>⚡</span>
-                <div>
-                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Supabase</p>
-                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>Powers your account, notes, tasks and chat history</p>
-                </div>
-              </div>
-              <Badge color="green">● Connected</Badge>
-            </div>
-          </Card>
-
-          {/* Composio */}
-          <Card style={{ padding:20 }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <span style={{ fontSize:20 }}>🔌</span>
-                <div>
-                  <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.t1 }}>Composio</p>
-                  <p style={{ margin:0, fontSize:12, color:C.t3 }}>500+ app integrations — not yet configured for this workspace</p>
-                </div>
-              </div>
-              <Badge color="gray">○ Not connected</Badge>
-            </div>
-          </Card>
-        </div>
+        <IntegrationsControlCenter
+          theme={C}
+          github={{ user: ghUserSettings, checking: ghChecking, runtime: getGithubConnectorRuntime() }}
+          onConnectGithub={connectGithub}
+          onDisconnectGithub={disconnectGithub}
+          onRetryGithub={retryGithubConnection}
+        />
       )}
 
       {tab==='feedback' && (

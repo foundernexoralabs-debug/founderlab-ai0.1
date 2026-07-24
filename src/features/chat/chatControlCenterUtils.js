@@ -4,6 +4,7 @@ import { getExecutionBridgeHandoffAction } from './chatExecutionBridge.js'
 import { getCapabilityBridgeHandoffAction } from './chatCapabilityBridge.js'
 import { parsePublicGithubRepositoryReference } from './chatRepositoryInspection.js'
 import { normalizeExecutionWorkflow } from './chatExecutionWorkflow.js'
+import { normalizeConnectorPlan } from './chatConnectorFramework.js'
 
 const MAX_HANDOFF_TEXT_LENGTH = 6000
 
@@ -125,6 +126,14 @@ const CONTROL_ACTIONS = Object.freeze({
     target: 'settings',
     completedLabel: 'Opened',
   }),
+  'manage-integrations': Object.freeze({
+    id: 'manage-integrations',
+    label: 'Open Integrations',
+    detail: 'Resolve the connector boundary in Settings',
+    icon: '↗',
+    target: 'settings',
+    completedLabel: 'Opened',
+  }),
 })
 
 function requestText(value) {
@@ -211,6 +220,10 @@ export function getAssistantControlActions(messages, assistantIndex, { githubCon
   const continuationAction = executionHandoff || capabilityHandoff
   if (continuationAction && !actions.some((action) => action.id === continuationAction) && CONTROL_ACTIONS[continuationAction]) {
     actions.push(CONTROL_ACTIONS[continuationAction])
+  }
+  const connectorPlan = normalizeConnectorPlan(assistant.orchestration?.connectorPlan)
+  if (connectorPlan?.decision === 'integration-blocked' && !actions.some((action) => action.id === 'manage-integrations')) {
+    actions.push(CONTROL_ACTIONS['manage-integrations'])
   }
   const isCompleted = (action) => {
     const status = completed.get(action.id)

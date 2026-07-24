@@ -4,7 +4,13 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseFiles, isPreviewable } from '../src/lib/codeFiles.js'
-import { getGithubToken, setGithubToken, clearGithubToken } from '../src/services/githubTokenSession.js'
+import {
+  clearGithubToken,
+  getGithubConnectorRuntime,
+  getGithubToken,
+  setGithubConnectorRuntime,
+  setGithubToken,
+} from '../src/services/githubTokenSession.js'
 import { persistSession, readPersistedSession } from '../src/lib/persistedSession.js'
 import {
   GENERATED_PREVIEW_REFERRER_POLICY,
@@ -61,6 +67,14 @@ test('GitHub tokens remain session-memory only', () => {
   assert.equal(getGithubToken(), '')
   setGithubToken('  ghp_example  ')
   assert.equal(getGithubToken(), 'ghp_example')
+  assert.deepEqual(getGithubConnectorRuntime(), {
+    installed: true, configured: true, connected: false, authorization: 'not-authorized', health: 'healthy',
+  })
+  setGithubConnectorRuntime({ connected: true, authorization: 'authorized' })
+  assert.deepEqual(getGithubConnectorRuntime(), {
+    installed: true, configured: true, connected: true, authorization: 'authorized', health: 'healthy',
+  })
+  assert.equal(JSON.stringify(getGithubConnectorRuntime()).includes('ghp_example'), false)
   clearGithubToken()
   assert.equal(getGithubToken(), '')
 

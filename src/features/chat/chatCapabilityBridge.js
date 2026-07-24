@@ -1,21 +1,19 @@
 /**
- * Compatibility adapter between the shared connector framework and existing
- * Chat handoff surfaces. Connector discovery, readiness, and selection live
- * in chatConnectorFramework; this file only exposes the compact route shape
- * already consumed by the current Chat UI.
+ * Compatibility adapter between the shared connector platform and existing
+ * Chat handoff surfaces. Connector discovery and capability metadata remain
+ * platform-owned; this file only exposes the compact route shape already
+ * consumed by the current Chat UI.
  */
 
 import { isChatExecutionActionId } from './chatExecutionVocabulary.js'
 import {
   getChatConnectorPlan,
   getConnectorPlanGuidance,
-  getConnectorRegistryEntry,
   normalizeConnectorPlan,
 } from './chatConnectorFramework.js'
+import { CONNECTOR_IDS, getConnectorDefinition } from '../integrations/connectorPlatform.js'
 
 const MAX_ROUTES = 3
-const CAPABILITY_IDS = new Set(['notes', 'tasks', 'builder', 'code', 'github', 'youtube', 'email', 'calendar', 'external-app'])
-const CAPABILITY_KINDS = new Set(['workspace', 'tool', 'integration'])
 const AVAILABILITY = new Set(['available', 'connected', 'not-installed', 'not-configured', 'not-connected', 'read-only', 'unauthorized', 'unavailable', 'not-implemented'])
 
 function isRecord(value) {
@@ -44,7 +42,7 @@ function fromConnectorPlan(value) {
   const plan = normalizeConnectorPlan(value)
   if (!plan || plan.decision === 'chat-only') return null
   const routes = plan.connectors
-    .filter((connector) => CAPABILITY_IDS.has(connector.id) && CAPABILITY_KINDS.has(connector.kind))
+    .filter((connector) => CONNECTOR_IDS.includes(connector.id) && getConnectorDefinition(connector.id)?.kind === connector.kind)
     .slice(0, MAX_ROUTES)
     .map((connector) => Object.freeze({
       id: connector.id,
@@ -62,15 +60,16 @@ export function normalizeCapabilityBridge(value) {
   if (!isRecord(value) || !Array.isArray(value.routes)) return null
   const seen = new Set()
   const routes = value.routes.reduce((items, route) => {
-    if (!isRecord(route) || !CAPABILITY_IDS.has(route.id) || seen.has(route.id)) return items
-    if (!CAPABILITY_KINDS.has(route.kind) || !AVAILABILITY.has(route.availability)) return items
+    const definition = isRecord(route) && CONNECTOR_IDS.includes(route.id) ? getConnectorDefinition(route.id) : null
+    if (!definition || seen.has(route.id)) return items
+    if (definition.kind !== route.kind || !AVAILABILITY.has(route.availability)) return items
     const action = isChatExecutionActionId(route.action) ? route.action : ''
     seen.add(route.id)
     items.push(Object.freeze({ id: route.id, kind: route.kind, availability: route.availability, ...(action ? { action } : {}) }))
     return items
   }, []).slice(0, MAX_ROUTES)
   if (!routes.length) return null
-  const primary = CAPABILITY_IDS.has(value.primary) && routes.some((route) => route.id === value.primary) ? value.primary : routes[0].id
+  const primary = CONNECTOR_IDS.includes(value.primary) && routes.some((route) => route.id === value.primary) ? value.primary : routes[0].id
   return Object.freeze({ version: 1, primary, routes: Object.freeze(routes) })
 }
 
@@ -84,7 +83,7 @@ export function getChatCapabilityBridge({ request = '', intent = null, execution
 }
 
 function labelFor(route) {
-  return getConnectorRegistryEntry(route?.id)?.label || 'FounderLab capability'
+  return getConnectorDefinition(route?.id)?.label || 'FounderLab capability'
 }
 
 /** Provider-neutral boundary guidance remains derived from the shared plan. */

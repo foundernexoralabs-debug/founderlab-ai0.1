@@ -7,7 +7,8 @@ import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
 import { useTextToSpeech } from '@/hooks/useTextToSpeech'
 import { getVoiceSpeedLabel } from '@/lib/voicePreferencesUtils'
 import { getVoiceConfig, persistVoiceConfig } from '@/services/voicePreferences'
-import { getGithubToken } from '@/services/githubTokenSession'
+import { getGithubConnectorRuntime, getGithubToken } from '@/services/githubTokenSession'
+import { executeConnectorAction, getConnectorBlockCopy, getConnectorForAction } from '@/features/integrations/connectorPlatform'
 import {
   discoverLocalOllama,
   getAIProvider,
@@ -333,9 +334,10 @@ export function ChatWorkspace({ user }) {
         hasImage,
       },
       integrations: {
-        // Token presence is configuration evidence only. Write authorization
-        // is verified by GitHub at the explicit branch action, never assumed.
-        github: { configured: Boolean(getGithubToken()), connected: Boolean(getGithubToken()) },
+        // Session state is safe capability evidence only. Repository and
+        // branch permission are still verified by GitHub at the explicit
+        // mutation boundary, never inferred from a connected account.
+        github: getGithubConnectorRuntime(),
       },
     }
   }
@@ -1716,30 +1718,56 @@ export function ChatWorkspace({ user }) {
   }
 
   async function continueFromChat(action, message) {
-    if (action.id === 'save-note') return saveToNotes(message)
-    if (action.id === 'create-task') return createTask(message)
-    if (action.id === 'inspect-repo') return inspectRepositoryFromChat(action, message)
-    if (action.id === 'prepare-branch') return prepareRepositoryBranchFromChat(action, message)
-    if (action.id === 'prepare-execution') return prepareRepositoryExecutionFromChat(action, message)
-    if (action.id === 'approve-execution') return approveRepositoryExecutionFromChat(action, message)
-    if (action.id === 'create-branch') return createApprovedRepositoryBranchFromChat(action, message)
-    if (action.id === 'apply-file-change') return openApprovedFileChangeFromChat(action, message)
-    if (action.id === 'validate') return checkGithubValidationFromChat(action, message)
-    if (action.id === 'review') return prepareExecutionReviewFromChat(action, message)
-    if (action.id === 'retry-execution') return retryRepositoryExecutionFromChat(action, message)
+    if (action.id === 'manage-integrations') {
+      recordActionEvidence(message.id, { id: 'manage-integrations', status: 'handoff-opened', resource: { type: 'connector', id: 'settings:integrations', title: 'Integrations' } })
+      flNavigate('settings')
+      toast('Open Integrations to resolve this connector boundary.', 'success')
+      return true
+    }
     if (action.id === 'connect-github') {
       recordActionEvidence(message.id, { id: 'connect-github', status: 'handoff-opened' })
       flNavigate('settings')
       toast('Open Integrations in Settings to connect GitHub for this browser session.', 'success')
       return true
     }
-    const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
-    if (!payload || !action.target) return false
-    recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })
-    flNavigate(action.target, payload)
-    const destination = action.target === 'builder' ? 'Builder' : action.target === 'code' ? 'Code AI' : 'YouTube AI'
-    toast(`Opening ${destination} with this chat brief.`, 'success')
-    return true
+    const connectorId = getConnectorForAction(action.id)
+    const workflow = normalizeExecutionWorkflow(message?.orchestration?.workflow)
+    const runAction = async () => {
+      if (action.id === 'save-note') return saveToNotes(message)
+      if (action.id === 'create-task') return createTask(message)
+      if (action.id === 'inspect-repo') return inspectRepositoryFromChat(action, message)
+      if (action.id === 'prepare-branch') return prepareRepositoryBranchFromChat(action, message)
+      if (action.id === 'prepare-execution') return prepareRepositoryExecutionFromChat(action, message)
+      if (action.id === 'approve-execution') return approveRepositoryExecutionFromChat(action, message)
+      if (action.id === 'create-branch') return createApprovedRepositoryBranchFromChat(action, message)
+      if (action.id === 'apply-file-change') return openApprovedFileChangeFromChat(action, message)
+      if (action.id === 'validate') return checkGithubValidationFromChat(action, message)
+      if (action.id === 'review') return prepareExecutionReviewFromChat(action, message)
+      if (action.id === 'retry-execution') return retryRepositoryExecutionFromChat(action, message)
+      const payload = buildChatHandoffPayload(action.id, { request: action.request, response: message.content })
+      if (!payload || !action.target) return false
+      recordActionEvidence(message.id, { id: action.id, status: 'handoff-opened' })
+      flNavigate(action.target, payload)
+      const destination = action.target === 'builder' ? 'Builder' : action.target === 'code' ? 'Code AI' : 'YouTube AI'
+      toast(`Opening ${destination} with this chat brief.`, 'success')
+      return true
+    }
+    if (!connectorId) return runAction()
+    const receipt = await executeConnectorAction({
+      connectorId,
+      actionId: action.id,
+      runtime: connectorId === 'github' ? getGithubConnectorRuntime() : null,
+      approvalRecorded: workflow?.approval === 'approved',
+      executor: runAction,
+    })
+    if (receipt.state === 'blocked') {
+      toast(getConnectorBlockCopy(receipt.reason), 'error')
+      if (['not-installed', 'not-configured', 'not-authorized', 'read-only', 'temporarily-unavailable'].includes(receipt.reason)) {
+        flNavigate('settings')
+      }
+      return false
+    }
+    return receipt.result === true
   }
 
   function readAloud(message) {
@@ -1771,6 +1799,9 @@ export function ChatWorkspace({ user }) {
     const conversation = conversationsRef.current.find((entry) => entry.id === conversationId)
     if (conversation) updateConversation(conversationId, { pinned: !conversation.pinned })
   }
+
+  const githubRuntime = getGithubConnectorRuntime()
+  const githubConnected = githubRuntime.connected === true && githubRuntime.authorization === 'authorized'
 
   return (
     <div className="fl-chat-shell" style={{ background: C.bg }}>
@@ -1871,7 +1902,7 @@ export function ChatWorkspace({ user }) {
             <div ref={conversationScrollRef} className="fl-chat-scroll" role="region" aria-label="Conversation" tabIndex={0}>
               <div className="fl-chat-reading-column">
                 {messages.length === 0 && <div style={{ display: 'grid', placeItems: 'center', minHeight: 220, textAlign: 'center', color: C.t3, fontSize: 13 }}>Start with a question, a decision, or a draft you want to improve.</div>}
-                {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index, { githubConnected: Boolean(getGithubToken()) })} onControlAction={continueFromChat} />)}
+                {messages.map((message, index) => <ChatMessage key={message.id} message={message} user={user} sending={sending} activeTTS={activeTTS} onCopy={copyText} onEdit={beginEdit} onDelete={requestDeleteMessage} onRegenerate={regenerate} onSaveToNotes={saveToNotes} onCreateTask={createTask} onReact={() => {}} onReadAloud={readAloud} onPreviewVoice={() => readAloud({ id: 'voice-preview', content: 'This is a quick FounderLab voice preview.' })} voiceCfg={voiceConfig} onVoiceChange={changeVoiceConfig} elevenLabsAvailable={elAvailable} controlActions={getAssistantControlActions(messages, index, { githubConnected })} onControlAction={continueFromChat} />)}
                 {streamingReply?.conversationId === activeId && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatMessage key={streamingReply.id} message={streamingReply} user={user} sending={sending} activeTTS={activeTTS} streaming onStopStreaming={stopGenerating} />}
                 {sending && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && !streamingReply && <ChatTypingIndicator provider={selectedProvider} onStop={stopGenerating} />}
                 {activeError && voiceSession.phase === 'idle' && liveCall.phase === 'idle' && <ChatErrorBanner error={activeError} onRetry={retryLastMessage} onDismiss={() => setErrorState(null)} onOpenProviders={() => flNavigate('settings')} />}

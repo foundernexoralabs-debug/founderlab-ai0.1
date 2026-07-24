@@ -149,6 +149,16 @@ import {
   refreshConnectorPlanForExecution,
 } from '../src/features/chat/chatConnectorFramework.js'
 import {
+  createConnectorExecutionRequest,
+  executeConnectorAction,
+  getConnectorActionReadiness,
+  getConnectorForAction,
+  getIntegrationSettingsConnectors,
+  normalizeConnectorRuntime,
+  resolveConnector,
+} from '../src/features/integrations/connectorPlatform.js'
+import { verifyGithubConnectorSession } from '../src/features/integrations/githubConnectorAdapter.js'
+import {
   buildWorkspaceAwareness,
   getProjectAwareness,
   getProjectAwarenessGuidance,
@@ -1295,7 +1305,7 @@ test('Capability bridge prepares real FounderLab routes and external integration
     primary: 'email',
     routes: [
       { id: 'tasks', kind: 'workspace', availability: 'available', action: 'create-task' },
-      { id: 'email', kind: 'integration', availability: 'not-installed' },
+      { id: 'email', kind: 'integration', availability: 'not-installed', action: 'send-email' },
     ],
   })
   assert.equal(getCapabilityBridgeHandoffAction(emailCapability), '')
@@ -1376,9 +1386,14 @@ test('Connector framework unifies discovery, authorization, fallback, and safe a
     id: 'github', label: 'GitHub', kind: 'integration', scope: 'external',
     actions: [
       { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
+      { id: 'prepare-branch', label: 'Prepare branch plan', access: 'read', approval: 'not-required', localPreparation: true },
+      { id: 'prepare-execution', label: 'Prepare execution workflow', access: 'read', approval: 'not-required', localPreparation: true },
+      { id: 'approve-execution', label: 'Record execution approval', access: 'write', approval: 'not-required', localPreparation: true },
       { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
       { id: 'apply-file-change', label: 'Commit reviewed changes', access: 'write', approval: 'required' },
       { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
+      { id: 'review', label: 'Prepare review summary', access: 'read', approval: 'not-required', localPreparation: true },
+      { id: 'retry-execution', label: 'Restore retry path', access: 'read', approval: 'not-required', localPreparation: true },
     ],
   })
   assert.equal(getConnectorRegistryEntry('unknown'), null)
@@ -1467,6 +1482,92 @@ test('Connector framework unifies discovery, authorization, fallback, and safe a
   const context = getChatRequestContext([{ role: 'user', content: request }])
   assert.equal(context.connectorPlan.primary, 'email')
   assert.match(getChatSystemPrompt(context), /Current connector-selection note/i)
+})
+
+test('Shared integrations platform resolves safe connector states and dispatches only real approved executors', async () => {
+  const githubDefault = resolveConnector('github')
+  assert.deepEqual(githubDefault, {
+    id: 'github', label: 'GitHub', description: 'Inspect repositories and make explicitly approved branch-first changes.', icon: '⌘',
+    kind: 'integration', scope: 'external', installation: 'installed', configuration: 'not-configured', authorization: 'not-authorized', access: 'not-applicable', health: 'healthy', readiness: 'not-configured',
+    action: 'inspect-repo', actionLabel: 'Inspect public repository', actionReadiness: 'available', approval: 'not-required',
+  })
+  assert.equal(getConnectorForAction('apply-file-change'), 'github')
+  assert.equal(getConnectorForAction('send-email'), 'email')
+  assert.equal(getConnectorForAction('unknown-action'), '')
+
+  const authorizedGitHub = normalizeConnectorRuntime('github', {
+    installed: true, configured: true, connected: true, authorization: 'authorized', writable: true, token: 'never persist', account: 'private@example.com',
+  })
+  assert.deepEqual(authorizedGitHub, {
+    installation: 'installed', configuration: 'configured', authorization: 'authorized', access: 'writable', health: 'healthy',
+  })
+  assert.equal(JSON.stringify(authorizedGitHub).includes('never persist'), false)
+  assert.equal(getConnectorActionReadiness('github', 'create-branch', authorizedGitHub), 'approval-required')
+  assert.equal(getConnectorActionReadiness('github', 'create-branch', authorizedGitHub, { approvalRecorded: true }), 'available')
+  assert.equal(getConnectorActionReadiness('github', 'prepare-branch', githubDefault), 'available')
+  assert.deepEqual(createConnectorExecutionRequest({
+    connectorId: 'github', actionId: 'create-branch', runtime: authorizedGitHub, approvalRecorded: true,
+  }), {
+    connectorId: 'github', actionId: 'create-branch', runtime: authorizedGitHub, approvalRecorded: true,
+  })
+
+  const settingsConnectors = getIntegrationSettingsConnectors({ github: { configured: true, connected: true, authorization: 'authorized', writable: true } })
+  assert.deepEqual(settingsConnectors.map((connector) => connector.id), ['github', 'email', 'calendar'])
+  assert.equal(settingsConnectors.find((connector) => connector.id === 'github').readiness, 'writable')
+  assert.equal(settingsConnectors.find((connector) => connector.id === 'email').readiness, 'not-installed')
+
+  let calls = 0
+  const blocked = await executeConnectorAction({
+    connectorId: 'github', actionId: 'create-branch', runtime: null, approvalRecorded: true,
+    executor: async () => { calls += 1; return { branch: 'should-not-exist' } },
+  })
+  assert.deepEqual(blocked, {
+    connector: 'github', action: 'create-branch', state: 'blocked', evidence: 'failure-recorded', reason: 'not-configured',
+  })
+  assert.equal(calls, 0)
+
+  const prepared = await executeConnectorAction({
+    connectorId: 'github', actionId: 'prepare-branch', runtime: null,
+    executor: async () => { calls += 1; return { branch: 'founderlab/fix-chat' } },
+  })
+  assert.equal(prepared.state, 'completed')
+  assert.equal(prepared.evidence, 'locally-verified')
+  assert.equal(prepared.result.branch, 'founderlab/fix-chat')
+  assert.equal(calls, 1)
+
+  const created = await executeConnectorAction({
+    connectorId: 'github', actionId: 'create-branch', runtime: authorizedGitHub, approvalRecorded: true,
+    executor: async () => { calls += 1; return { branch: 'founderlab/fix-chat', commitSha: 'abc1234' } },
+  })
+  assert.equal(created.state, 'completed')
+  assert.equal(created.evidence, 'externally-verified')
+  assert.equal(created.result.commitSha, 'abc1234')
+  assert.equal(calls, 2)
+})
+
+test('GitHub connector verification returns a safe capability result without retaining token or raw provider detail', async () => {
+  const connected = await verifyGithubConnectorSession(' ghp_private ', {
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'https://api.github.com/user')
+      assert.equal(options.headers.Authorization, 'Bearer ghp_private')
+      return { ok: true, json: async () => ({ login: 'founderlab-ai' }) }
+    },
+  })
+  assert.deepEqual(connected, {
+    ok: true,
+    identity: { login: 'founderlab-ai' },
+    runtime: { configured: true, connected: true, authorization: 'authorized', health: 'healthy' },
+  })
+  assert.equal(JSON.stringify(connected).includes('ghp_private'), false)
+
+  const rejected = await verifyGithubConnectorSession('ghp_private', { fetchImpl: async () => ({ ok: false }) })
+  assert.deepEqual(rejected, {
+    ok: false, reason: 'not-authorized', runtime: { configured: true, connected: false, authorization: 'not-authorized', health: 'healthy' },
+  })
+  const unavailable = await verifyGithubConnectorSession('ghp_private', { fetchImpl: async () => { throw new Error('network details never leak') } })
+  assert.deepEqual(unavailable, {
+    ok: false, reason: 'temporarily-unavailable', runtime: { configured: true, connected: false, authorization: 'not-authorized', health: 'temporarily-unavailable' },
+  })
 })
 
 test('operator transparency labels a recommendation, handoff, and FounderLab-local completion without claiming external execution', () => {
@@ -1633,6 +1734,14 @@ test('Chat control center offers only explicit, real workspace actions and bound
   assert.deepEqual(getChatControlActions('Use this idea for YouTube content.').map((action) => action.id), ['youtube'])
   assert.deepEqual(getChatControlActions('What time is it in London?'), [])
   assert.deepEqual(getChatControlActions('What is GitHub and how does an API work?'), [])
+
+  const emailRequest = 'Email the launch update to our client.'
+  const emailConnectorPlan = getChatConnectorPlan({ request: emailRequest, intent: classifyChatRequest(emailRequest) })
+  const blockedConnectorActions = getAssistantControlActions([
+    { role: 'user', content: emailRequest },
+    { role: 'assistant', content: 'Email needs a verified connector first.', orchestration: { connectorPlan: emailConnectorPlan, actions: [] } },
+  ], 1)
+  assert.deepEqual(blockedConnectorActions.map((action) => action.id), ['manage-integrations'])
 
   const actions = getAssistantControlActions([
     { role: 'user', content: 'Turn this into a task and prepare it for GitHub.' },
@@ -2093,6 +2202,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   const repositoryChangeSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatRepositoryChangeDialog.jsx'), 'utf8')
   const fileExecutorSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/githubFileExecutor.js'), 'utf8')
   const validationExecutorSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/githubValidationExecutor.js'), 'utf8')
+  const integrationsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/integrations/IntegrationsControlCenter.jsx'), 'utf8')
+  const connectorPlatformSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/integrations/connectorPlatform.js'), 'utf8')
   const voiceResponseSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/voiceResponseUtils.js'), 'utf8')
   const liveCallSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/ChatLiveCallSurface.jsx'), 'utf8')
   const liveCallUtilsSource = fs.readFileSync(path.join(repositoryRoot, 'src/features/chat/liveCallUtils.js'), 'utf8')
@@ -2122,6 +2233,8 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.match(workspaceSource, /getAssistantControlActions/)
   assert.match(workspaceSource, /getChatRequestContext/)
   assert.match(workspaceSource, /getChatSystemPrompt/)
+  assert.match(workspaceSource, /executeConnectorAction/)
+  assert.match(workspaceSource, /getGithubConnectorRuntime/)
   assert.match(workspaceSource, /stream: true/)
   assert.match(workspaceSource, /streamingReply/)
   assert.match(workspaceSource, /partialText/)
@@ -2143,6 +2256,14 @@ test('Chat feature modules preserve local routing, cancellable requests, and res
   assert.doesNotMatch(workspaceSource, /window\.confirm/)
   assert.match(workspaceSource, /ChatMessage/)
   assert.match(composerSource, /Enter to send/)
+  assert.match(appSource, /IntegrationsControlCenter/)
+  assert.match(integrationsSource, /Connector control center/)
+  assert.match(integrationsSource, /GitHubConnectorCard/)
+  assert.match(integrationsSource, /First-class connector/)
+  assert.match(integrationsSource, /Retry connection/)
+  assert.match(connectorPlatformSource, /getConnectorSelectionSignals/)
+  assert.match(connectorPlatformSource, /executeConnectorAction/)
+  assert.doesNotMatch(integrationsSource, /external-app/)
   assert.match(composerSource, /Shift\+Enter/)
   assert.match(composerSource, /Start a live voice session/)
   assert.match(composerSource, /ChatVoiceSession/)

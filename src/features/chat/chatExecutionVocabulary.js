@@ -4,6 +4,17 @@
  * from drifting as real action runners are introduced.
  */
 
+import {
+  isConnectorAccess,
+  isConnectorApproval,
+  isConnectorAuthorization,
+  isConnectorConfiguration,
+  isConnectorHealth,
+  isConnectorInstallation,
+  isConnectorReadiness,
+  isConnectorScope,
+} from '../integrations/connectorPlatform.js'
+
 const ACTION_IDS = Object.freeze([
   'save-note',
   'create-task',
@@ -11,6 +22,9 @@ const ACTION_IDS = Object.freeze([
   'code',
   'github',
   'youtube',
+  'send-email',
+  'schedule-event',
+  'external-action',
   'inspect-repo',
   'prepare-branch',
   'prepare-execution',
@@ -22,6 +36,7 @@ const ACTION_IDS = Object.freeze([
   'merge',
   'retry-execution',
   'connect-github',
+  'manage-integrations',
 ])
 
 const ACTION_STATUSES = Object.freeze([
@@ -44,27 +59,10 @@ const ACTION_STATUSES = Object.freeze([
   'merge-not-ready',
 ])
 
-const RESOURCE_TYPES = Object.freeze(['task', 'note', 'project', 'repository', 'branch', 'file', 'commit'])
+const RESOURCE_TYPES = Object.freeze(['task', 'note', 'project', 'repository', 'branch', 'file', 'commit', 'connector', 'integration'])
 
 // Shared connector/operator vocabulary. Connector implementations describe
 // their runtime through these terms instead of inventing per-app labels.
-const CONNECTOR_INSTALLATIONS = Object.freeze(['not-installed', 'installed', 'not-applicable'])
-const CONNECTOR_CONFIGURATIONS = Object.freeze(['not-configured', 'configured', 'not-applicable'])
-const CONNECTOR_AUTHORIZATIONS = Object.freeze(['not-authorized', 'authorized', 'not-applicable'])
-const CONNECTOR_ACCESS = Object.freeze(['read-only', 'writable', 'not-applicable'])
-const CONNECTOR_HEALTH = Object.freeze(['healthy', 'temporarily-unavailable', 'unavailable'])
-const CONNECTOR_READINESS = Object.freeze([
-  'available',
-  'writable',
-  'not-installed',
-  'not-configured',
-  'not-authorized',
-  'read-only',
-  'temporarily-unavailable',
-  'approval-required',
-])
-const CONNECTOR_APPROVAL = Object.freeze(['not-required', 'required'])
-const CONNECTOR_SCOPES = Object.freeze(['founderlab', 'local', 'cloud', 'external'])
 const CONNECTOR_PLAN_DECISIONS = Object.freeze(['chat-only', 'tool-recommended', 'tool-required', 'integration-blocked', 'approval-required', 'manual-fallback'])
 const CONNECTOR_EVIDENCE = Object.freeze(['locally-verified', 'externally-verified', 'externally-unverified', 'failure-recorded'])
 
@@ -81,35 +79,35 @@ export function isChatExecutionResourceType(value) {
 }
 
 export function isChatConnectorInstallation(value) {
-  return typeof value === 'string' && CONNECTOR_INSTALLATIONS.includes(value)
+  return isConnectorInstallation(value)
 }
 
 export function isChatConnectorConfiguration(value) {
-  return typeof value === 'string' && CONNECTOR_CONFIGURATIONS.includes(value)
+  return isConnectorConfiguration(value)
 }
 
 export function isChatConnectorAuthorization(value) {
-  return typeof value === 'string' && CONNECTOR_AUTHORIZATIONS.includes(value)
+  return isConnectorAuthorization(value)
 }
 
 export function isChatConnectorAccess(value) {
-  return typeof value === 'string' && CONNECTOR_ACCESS.includes(value)
+  return isConnectorAccess(value)
 }
 
 export function isChatConnectorHealth(value) {
-  return typeof value === 'string' && CONNECTOR_HEALTH.includes(value)
+  return isConnectorHealth(value)
 }
 
 export function isChatConnectorReadiness(value) {
-  return typeof value === 'string' && CONNECTOR_READINESS.includes(value)
+  return isConnectorReadiness(value)
 }
 
 export function isChatConnectorApproval(value) {
-  return typeof value === 'string' && CONNECTOR_APPROVAL.includes(value)
+  return isConnectorApproval(value)
 }
 
 export function isChatConnectorScope(value) {
-  return typeof value === 'string' && CONNECTOR_SCOPES.includes(value)
+  return isConnectorScope(value)
 }
 
 export function isChatConnectorPlanDecision(value) {

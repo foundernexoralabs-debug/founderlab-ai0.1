@@ -1,10 +1,10 @@
 /**
- * Shared connector and tool framework for FounderLab Chat.
+ * Chat-side connector selection for the shared FounderLab platform.
  *
  * A connector describes what FounderLab can route toward; it never claims an
  * external account, permission, or action exists without runtime evidence.
- * The plan derived here is compact enough to persist with a Chat reply and is
- * deliberately separate from any future connector executor.
+ * The plan derived here is compact enough to persist with a Chat reply; real
+ * execution itself is owned by ../integrations/connectorPlatform.
  */
 
 import {
@@ -19,69 +19,18 @@ import {
   isChatConnectorReadiness,
   isChatConnectorScope,
 } from './chatExecutionVocabulary.js'
+import {
+  CONNECTOR_IDS,
+  getConnectorAction,
+  getConnectorActionReadiness,
+  getConnectorDefinition,
+  getConnectorReadiness,
+  getConnectorSelectionSignals,
+  normalizeConnectorRuntime,
+} from '../integrations/connectorPlatform.js'
 
 const MAX_CONNECTOR_ROUTES = 3
-const CONNECTOR_IDS = new Set(['notes', 'tasks', 'builder', 'code', 'github', 'youtube', 'email', 'calendar', 'external-app'])
 const CONNECTOR_KINDS = new Set(['workspace', 'tool', 'integration'])
-
-const CONNECTOR_REGISTRY = Object.freeze({
-  notes: Object.freeze({
-    id: 'notes', label: 'Notes', kind: 'workspace', scope: 'founderlab',
-    actions: Object.freeze([{ id: 'save-note', label: 'Save note', access: 'write', approval: 'not-required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-  tasks: Object.freeze({
-    id: 'tasks', label: 'Tasks', kind: 'workspace', scope: 'founderlab',
-    actions: Object.freeze([{ id: 'create-task', label: 'Create task', access: 'write', approval: 'not-required' }]),
-    fallbacks: Object.freeze(['notes']),
-  }),
-  builder: Object.freeze({
-    id: 'builder', label: 'Builder', kind: 'tool', scope: 'founderlab',
-    actions: Object.freeze([{ id: 'builder', label: 'Open Builder handoff', access: 'write', approval: 'not-required' }]),
-    fallbacks: Object.freeze(['code']),
-  }),
-  code: Object.freeze({
-    id: 'code', label: 'Code AI', kind: 'tool', scope: 'founderlab',
-    actions: Object.freeze([{ id: 'code', label: 'Open Code AI handoff', access: 'write', approval: 'not-required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-  github: Object.freeze({
-    id: 'github', label: 'GitHub', kind: 'integration', scope: 'external',
-    actions: Object.freeze([
-      { id: 'inspect-repo', label: 'Inspect public repository', access: 'read', approval: 'not-required', publicRead: true },
-      { id: 'create-branch', label: 'Create approved branch', access: 'write', approval: 'required' },
-      { id: 'apply-file-change', label: 'Commit reviewed changes', access: 'write', approval: 'required' },
-      { id: 'validate', label: 'Read commit validation', access: 'read', approval: 'not-required' },
-    ]),
-    fallbacks: Object.freeze(['code']),
-  }),
-  youtube: Object.freeze({
-    id: 'youtube', label: 'YouTube AI', kind: 'tool', scope: 'founderlab',
-    actions: Object.freeze([{ id: 'youtube', label: 'Open YouTube AI handoff', access: 'write', approval: 'not-required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-  email: Object.freeze({
-    id: 'email', label: 'Email', kind: 'integration', scope: 'external',
-    actions: Object.freeze([{ id: 'send-email', label: 'Send email', access: 'write', approval: 'required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-  calendar: Object.freeze({
-    id: 'calendar', label: 'Calendar', kind: 'integration', scope: 'external',
-    actions: Object.freeze([{ id: 'schedule-event', label: 'Schedule event', access: 'write', approval: 'required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-  'external-app': Object.freeze({
-    id: 'external-app', label: 'External app', kind: 'integration', scope: 'external',
-    actions: Object.freeze([{ id: 'external-action', label: 'Run external action', access: 'write', approval: 'required' }]),
-    fallbacks: Object.freeze([]),
-  }),
-})
-
-const EXTERNAL_SIGNALS = Object.freeze({
-  email: Object.freeze(['email', 'mail', 'gmail', 'outreach']),
-  calendar: Object.freeze(['calendar', 'schedule', 'meeting', 'invite']),
-  'external-app': Object.freeze(['slack', 'notion', 'linear', 'jira', 'airtable', 'hubspot', 'zapier', 'composio', 'integration', 'connector']),
-})
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -101,53 +50,19 @@ function mentionsAny(value, terms) {
 }
 
 function definitionFor(id) {
-  return CONNECTOR_IDS.has(id) ? CONNECTOR_REGISTRY[id] || null : null
+  return CONNECTOR_IDS.includes(id) ? getConnectorDefinition(id) : null
 }
 
-function defaultRuntime(definition) {
-  if (!definition) return null
-  if (definition.scope === 'founderlab') {
-    return { installation: 'installed', configuration: 'not-applicable', authorization: 'not-applicable', access: 'writable', health: 'healthy' }
-  }
-  if (definition.id === 'github') {
-    return { installation: 'installed', configuration: 'not-configured', authorization: 'not-authorized', access: 'not-applicable', health: 'healthy' }
-  }
-  return { installation: 'not-installed', configuration: 'not-applicable', authorization: 'not-applicable', access: 'not-applicable', health: 'healthy' }
-}
-
-/** Runtime state accepts only booleans and named states; credentials never enter the connector model. */
 function runtimeFor(definition, integrations) {
-  const fallback = defaultRuntime(definition)
-  const runtime = integrations?.[definition.id]
-  if (!isRecord(runtime)) return fallback
-  if (runtime.temporarilyUnavailable === true || runtime.health === 'temporarily-unavailable') return { ...fallback, health: 'temporarily-unavailable' }
-  const installation = runtime.installed === false ? 'not-installed' : runtime.installed === true ? 'installed' : fallback.installation
-  const configuration = runtime.configured === true || runtime.connected === true ? 'configured'
-    : runtime.configured === false ? 'not-configured'
-      : fallback.configuration
-  const authorization = runtime.authorization === 'authorized' ? 'authorized'
-    : runtime.authorization === 'denied' || runtime.authorization === 'not-authorized' ? 'not-authorized'
-      : runtime.connected === true && typeof runtime.writable === 'boolean' ? 'authorized'
-        : fallback.authorization
-  const access = runtime.writable === true ? 'writable'
-    : runtime.writable === false ? 'read-only'
-      : fallback.access
-  const health = runtime.health === 'unavailable' ? 'unavailable' : fallback.health
-  return { installation, configuration, authorization, access, health }
+  return normalizeConnectorRuntime(definition?.id, integrations?.[definition?.id])
 }
 
 function readinessFor(runtime) {
-  if (runtime.health === 'temporarily-unavailable' || runtime.health === 'unavailable') return 'temporarily-unavailable'
-  if (runtime.installation === 'not-installed') return 'not-installed'
-  if (runtime.configuration === 'not-configured') return 'not-configured'
-  if (runtime.authorization === 'not-authorized') return 'not-authorized'
-  if (runtime.access === 'read-only') return 'read-only'
-  if (runtime.access === 'writable') return 'writable'
-  return 'available'
+  return getConnectorReadiness(runtime)
 }
 
 function actionFor(definition, id) {
-  return definition?.actions.find((action) => action.id === id) || null
+  return getConnectorAction(definition?.id, id)
 }
 
 function intendedActionFor(definition, { executionBridge = null, executionWorkflow = null } = {}) {
@@ -166,13 +81,7 @@ function intendedActionFor(definition, { executionBridge = null, executionWorkfl
 }
 
 function actionReadiness(definition, action, runtime, executionWorkflow) {
-  if (!definition || !action) return 'temporarily-unavailable'
-  if (action.publicRead === true && runtime.health === 'healthy') return 'available'
-  const connectorReadiness = readinessFor(runtime)
-  if (connectorReadiness !== 'available' && connectorReadiness !== 'writable') return connectorReadiness
-  if (action.access === 'write' && runtime.access === 'read-only') return 'read-only'
-  if (action.approval === 'required' && executionWorkflow?.approval !== 'approved') return 'approval-required'
-  return 'available'
+  return getConnectorActionReadiness(definition?.id, action?.id, runtime, { approvalRecorded: executionWorkflow?.approval === 'approved' })
 }
 
 function createResolvedConnector(id, { integrations = null, executionBridge = null, executionWorkflow = null } = {}) {
@@ -260,12 +169,15 @@ function candidateConnectorIds({ request = '', intent = null, executionBridge = 
   if (definitionFor(intent?.primaryTool)) add(intent.primaryTool)
   if (executionBridge?.target?.repository || ['repository', 'github'].includes(executionBridge?.target?.surface)) add('github')
   const requestIsAdvice = /\b(?:how should|how do|help me|advice|tips?|best way to)\b/i.test(text(request, 900))
-  Object.entries(EXTERNAL_SIGNALS).forEach(([id, signals]) => {
+  CONNECTOR_IDS
+    .filter((id) => definitionFor(id)?.kind === 'integration' && id !== 'github')
+    .forEach((id) => {
+      const signals = getConnectorSelectionSignals(id)
     // Mentioning an external product in an advice question is not a request
     // to invoke it. Keep ordinary conversational guidance in Chat and only
     // create a connector plan for an operational request.
-    if (!requestIsAdvice && intent?.isOperational && mentionsAny(request, signals)) add(id)
-  })
+      if (!requestIsAdvice && intent?.isOperational && signals.length && mentionsAny(request, signals)) add(id)
+    })
   return ids
 }
 
@@ -318,7 +230,7 @@ export function getChatConnectorPlan({ request = '', intent = null, executionBri
 }
 
 function normalizeConnector(value) {
-  if (!isRecord(value) || !CONNECTOR_IDS.has(value.id) || !CONNECTOR_KINDS.has(value.kind) || !isChatConnectorScope(value.scope)) return null
+  if (!isRecord(value) || !CONNECTOR_IDS.includes(value.id) || !CONNECTOR_KINDS.has(value.kind) || !isChatConnectorScope(value.scope)) return null
   if (!isChatConnectorInstallation(value.installation) || !isChatConnectorConfiguration(value.configuration) || !isChatConnectorAuthorization(value.authorization) || !isChatConnectorAccess(value.access) || !isChatConnectorHealth(value.health) || !isChatConnectorReadiness(value.readiness)) return null
   const definition = definitionFor(value.id)
   const action = actionFor(definition, value.action)
@@ -347,9 +259,9 @@ export function normalizeConnectorPlan(value) {
       return items
     }, [])
     : []
-  const primary = CONNECTOR_IDS.has(value.primary) && connectors.some((connector) => connector.id === value.primary) ? value.primary : ''
+  const primary = CONNECTOR_IDS.includes(value.primary) && connectors.some((connector) => connector.id === value.primary) ? value.primary : ''
   const fallback = isRecord(value.fallback) && ['connector', 'manual'].includes(value.fallback.kind)
-    ? value.fallback.kind === 'connector' && CONNECTOR_IDS.has(value.fallback.id)
+    ? value.fallback.kind === 'connector' && CONNECTOR_IDS.includes(value.fallback.id)
       ? Object.freeze({ kind: 'connector', id: value.fallback.id, label: text(value.fallback.label, 100) || `${definitionFor(value.fallback.id).label} is an acceptable fallback` })
       : value.fallback.kind === 'manual'
         ? Object.freeze({ kind: 'manual', label: text(value.fallback.label, 100) || 'Continue in Chat with manual guidance' })
@@ -439,6 +351,9 @@ const ACTION_EVIDENCE = Object.freeze({
   'code:handoff-opened': Object.freeze({ connector: 'code', action: 'code', state: 'handed-off', evidence: 'externally-unverified' }),
   'youtube:handoff-opened': Object.freeze({ connector: 'youtube', action: 'youtube', state: 'handed-off', evidence: 'externally-unverified' }),
   'inspect-repo:inspection-completed': Object.freeze({ connector: 'github', action: 'inspect-repo', state: 'completed', evidence: 'externally-verified' }),
+  'prepare-branch:branch-prepared': Object.freeze({ connector: 'github', action: 'prepare-branch', state: 'planned', evidence: 'locally-verified' }),
+  'prepare-execution:execution-prepared': Object.freeze({ connector: 'github', action: 'prepare-execution', state: 'planned', evidence: 'locally-verified' }),
+  'approve-execution:approval-recorded': Object.freeze({ connector: 'github', action: 'approve-execution', state: 'planned', evidence: 'locally-verified' }),
   'create-branch:branch-created': Object.freeze({ connector: 'github', action: 'create-branch', state: 'completed', evidence: 'externally-verified' }),
   'create-branch:execution-blocked': Object.freeze({ connector: 'github', action: 'create-branch', state: 'blocked', evidence: 'failure-recorded' }),
   'apply-file-change:change-applied': Object.freeze({ connector: 'github', action: 'apply-file-change', state: 'completed', evidence: 'externally-verified' }),
@@ -446,7 +361,8 @@ const ACTION_EVIDENCE = Object.freeze({
   'validate:validation-recorded': Object.freeze({ connector: 'github', action: 'validate', state: 'planned', evidence: 'externally-unverified' }),
   'validate:validation-passed': Object.freeze({ connector: 'github', action: 'validate', state: 'completed', evidence: 'externally-verified' }),
   'validate:validation-failed': Object.freeze({ connector: 'github', action: 'validate', state: 'blocked', evidence: 'failure-recorded' }),
-  'review:review-ready': Object.freeze({ connector: 'github', action: 'validate', state: 'completed', evidence: 'externally-verified' }),
+  'review:review-ready': Object.freeze({ connector: 'github', action: 'review', state: 'completed', evidence: 'externally-verified' }),
+  'retry-execution:execution-retried': Object.freeze({ connector: 'github', action: 'retry-execution', state: 'completed', evidence: 'locally-verified' }),
 })
 
 /** Standardize recorded action facts across future connectors without inferring a result. */
@@ -456,12 +372,22 @@ export function getConnectorActionEvidence({ id, status } = {}) {
 }
 
 export function normalizeConnectorActionEvidence(value) {
-  if (!isRecord(value) || !CONNECTOR_IDS.has(value.connector) || !isChatConnectorEvidence(value.evidence) || !['planned', 'handed-off', 'completed', 'blocked', 'cancelled'].includes(value.state)) return null
+  if (!isRecord(value) || !CONNECTOR_IDS.includes(value.connector) || !isChatConnectorEvidence(value.evidence) || !['planned', 'handed-off', 'completed', 'blocked', 'cancelled'].includes(value.state)) return null
   if (!actionFor(definitionFor(value.connector), value.action)) return null
   return Object.freeze({ connector: value.connector, action: value.action, state: value.state, evidence: value.evidence })
 }
 
 export function getConnectorRegistryEntry(id) {
   const definition = definitionFor(id)
-  return definition ? Object.freeze({ id: definition.id, label: definition.label, kind: definition.kind, scope: definition.scope, actions: definition.actions.map((action) => Object.freeze({ ...action })) }) : null
+  return definition
+    ? Object.freeze({
+      id: definition.id,
+      label: definition.label,
+      kind: definition.kind,
+      scope: definition.scope,
+      // The compatibility view keeps routing metadata only. Evidence remains
+      // owned by the shared action gateway and durable execution trail.
+      actions: definition.actions.map(({ evidence, ...action }) => Object.freeze(action)),
+    })
+    : null
 }
